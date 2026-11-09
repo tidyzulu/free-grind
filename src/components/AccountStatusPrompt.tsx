@@ -7,6 +7,7 @@ import {
 	CircleCheck,
 	Clock,
 	Copy,
+	Download,
 	ExternalLink,
 	Globe,
 	Info,
@@ -20,6 +21,10 @@ import {
 } from "lucide-react";
 import toast from "react-hot-toast";
 import { BotFilled, ClockFilled, UserFilled } from "./icons/FilledIcons";
+import { BackupExportSheet } from "./BackupExportSheet";
+import { useDesktopBreakpoint } from "../hooks/useDesktopBreakpoint";
+import { BACKUP_CATEGORY_IDS } from "../services/backupRestore";
+import { chatDbFileNameFor, hasChatDbFile } from "../services/chatDb";
 import { FullscreenPrompt, fullscreenPrimaryButtonClass, fullscreenSecondaryButtonClass, fullscreenCardClass } from "./FullscreenPrompt";
 import { CardDetailsSheet, GuidelineBlock, RichText } from "./GuidelineViolationParts";
 import { useAuth } from "../contexts/useAuth";
@@ -355,7 +360,7 @@ const META_ICON_CLASS = "mt-px h-4 w-4 shrink-0 text-[var(--accent)]";
 function BlockCard({ block }: { block: BlockInfo }) {
 	const { t } = useTranslation();
 	return (
-		<section className={`${fullscreenCardClass} px-4 py-4 text-left`}>
+		<section className={`${fullscreenCardClass} px-4 py-4 text-start`}>
 			<div className="flex items-center justify-between gap-3">
 				<p className={CARD_LABEL_CLASS}>{t("account_status.what_happened", { defaultValue: "What happened" })}</p>
 				<span className="shrink-0 rounded-full ink-tint-8 px-2.5 py-0.5 text-[11px] font-semibold tabular-nums text-[var(--text-muted)]">
@@ -391,7 +396,7 @@ function ReasonCard({ ban, expiresAt, now }: { ban: BanSummary; expiresAt?: numb
 	const remaining = expiresAt != null ? expiryMs(expiresAt) - now : 0;
 
 	return (
-		<section className={`${fullscreenCardClass} overflow-hidden text-left`}>
+		<section className="native-group text-start">
 			<div className="px-4 py-4">
 				<div className="flex items-center justify-between gap-3">
 					<p className={CARD_LABEL_CLASS}>{t("account_status.reason_label", { defaultValue: "Ban reason" })}</p>
@@ -445,7 +450,7 @@ function ReasonCard({ ban, expiresAt, now }: { ban: BanSummary; expiresAt?: numb
 
 function DetailList({ details }: { details: Detail[] }) {
 	return (
-		<dl className={`${fullscreenCardClass} divide-y divide-[var(--border)] overflow-hidden text-left`}>
+		<dl className={"native-group text-start"}>
 			{details.map(({ icon: Icon, label, value }) => (
 				<div key={label} className="flex items-center gap-3 px-4 py-3.5">
 					<div className="shrink-0 rounded-2xl ink-tint-8 p-2.5 text-[var(--accent)]">
@@ -466,7 +471,7 @@ function AgreementCheckbox({ checked, onChange, disabled }: { checked: boolean; 
 	const { t } = useTranslation();
 	return (
 		<label
-			className={`flex cursor-pointer items-start gap-3 rounded-2xl px-4 py-3.5 text-left transition active:scale-[0.99] native-card ${checked ? "accent-tint-18" : "hover:brightness-110"}`}
+			className={`flex cursor-pointer items-start gap-3 rounded-2xl px-4 py-3.5 text-start transition active:scale-[0.99] native-card ${checked ? "accent-tint-18" : "hover:brightness-110"}`}
 		>
 			<input type="checkbox" className="sr-only" checked={checked} disabled={disabled} onChange={(event) => onChange(event.target.checked)} />
 			<span
@@ -493,17 +498,44 @@ function AgreementCheckbox({ checked, onChange, disabled }: { checked: boolean; 
 	);
 }
 
+/** Whether this device has local data for the profile, i.e. anything to back up into a new profile. */
+function useHasLocalData(profileId: number | null | undefined): boolean {
+	const [hasData, setHasData] = useState(false);
+
+	useEffect(() => {
+		setHasData(false);
+		if (profileId == null) return;
+		let cancelled = false;
+		hasChatDbFile(profileId)
+			.then((found) => {
+				if (!cancelled) setHasData(found);
+			})
+			.catch(() => {});
+		return () => {
+			cancelled = true;
+		};
+	}, [profileId]);
+
+	return profileId != null && hasData;
+}
+
 export function AccountStatusPromptView({
 	status,
+	backupProfileId,
 	onSignOut,
 	onAcceptBanAgreement,
 }: {
 	status: AccountStatus;
+	/** The profile whose local data the "Back up data" button exports; hidden when null. */
+	backupProfileId?: number | null;
 	onSignOut: () => void;
 	onAcceptBanAgreement?: () => Promise<void>;
 }) {
 	const { t } = useTranslation();
 	const now = useTimedBanNow(status);
+	const isDesktop = useDesktopBreakpoint();
+	const canBackup = useHasLocalData(backupProfileId);
+	const [showBackupSheet, setShowBackupSheet] = useState(false);
 	const [accepting, setAccepting] = useState(false);
 	const [agreed, setAgreed] = useState(false);
 	// banDetails.isAgreementCompleted decides when Grindr says; only without
@@ -550,6 +582,14 @@ export function AccountStatusPromptView({
 	}
 	if (copyDetails) {
 		links.push({ key: "copy", icon: Copy, label: t("account_status.banned.copy_details", { defaultValue: "Copy details" }), onClick: copyDetails });
+	}
+	if (canBackup) {
+		links.push({
+			key: "backup",
+			icon: Download,
+			label: t("account_status.backup_data", { defaultValue: "Back up data" }),
+			onClick: () => setShowBackupSheet(true),
+		});
 	}
 
 	const acceptBanAgreement =
@@ -633,6 +673,18 @@ export function AccountStatusPromptView({
 					{acceptBanAgreement ? <AgreementCheckbox checked={agreed} onChange={setAgreed} disabled={accepting} /> : null}
 				</div>
 			) : null}
+			{showBackupSheet && backupProfileId != null ? (
+				<BackupExportSheet
+					profileId={backupProfileId}
+					dbFileName={chatDbFileNameFor(backupProfileId)}
+					categories={BACKUP_CATEGORY_IDS}
+					// A hard ban has no session: favorites then come from the local conversations, without notes.
+					offline={status?.kind === "banned"}
+					isDesktop={isDesktop}
+					zIndex="z-[150]"
+					onClose={() => setShowBackupSheet(false)}
+				/>
+			) : null}
 		</FullscreenPrompt>
 	);
 }
@@ -646,7 +698,7 @@ export function AccountStatusPromptView({
  * an asynchronous auth:banned event pushed mid-session.
  */
 export function AccountStatusGate({ children }: { children: ReactNode }) {
-	const { accountStatus, acceptBanAgreement } = useAuth();
+	const { accountStatus, userId, acceptBanAgreement } = useAuth();
 	const logoutToNextAccount = useLogoutToNextAccount();
 
 	if (!accountStatus) {
@@ -657,6 +709,7 @@ export function AccountStatusGate({ children }: { children: ReactNode }) {
 		<div className="app-shell">
 			<AccountStatusPromptView
 				status={accountStatus}
+				backupProfileId={accountStatus.kind === "banned" ? accountStatus.profileId : userId}
 				onSignOut={() => void logoutToNextAccount().catch(() => {})}
 				onAcceptBanAgreement={acceptBanAgreement}
 			/>

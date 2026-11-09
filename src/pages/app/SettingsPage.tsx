@@ -1,6 +1,8 @@
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
+import { RestoreStatusEntry } from "../../components/RestoreStatus";
 import { useLogoutToNextAccount } from "../../hooks/useLogoutToNextAccount";
 import { getVersion } from "@tauri-apps/api/app";
+import { RELEASES_URL } from "../../config/links-config";
 import { invoke } from "@tauri-apps/api/core";
 import { PageHeaderBackground } from "../../components/ui/PageHeaderBackground";
 import { FeedScrollContainer } from "../../components/ui/FeedScrollContainer";
@@ -21,6 +23,7 @@ import {
 	RefreshCcw,
 	Search,
 	Terminal,
+	Cable,
 	X,
 	ScrollText,
 	Share2,
@@ -28,13 +31,15 @@ import {
 	Ban,
 	Clock,
 	Pointer,
+	KeyRound,
 } from "lucide-react";
 import { SlidersHorizontal as PhosphorSlidersHorizontal } from "@phosphor-icons/react";
-import { ArchiveRestoreFilled, BellFilled, BotFilled, BugFilled, ClipboardListFilled, EyeFilled, EyeOffFilled, FileUpFilled, FlaskConicalFilled, HeartPulseFilled, ImagesFilled, InfoFilled, MegaphoneFilled, PaletteFilled, PuzzleFilled, ShieldFilled, TriangleAlertFilled, UserPlusFilled, UserXFilled, ZapFilled } from "../../components/icons/FilledIcons";
+import { ArchiveRestoreFilled, BellFilled, BotFilled, BugFilled, ClipboardListFilled, EyeFilled, EyeOffFilled, FileUpFilled, FlaskConicalFilled, GhostFilled, HeartPulseFilled, ImagesFilled, InfoFilled, MegaphoneFilled, GlobeFilled, PaletteFilled, PuzzleFilled, ShieldFilled, TriangleAlertFilled, UserPlusFilled, UserXFilled, ZapFilled } from "../../components/icons/FilledIcons";
 import { useState, useEffect, useMemo, useRef, useSyncExternalStore, type CSSProperties } from "react";
 import toast from "react-hot-toast";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
+import semver from "semver";
 import { appLog } from "../../utils/logger";
 import { useAuth } from "../../contexts/useAuth";
 import { usePreferences } from "../../contexts/PreferencesContext";
@@ -58,7 +63,9 @@ import {
 import { ToggleRow } from "../../components/ui/toggle-row";
 import { hasDemoProfileImages, isDemoProfileImagesEnabled, setDemoProfileImagesEnabled } from "../../utils/demoProfileImages";
 import { UpdateChannelSheet } from "./UpdateChannelSheet";
+import { TransferAccountSheet } from "./TransferAccountSheet";
 import { FingerprintCheckSheet } from "./settings-dev/DiagnosticsSheets";
+import { SeasonalOverlaysSheet } from "./settings-dev/SeasonalOverlaysSheet";
 import { NATIVE_SHEET_BG, SheetActionList, afterSheetClose } from "../../components/ui/action-sheet";
 import { ControlledBottomSheet } from "../../components/ui/controlled-sheet";
 import { SHEET_FIELD_CLASS } from "../../components/ui/sheet-section";
@@ -67,32 +74,56 @@ import { useDesktopBreakpoint } from "../../hooks/useDesktopBreakpoint";
 import { ConfirmDialog } from "../../components/ui/confirm-dialog";
 import { useFingerprintCheck } from "../../components/FingerprintCheckButton";
 import { VersionAnnouncement } from "../../components/VersionAnnouncement";
+import { FullscreenPortal } from "../../components/FullscreenPrompt";
 import { VERSION_ANNOUNCEMENTS } from "../../data/versionAnnouncements";
 import { OutdatedVersionPromptView, fetchLatestRelease, isOlderVersion, type ReleaseInfo } from "../../components/OutdatedVersionPrompt";
 import { AccountStatusPromptView } from "../../components/AccountStatusPrompt";
-import type { AccountStatus } from "../../contexts/auth-context";
+import { TestReminderPromptView } from "../../components/TestReminderPrompt";
+import { TokenExpiredPromptView } from "../../components/TokenExpiredPrompt";
+import type { AccountStatus, SavedAccountMeta } from "../../contexts/auth-context";
 import { areUpdateChecksEnabled, setUpdateChecksEnabled, subscribeUpdateChecks } from "../../services/updateChecks";
 import { Avatar } from "../../components/ui/avatar";
 import { getThumbImageUrl } from "../../utils/media";
 import { getSavedAccountProfile, removeSavedAccountProfile } from "../../services/savedAccountProfiles";
-import { isAndroid } from "../../services/saveMedia";
+import { isAndroid, isIos } from "../../services/saveMedia";
+import { saveIssueLogsFile } from "../../utils/issueTelemetry";
 import { useSettingsSearchIndex } from "../../data/settingsSearchIndex";
 import { isSexualHealthEnabled } from "../../utils/optionalFeatures";
 import { replayOnboarding } from "../../utils/onboardingStorage";
 import { resetGridGesturesIntro } from "./gridpage/components/GridGesturesIntro";
+import { resetInterestOnboarding } from "./interest/InterestOnboardingModal";
 import { replayRestoreOffer } from "../../utils/restoreOfferStorage";
 import { showLegalAgreementsPrompt } from "../../utils/legalAgreementsDebug";
 import { showAccountWarningsPrompt } from "../../utils/accountWarningsDebug";
 import { showSharePickerDebug } from "../../utils/sharePickerDebug";
+import { showLgbtqRiskCountryWarning } from "../../utils/lgbtqRiskCountryDebug";
 import { GITHUB_ISSUES_URL, GITHUB_NEW_ISSUE_URL, openExternalUrl } from "../../utils/githubIssues";
 import { SheetClose, SheetCloseButton, SHEET_FOOTER_CLASS, sheetButtonClass } from "../../components/ui/bottom-sheet";
 
 // Always previews whichever entry was added/edited most recently, regardless
 // of whether it matches the app's current running version yet.
 const LATEST_ANNOUNCEMENT = VERSION_ANNOUNCEMENTS[VERSION_ANNOUNCEMENTS.length - 1] ?? null;
+
+/**
+ * "What's new" for the running version: its own entry (a pre-release shares
+ * its final version's one), else the newest one released before it.
+ */
+function findCurrentAnnouncement(appVersion: string) {
+	const release = semver.coerce(appVersion)?.version;
+	const exact =
+		VERSION_ANNOUNCEMENTS.find((a) => a.version === appVersion) ??
+		VERSION_ANNOUNCEMENTS.find((a) => a.version === release);
+	if (exact || !release) return exact ?? null;
+	return (
+		VERSION_ANNOUNCEMENTS.filter((a) => semver.valid(a.version) && semver.lte(a.version, release)).sort((a, b) =>
+			semver.rcompare(a.version, b.version),
+		)[0] ?? null
+	);
+}
 const PREVIEW_RELEASE_INFO = {
 	latestVersion: "9.9.9",
-	releasesUrl: "https://github.com/fdev8974/free-grind/releases",
+	releasesUrl: RELEASES_URL,
+	commit: "development",
 	releases: [
 		{ version: "9.9.9", publishedAt: new Date(Date.now() - 2 * 86_400_000).toISOString() },
 		{ version: "9.9.8", publishedAt: new Date(Date.now() - 12 * 86_400_000).toISOString() },
@@ -102,18 +133,22 @@ const PREVIEW_RELEASE_INFO = {
 const PREVIEW_BAN_STATUS: AccountStatus = {
 	kind: "banned",
 	info: { kind: "profile", code: 27, message: "Profile is banned", subReason: "DRUG_SALES", automated: true },
+	profileId: null,
 };
 const PREVIEW_DEVICE_BAN_STATUS: AccountStatus = {
 	kind: "banned",
 	info: { kind: "device", code: 28, message: "Account banned" },
+	profileId: null,
 };
 const PREVIEW_NETWORK_BAN_STATUS: AccountStatus = {
 	kind: "banned",
 	info: { kind: "network", code: 31, message: "Suspicious network" },
+	profileId: null,
 };
 const PREVIEW_UNDERAGE_BAN_STATUS: AccountStatus = {
 	kind: "banned",
 	info: { kind: "underage", code: 35, message: "Underage", subReason: "UNDERAGE_ACCESS", automated: false },
+	profileId: null,
 };
 // Built on selection so the expiry is relative to now: still running, or
 // already over with the ban agreement waiting to be accepted.
@@ -260,6 +295,7 @@ function ContributorChannelDialog({
 	onCancel: () => void;
 	isProcessing: boolean;
 }) {
+	const { t } = useTranslation();
 	const isDesktop = useDesktopBreakpoint();
 	const inputRef = useRef<HTMLInputElement | null>(null);
 
@@ -280,12 +316,12 @@ function ContributorChannelDialog({
 			panelClassName="max-h-[92dvh] px-4"
 		>
 			<div className="mb-3 flex shrink-0 items-center justify-between gap-3">
-				<h3 className="text-sm font-semibold text-[var(--text)]">Contributor Channel</h3>
+				<h3 className="text-sm font-semibold text-[var(--text)]">{t("settings.contributor.title")}</h3>
 				<SheetCloseButton disabled={isProcessing} />
 			</div>
 			<div className="-mx-4 min-h-0 flex-1 overflow-y-auto px-4 pb-2" data-lenis-prevent>
 				<p className="mb-3 px-1 text-sm leading-relaxed text-[var(--text-muted)]">
-					Receive experimental builds from a community contributor's channel. Use at your own risk.
+					{t("settings.contributor.desc")}
 				</p>
 				<input
 					ref={inputRef}
@@ -295,7 +331,7 @@ function ContributorChannelDialog({
 					onKeyDown={(event) => {
 						if (event.key === "Enter") onSubmit();
 					}}
-					placeholder="contributor-handle"
+					placeholder={t("settings.contributor.placeholder")}
 					maxLength={32}
 					disabled={isProcessing}
 					enterKeyHint="go"
@@ -304,7 +340,7 @@ function ContributorChannelDialog({
 			</div>
 			<div className={SHEET_FOOTER_CLASS}>
 				<SheetClose disabled={isProcessing} className={sheetButtonClass("secondary")}>
-					Cancel
+					{t("common.cancel")}
 				</SheetClose>
 				<button
 					type="button"
@@ -313,7 +349,7 @@ function ContributorChannelDialog({
 					className={sheetButtonClass()}
 				>
 					{isProcessing ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
-					<span>Activate</span>
+					<span>{t("settings.contributor.activate")}</span>
 				</button>
 			</div>
 		</ControlledBottomSheet>
@@ -323,6 +359,14 @@ function ContributorChannelDialog({
 export function SettingsPage() {
 	const { t } = useTranslation();
 	const { userId, savedAccounts, switchAccount, removeSavedAccount } = useAuth();
+	// A Google/Facebook account's `email` is the vendor's id, often opaque:
+	// without a profile name, the profile id says more.
+	const accountName = (profileId: string, account: SavedAccountMeta | undefined, displayName: string | null | undefined) =>
+		displayName ||
+		((account?.kind ?? "Email") === "Email" ? account?.email : null) ||
+		t("settings.account_profile_fallback", { defaultValue: "Profile {{id}}", id: profileId });
+	const withSignInMethod = (account: SavedAccountMeta | undefined, text: string) =>
+		account?.kind === "Google" || account?.kind === "Facebook" ? `${account.kind} · ${text}` : text;
 	const inboxSyncStatus = useInboxSyncStatus(userId);
 	const inboxSyncDisplay = describeInboxSyncStatus(inboxSyncStatus, t);
 	const [searchQuery, setSearchQuery] = useState("");
@@ -347,9 +391,23 @@ export function SettingsPage() {
 	const navigate = useNavigate();
 	const logoutToNextAccount = useLogoutToNextAccount();
 	const { developerMode, showDebugInfo, setPreferences } = usePreferences();
+	const handleExportLogs = async () => {
+		try {
+			const fileName = await saveIssueLogsFile();
+			toast.success(
+				isAndroid() || !isIos()
+					? `Saved to Downloads/FreeGrind/${fileName}`
+					: `Saved to Files → On My iPhone/iPad → Free Grind/${fileName}`,
+			);
+		} catch (error) {
+			toast.error(error instanceof Error ? error.message : "Export failed");
+		}
+	};
 	const [previewAnnouncement, setPreviewAnnouncement] = useState(false);
 	const [previewOutdatedPrompt, setPreviewOutdatedPrompt] = useState(false);
 	const [previewAccountStatus, setPreviewAccountStatus] = useState<AccountStatus>(null);
+	const [previewTestReminder, setPreviewTestReminder] = useState(false);
+	const [previewTokenExpired, setPreviewTokenExpired] = useState(false);
 	const [isCheckingUpdates, setIsCheckingUpdates] = useState(false);
 	// App release found by a manual check — shown as the APK update prompt.
 	const [appUpdateRelease, setAppUpdateRelease] = useState<ReleaseInfo | null>(null);
@@ -359,12 +417,24 @@ export function SettingsPage() {
 	const fingerprintCheck = useFingerprintCheck();
 	const [isFingerprintSheetOpen, setIsFingerprintSheetOpen] = useState(false);
 	const [isPreviewsSheetOpen, setIsPreviewsSheetOpen] = useState(false);
+	const [isSeasonalSheetOpen, setIsSeasonalSheetOpen] = useState(false);
 	const [isChannelSheetOpen, setIsChannelSheetOpen] = useState(false);
+	const [isTransferSheetOpen, setIsTransferSheetOpen] = useState(false);
 	const isDesktop = useDesktopBreakpoint();
+	const location = useLocation();
+
+	// The settings search links to the transfer sheet as /settings#transfer-account.
+	useEffect(() => {
+		if (location.hash !== "#transfer-account") return;
+		navigate("/settings", { replace: true });
+		setIsTransferSheetOpen(true);
+	}, [location.hash, navigate]);
 	const [updateChannel, setUpdateChannel] =
 		useState<HotswapChannel>(getCurrentHotswapChannel());
 	const visibleChannels = getHotswapChannels();
 	const frontendVersion = import.meta.env.VITE_APP_VERSION;
+	const currentAnnouncement = useMemo(() => findCurrentAnnouncement(frontendVersion), [frontendVersion]);
+	const [showCurrentAnnouncement, setShowCurrentAnnouncement] = useState(false);
 	const commitHash: string = import.meta.env.VITE_COMMIT_HASH ?? "";
 	// The installed app (APK / desktop binary) can lag behind the frontend when an
 	// OTA bundle was applied on top of it, so show both when they differ.
@@ -519,7 +589,7 @@ export function SettingsPage() {
 	const handleActivateContributorChannel = async () => {
 		const handle = contributorCodeInput.trim().toLowerCase();
 		if (!handle || !/^[a-z0-9_-]{1,32}$/.test(handle)) {
-			toast.error("Enter a valid contributor code (letters, numbers, _ or -).");
+			toast.error(t("settings.contributor.invalid_code"));
 			return;
 		}
 
@@ -537,12 +607,12 @@ export function SettingsPage() {
 
 			const result = await checkForHotswapUpdate();
 			if (!result.available) {
-				toast.success(`Switched to ${handle}'s channel. No update available yet.`);
+				toast.success(t("settings.contributor.switched_no_update", { handle }));
 				window.location.reload();
 				return;
 			}
 			if (result.requiresBinaryUpdate) {
-				toast.error(result.notes ?? "Binary update required.");
+				toast.error(result.notes ?? t("settings.contributor.binary_update_required"));
 				return;
 			}
 			showHotswapUpdatePrompt({ version: result.version, notes: result.notes, autoStart: true });
@@ -550,7 +620,7 @@ export function SettingsPage() {
 			if (import.meta.env.DEV) {
 				appLog.error("Contributor channel switch failed:", error);
 			}
-			toast.error("Failed to switch to contributor channel.");
+			toast.error(t("settings.contributor.switch_failed"));
 		} finally {
 			setIsActivatingContributor(false);
 		}
@@ -577,7 +647,7 @@ export function SettingsPage() {
 				{right ?? <ChevronRight className="h-4 w-4 shrink-0 text-[var(--text-muted)] opacity-50" />}
 			</>
 		);
-		const cls = `flex w-full items-center gap-3 px-4 py-3.5 text-left transition-colors ${disabled ? "opacity-50 cursor-not-allowed" : "hover:bg-[var(--surface-2)] active:bg-[var(--surface-2)]"}`;
+		const cls = `flex w-full items-center gap-3 px-4 py-3.5 text-start transition-colors ${disabled ? "opacity-50 cursor-not-allowed" : "hover-fill"}`;
 		return onClick ? (
 			<button type="button" onClick={onClick} disabled={disabled} className={cls}>
 				{inner}
@@ -589,52 +659,100 @@ export function SettingsPage() {
 
 	if (previewAnnouncement && LATEST_ANNOUNCEMENT) {
 		return (
-			<div className="app-shell z-[300]">
+			<FullscreenPortal className="z-[300]">
 				<VersionAnnouncement
 					announcement={LATEST_ANNOUNCEMENT}
 					buttonLabel={t("common.close", { defaultValue: "Close" })}
 					onClose={() => setPreviewAnnouncement(false)}
 				/>
-			</div>
+			</FullscreenPortal>
+		);
+	}
+
+	if (showCurrentAnnouncement && currentAnnouncement) {
+		return (
+			<FullscreenPortal className="z-[300]">
+				<VersionAnnouncement
+					announcement={currentAnnouncement}
+					appVersion={
+						currentAnnouncement.version === semver.coerce(frontendVersion)?.version ? frontendVersion : undefined
+					}
+					buttonLabel={t("common.close", { defaultValue: "Close" })}
+					onClose={() => setShowCurrentAnnouncement(false)}
+				/>
+			</FullscreenPortal>
 		);
 	}
 
 	if (appUpdateRelease) {
 		return (
-			<div className="app-shell z-[110]">
+			<FullscreenPortal className="z-[110]">
 				<OutdatedVersionPromptView
 					appVersion={nativeVersion ?? frontendVersion}
 					releaseInfo={appUpdateRelease}
 					onDismiss={() => setAppUpdateRelease(null)}
 					manual
 				/>
-			</div>
+			</FullscreenPortal>
 		);
 	}
 
 	if (previewAccountStatus) {
 		return (
-			<div className="app-shell z-[110]">
+			<FullscreenPortal className="z-[110]">
 				<AccountStatusPromptView
 					status={previewAccountStatus}
+					backupProfileId={userId}
 					onSignOut={() => setPreviewAccountStatus(null)}
 					onAcceptBanAgreement={async () => setPreviewAccountStatus(null)}
 				/>
-			</div>
+			</FullscreenPortal>
+		);
+	}
+
+	if (previewTokenExpired) {
+		return (
+			<FullscreenPortal className="z-[110]">
+				<TokenExpiredPromptView onSignOut={() => setPreviewTokenExpired(false)} />
+			</FullscreenPortal>
+		);
+	}
+
+	if (previewTestReminder) {
+		return (
+			<FullscreenPortal className="z-[110]">
+				<TestReminderPromptView
+					onSave={() => setPreviewTestReminder(false)}
+					onSkip={() => setPreviewTestReminder(false)}
+				/>
+			</FullscreenPortal>
 		);
 	}
 
 	if (previewOutdatedPrompt) {
 		return (
-			<div className="app-shell z-[110]">
+			<FullscreenPortal className="z-[110]">
 				<OutdatedVersionPromptView
 					appVersion={import.meta.env.VITE_APP_VERSION}
 					releaseInfo={PREVIEW_RELEASE_INFO}
 					onDismiss={() => setPreviewOutdatedPrompt(false)}
 				/>
-			</div>
+			</FullscreenPortal>
 		);
 	}
+
+	// Your own profile, opened straight in its edit mode (see ProfileDetailsModal);
+	// on desktop as the modal over Settings, like profiles opened elsewhere.
+	const openOwnProfileEditor = () => {
+		if (userId == null) return;
+		navigate(`/profile/${userId}`, {
+			state: {
+				returnTo: `${location.pathname}${location.search}`,
+				editOwnProfile: true,
+				...(isDesktop ? { backgroundLocation: location } : {}),
+			},
+		});
+	};
 
 	return (
 		<section className="app-screen flex h-dvh w-full flex-col overflow-x-hidden !px-0 !pb-0">
@@ -642,13 +760,13 @@ export function SettingsPage() {
 			    accent glow over its own scroll container. Reached from the bottom nav, so no back button. */}
 			<header className="relative z-20 flex shrink-0 flex-col pb-3 pointer-events-none">
 				<PageHeaderBackground color="var(--accent)" />
-				<div className="pointer-events-auto mx-auto flex w-full max-w-[var(--content-max)] flex-col gap-3 px-[var(--app-px)]">
+				<div className="pointer-events-auto mx-auto flex w-full max-w-[var(--content-max)] rail:max-w-none flex-col gap-3 px-[var(--app-px)]">
 					<div className="flex items-center justify-between gap-2">
 						<div className="min-w-0">
 							<h1 className="app-title">{t("settings.title")}</h1>
 							{/* Caption under the title, styled like the inbox's sync caption. */}
 							{developerMode ? (
-								<p className="mt-0.5 text-[11px] font-medium text-[var(--accent-readable)]">Developer Mode</p>
+								<p className="mt-0.5 text-[11px] font-medium text-[var(--accent-readable)]">{t("settings.developer_mode_caption")}</p>
 							) : null}
 						</div>
 						<div className="-my-2 flex shrink-0 items-center gap-0.5">
@@ -686,7 +804,7 @@ export function SettingsPage() {
 								<button
 									type="button"
 									onClick={() => setSearchQuery("")}
-									className="shrink-0 rounded-full p-1 text-[var(--text-muted)] transition hover:bg-[var(--surface-2)] hover:text-[var(--text)]"
+									className="shrink-0 rounded-full p-1 text-[var(--text-muted)] transition hover-fill hover:text-[var(--text)]"
 									aria-label={t("common.clear", { defaultValue: "Clear" })}
 								>
 									<X className="h-4 w-4" />
@@ -699,7 +817,7 @@ export function SettingsPage() {
 
 			{/* Same scroll container as Interest / Right Now: fades content out under the header. */}
 			<FeedScrollContainer>
-				<div className="mx-auto w-full max-w-[var(--content-max)] px-[var(--app-px)] pt-3 pb-[calc(env(safe-area-inset-bottom,0px)+clamp(92px,10vw,114px))]">
+				<div className="mx-auto w-full max-w-[var(--content-max)] rail:max-w-none px-[var(--app-px)] pt-3 pb-[calc(var(--safe-area-bottom)+clamp(92px,10vw,114px))] rail:pb-[var(--page-bottom)]">
 					{searchQuery.trim() ? (
 						<div className="grid gap-6">
 							{searchResults.length === 0 ? (
@@ -707,7 +825,7 @@ export function SettingsPage() {
 									{t("settings.search_no_results", { query: searchQuery.trim() })}
 								</p>
 							) : (
-								<div className="native-card overflow-hidden divide-y divide-[var(--border)]">
+								<div className="native-group">
 									{searchResults.map((entry) => (
 										<button
 											key={entry.id}
@@ -719,7 +837,7 @@ export function SettingsPage() {
 												}
 												navigate(entry.anchor ? `${entry.route}#${entry.anchor}` : entry.route);
 											}}
-											className="flex w-full items-center gap-3 px-4 py-3.5 text-left transition-colors hover:bg-[var(--surface-2)] active:bg-[var(--surface-2)]"
+											className="flex w-full items-center gap-3 px-4 py-3.5 text-start transition-colors hover-fill"
 										>
 											<div className={`rounded-2xl p-2.5 shrink-0 ${entry.iconClass}`}>
 												<entry.icon className="h-5 w-5" />
@@ -738,6 +856,8 @@ export function SettingsPage() {
 						</div>
 					) : (
 					<div className="grid gap-6">
+						{/* Only while restore work is still running in the background. */}
+						<RestoreStatusEntry variant="banner" />
 
 						{/* Profile — the active profile is the primary focus (tap it to edit
 						    your profile), with the account switcher folded in below it for
@@ -747,18 +867,18 @@ export function SettingsPage() {
 						    switching never shows a leftover account's data. */}
 						<div className="min-w-0">
 							<p className="mb-2 px-1 text-xs font-semibold uppercase tracking-widest text-[var(--text-muted)]">Profile</p>
-							<div className="native-card overflow-hidden divide-y divide-[var(--border)]">
+							<div className="native-group">
 								{(() => {
 									const activeAccount = userId != null
 										? savedAccounts.find((account) => String(userId) === account.profileId)
 										: undefined;
 									const activeProfile = userId != null ? getSavedAccountProfile(String(userId)) : null;
 									return (
-										<div className="flex items-center gap-1 transition-colors hover:bg-[var(--surface-2)] active:bg-[var(--surface-2)]">
+										<div className="flex items-center gap-1 transition-colors hover-fill">
 											<button
 												type="button"
-												onClick={() => navigate("/settings/profile-editor")}
-												className="flex min-w-0 flex-1 items-center gap-3 px-4 py-3.5 text-left"
+												onClick={openOwnProfileEditor}
+												className="flex min-w-0 flex-1 items-center gap-3 px-4 py-3.5 text-start"
 											>
 												<Avatar
 													src={activeProfile?.photoHash ? getThumbImageUrl(activeProfile.photoHash, "75x75") : null}
@@ -767,16 +887,16 @@ export function SettingsPage() {
 												/>
 												<div className="min-w-0 flex-1">
 													<p className="truncate text-sm font-semibold leading-snug">
-														{activeProfile?.displayName || activeAccount?.email || t("settings.profile_editor")}
+														{accountName(String(userId), activeAccount, activeProfile?.displayName)}
 													</p>
 													<p className="text-xs text-[var(--text-muted)] leading-snug mt-0.5">
-														{t("settings.profile_editor_desc")}
+														{withSignInMethod(activeAccount, t("settings.profile_editor_desc"))}
 													</p>
 												</div>
 											</button>
 											<button
 												type="button"
-												onClick={() => navigate("/settings/transfer-account")}
+												onClick={() => setIsTransferSheetOpen(true)}
 												aria-label={t("account_transfer.title", { defaultValue: "Sign in on another device" })}
 												title={t("account_transfer.title", { defaultValue: "Sign in on another device" })}
 												className="shrink-0 rounded-full p-2.5 text-[var(--text-muted)] transition hover:ink-tint-10 hover:text-[var(--text)]"
@@ -787,7 +907,7 @@ export function SettingsPage() {
 												type="button"
 												onClick={() => setLogoutConfirmTarget("active")}
 												aria-label={t("settings.logout")}
-												className="mr-2 shrink-0 rounded-full p-2.5 text-[var(--text-muted)] transition hover:bg-red-500/12 hover:text-red-500"
+												className="me-2 shrink-0 rounded-full p-2.5 text-[var(--text-muted)] transition hover:bg-red-500/12 hover:text-red-500"
 											>
 												<LogOut className="h-4 w-4" />
 											</button>
@@ -802,12 +922,12 @@ export function SettingsPage() {
 										const isRemoving = removingProfileId === account.profileId;
 										const savedProfile = getSavedAccountProfile(account.profileId);
 										return (
-											<div key={account.profileId} className="flex items-center gap-1 transition-colors hover:bg-[var(--surface-2)] active:bg-[var(--surface-2)]">
+											<div key={account.profileId} className="flex items-center gap-1 transition-colors hover-fill">
 												<button
 													type="button"
 													onClick={() => void handleSwitchAccount(account.profileId)}
 													disabled={isSwitching || isRemoving}
-													className="flex min-w-0 flex-1 items-center gap-3 px-4 py-3.5 text-left disabled:cursor-not-allowed"
+													className="flex min-w-0 flex-1 items-center gap-3 px-4 py-3.5 text-start disabled:cursor-not-allowed"
 												>
 													<div className="relative h-10 w-10 shrink-0">
 														<Avatar
@@ -823,10 +943,10 @@ export function SettingsPage() {
 													</div>
 													<div className="min-w-0 flex-1">
 														<p className="truncate text-sm font-semibold leading-snug">
-															{savedProfile.displayName || account.email || account.profileId}
+															{accountName(account.profileId, account, savedProfile.displayName)}
 														</p>
 														<p className="text-xs text-[var(--text-muted)] leading-snug mt-0.5">
-															{t("settings.account_tap_to_switch", { defaultValue: "Tap to switch" })}
+															{withSignInMethod(account, t("settings.account_tap_to_switch", { defaultValue: "Tap to switch" }))}
 														</p>
 													</div>
 												</button>
@@ -835,7 +955,7 @@ export function SettingsPage() {
 													onClick={() => setLogoutConfirmTarget(account.profileId)}
 													disabled={isSwitching || isRemoving}
 													aria-label={t("settings.logout")}
-													className="mr-2 shrink-0 rounded-full p-2.5 text-[var(--text-muted)] transition hover:bg-red-500/12 hover:text-red-500 disabled:opacity-60"
+													className="me-2 shrink-0 rounded-full p-2.5 text-[var(--text-muted)] transition hover:bg-red-500/12 hover:text-red-500 disabled:opacity-60"
 												>
 													{isRemoving ? <Loader2 className="h-4 w-4 animate-spin" /> : <LogOut className="h-4 w-4" />}
 												</button>
@@ -845,7 +965,7 @@ export function SettingsPage() {
 								<button
 									type="button"
 									onClick={() => navigate("/auth/sign-in?mode=add-profile")}
-									className="flex w-full items-center gap-3 px-4 py-3.5 text-left transition-colors hover:bg-[var(--surface-2)] active:bg-[var(--surface-2)]"
+									className="flex w-full items-center gap-3 px-4 py-3.5 text-start transition-colors hover-fill"
 								>
 									<div className="rounded-2xl bg-slate-500/15 text-slate-400 p-2.5 shrink-0">
 										<UserPlusFilled className="h-5 w-5" />
@@ -866,14 +986,14 @@ export function SettingsPage() {
 						{/* Chat */}
 						<div>
 							<p className="mb-2 px-1 text-xs font-semibold uppercase tracking-widest text-[var(--text-muted)]">Chat</p>
-							<div className="native-card overflow-hidden divide-y divide-[var(--border)]">
+							<div className="native-group">
 								<div className="flex items-center gap-3 px-4 py-3.5">
 									<div className="relative shrink-0">
 										<div className="rounded-2xl bg-slate-500/15 text-slate-400 p-2.5">
 											<DatabaseBackup className="h-5 w-5" />
 										</div>
 										<div
-											className={`absolute -bottom-1 -right-1 flex h-5 w-5 items-center justify-center rounded-full ring-2 ring-[var(--surface)] ${inboxSyncDisplay.badgeClass}`}
+											className={`absolute -bottom-1 -end-1 flex h-5 w-5 items-center justify-center rounded-full ring-2 ring-[var(--surface)] ${inboxSyncDisplay.badgeClass}`}
 											style={inboxSyncDisplay.badgeStyle}
 										>
 											{inboxSyncDisplay.badgeIcon}
@@ -922,7 +1042,7 @@ export function SettingsPage() {
 						{/* Safety */}
 						<div>
 							<p className="mb-2 px-1 text-xs font-semibold uppercase tracking-widest text-[var(--text-muted)]">Safety</p>
-							<div className="native-card overflow-hidden divide-y divide-[var(--border)]">
+							<div className="native-group">
 								{navRow(
 									() => navigate("/settings/blocked"),
 									<UserXFilled className="h-5 w-5" />,
@@ -971,7 +1091,7 @@ export function SettingsPage() {
 						{/* Customizability */}
 						<div>
 							<p className="mb-2 px-1 text-xs font-semibold uppercase tracking-widest text-[var(--text-muted)]">Customizability</p>
-							<div className="native-card overflow-hidden divide-y divide-[var(--border)]">
+							<div className="native-group">
 								{navRow(
 									() => navigate("/settings/customizability"),
 									<PaletteFilled className="h-5 w-5" />,
@@ -980,11 +1100,11 @@ export function SettingsPage() {
 									t("settings.customizability_desc"),
 								)}
 								{navRow(
-									() => navigate("/settings/behavior"),
-									<PhosphorSlidersHorizontal weight="fill" className="h-5 w-5" />,
-									"bg-slate-500/15 text-slate-400",
-									t("settings.behavior"),
-									t("settings.behavior_desc"),
+									() => navigate("/settings/regional"),
+									<GlobeFilled className="h-5 w-5" />,
+									"bg-teal-500/15 text-teal-400",
+									t("customizability.regional"),
+									t("settings.regional_desc", { defaultValue: "Language, units and time format." }),
 								)}
 								{navRow(
 									() => navigate("/settings/optional-features"),
@@ -994,6 +1114,13 @@ export function SettingsPage() {
 									t("customizability.optional_features_desc", {
 										defaultValue: "Turn extra features on or off to keep the app as simple as you like.",
 									}),
+								)}
+								{navRow(
+									() => navigate("/settings/behavior"),
+									<PhosphorSlidersHorizontal weight="fill" className="h-5 w-5" />,
+									"bg-slate-500/15 text-slate-400",
+									t("settings.behavior"),
+									t("settings.behavior_desc"),
 								)}
 								{navRow(
 									() => navigate("/settings/notifications"),
@@ -1017,7 +1144,7 @@ export function SettingsPage() {
 							<p className="mb-2 px-1 text-xs font-semibold uppercase tracking-widest text-[var(--text-muted)]">
 								{t("settings.data_section", { defaultValue: "Backup & Restore" })}
 							</p>
-							<div className="native-card overflow-hidden divide-y divide-[var(--border)]">
+							<div className="native-group">
 								{navRow(
 									() => navigate("/settings/data"),
 									<ArchiveRestoreFilled className="h-5 w-5" />,
@@ -1031,20 +1158,32 @@ export function SettingsPage() {
 						{/* Updates — same row pattern as the rest of the settings list. */}
 						<div className="min-w-0">
 							<p className="mb-2 px-1 text-xs font-semibold uppercase tracking-widest text-[var(--text-muted)]">Updates</p>
-							<div className="native-card overflow-hidden divide-y divide-[var(--border)]">
+							<div className="native-group">
+								{currentAnnouncement &&
+									navRow(
+										() => setShowCurrentAnnouncement(true),
+										<MegaphoneFilled className="h-5 w-5" />,
+										"bg-[var(--surface-2)] text-[var(--accent)]",
+										t("about_page.whats_new", { defaultValue: "What's New" }),
+										t("about_page.whats_new_desc", {
+											defaultValue: "Highlights of version {{version}}",
+											version: currentAnnouncement.version,
+										}),
+									)}
+
 								{/* The whole row checks; a spinner replaces the chevron while it runs. */}
 								<button
 									type="button"
 									onClick={() => void handleCheckUpdates()}
 									disabled={isCheckingUpdates || isSwitchingChannel}
-									className="flex w-full items-center gap-3 px-4 py-3.5 text-left transition-colors hover:bg-[var(--surface-2)] active:bg-[var(--surface-2)] disabled:cursor-default disabled:hover:bg-transparent"
+									className="flex w-full items-center gap-3 px-4 py-3.5 text-start transition-colors hover-fill disabled:cursor-default"
 								>
 									<div className="relative shrink-0">
 										<div className="rounded-2xl bg-green-500/15 p-2.5 text-green-400">
 											<RefreshCcw className="h-5 w-5" />
 										</div>
 										{isContributorChannel(updateChannel) && (
-											<div className="absolute -bottom-1 -right-1 flex h-5 w-5 items-center justify-center rounded-full bg-[var(--accent)] text-[var(--accent-contrast)] ring-2 ring-[var(--surface)]">
+											<div className="absolute -bottom-1 -end-1 flex h-5 w-5 items-center justify-center rounded-full bg-[var(--accent)] text-[var(--accent-contrast)] ring-2 ring-[var(--surface)]">
 												<GitBranch className="h-3 w-3" />
 											</div>
 										)}
@@ -1120,7 +1259,7 @@ export function SettingsPage() {
 						{developerMode ? (
 							<div>
 								<p className="mb-2 px-1 text-xs font-semibold uppercase tracking-widest text-[var(--text-muted)]">Developer</p>
-								<div className="native-card overflow-hidden divide-y divide-[var(--border)]">
+								<div className="native-group">
 									<ToggleRow
 										checked={showDebugInfo}
 										onChange={(checked) => void setPreferences({ showDebugInfo: checked })}
@@ -1129,6 +1268,13 @@ export function SettingsPage() {
 										label="Show Debug Overlays"
 										description="Displays source (cache/network) info in the grid."
 									/>
+									{navRow(
+										() => setIsSeasonalSheetOpen(true),
+										<GhostFilled className="h-5 w-5" />,
+										"bg-slate-500/15 text-slate-400",
+										"Seasonal Overlays",
+										"Force seasonal themes on outside their dates, or turn them off.",
+									)}
 									{hasDemoProfileImages() && (
 										<ToggleRow
 											checked={isDemoProfileImagesEnabled()}
@@ -1145,6 +1291,20 @@ export function SettingsPage() {
 										"bg-slate-500/15 text-slate-400",
 										t("settings.api_inspector"),
 										t("settings.api_inspector_desc"),
+									)}
+									{navRow(
+										() => navigate("/settings/ws-explorer"),
+										<Cable className="h-5 w-5" />,
+										"bg-slate-500/15 text-slate-400",
+										"WebSocket Explorer",
+										"Every realtime frame sent and received, live. Send your own commands too.",
+									)}
+									{navRow(
+										() => void handleExportLogs(),
+										<ScrollText className="h-5 w-5" />,
+										"bg-slate-500/15 text-slate-400",
+										"Export Logs",
+										"Saves recent warnings and errors as a JSON file to attach to a bug report.",
 									)}
 									{navRow(
 										() => navigate("/settings/assignments"),
@@ -1181,7 +1341,7 @@ export function SettingsPage() {
 						{/* About */}
 						<div>
 							<p className="mb-2 px-1 text-xs font-semibold uppercase tracking-widest text-[var(--text-muted)]">About</p>
-							<div className="native-card overflow-hidden divide-y divide-[var(--border)]">
+							<div className="native-group">
 								{navRow(
 									() => navigate("/settings/about"),
 									<InfoFilled className="h-5 w-5" />,
@@ -1235,6 +1395,10 @@ export function SettingsPage() {
 				onCancel={() => setLogoutConfirmTarget(null)}
 			/>
 
+			{isTransferSheetOpen && (
+				<TransferAccountSheet isDesktop={isDesktop} onClose={() => setIsTransferSheetOpen(false)} />
+			)}
+
 			{isChannelSheetOpen && (
 				<UpdateChannelSheet
 					channels={visibleChannels}
@@ -1267,6 +1431,16 @@ export function SettingsPage() {
 								navigate("/");
 							}),
 						},
+						{
+							key: "profile-views-intro",
+							icon: EyeFilled,
+							label: "Profile Views Intro",
+							description: "The one-time intro on the Interest page's Views tab.",
+							onSelect: () => afterSheetClose(() => {
+								resetInterestOnboarding();
+								navigate("/interest?tab=views");
+							}),
+						},
 						{ key: "restore", icon: FileUpFilled, label: "Restore Offer", description: "The first-login backup restore dialog.", onSelect: () => afterSheetClose(replayRestoreOffer) },
 						{ key: "legal", icon: ScrollText, label: "Legal Agreements", description: "Terms of Service / Privacy Policy, even if already accepted.", onSelect: () => afterSheetClose(showLegalAgreementsPrompt) },
 						{ key: "ban", icon: Ban, label: "Ban Screen", description: "A permanent profile ban (DRUG_SALES) with its explanation.", onSelect: () => afterSheetClose(() => setPreviewAccountStatus(PREVIEW_BAN_STATUS)) },
@@ -1275,7 +1449,10 @@ export function SettingsPage() {
 						{ key: "underage-ban", icon: Ban, label: "Underage Ban Screen", description: "Code 35, banned as under 18 by a moderator.", onSelect: () => afterSheetClose(() => setPreviewAccountStatus(PREVIEW_UNDERAGE_BAN_STATUS)) },
 						{ key: "timed-ban", icon: Clock, label: "Timed Ban Screen", description: "A temporary ban (MILD_INSULTS) that ends in two days.", onSelect: () => afterSheetClose(() => setPreviewAccountStatus(previewTimedBanStatus(false))) },
 						{ key: "timed-ban-expired", icon: ScrollText, label: "Ban Agreement Screen", description: "An expired temporary ban (BOT_ACTIVITY, appealable) waiting for its ban agreement.", onSelect: () => afterSheetClose(() => setPreviewAccountStatus(previewTimedBanStatus(true))) },
+						{ key: "token-expired", icon: KeyRound, label: "Token Expired Screen", description: "The \"session expired\" prompt asking to sign in again.", onSelect: () => afterSheetClose(() => setPreviewTokenExpired(true)) },
+						{ key: "test-reminder", icon: HeartPulseFilled, label: "Test Reminder", description: "The HIV test check-up reminder; saving here doesn't touch your profile.", onSelect: () => afterSheetClose(() => setPreviewTestReminder(true)) },
 						{ key: "warnings", icon: TriangleAlertFilled, label: "Account Warnings", description: "The community-guidelines warnings prompt with sample warnings.", onSelect: () => afterSheetClose(showAccountWarningsPrompt) },
+						{ key: "risk-country", icon: ShieldFilled, label: "Risk Country Warning", description: "The safety warning for a location in a dangerous country (Egypt); not remembered.", onSelect: () => afterSheetClose(showLgbtqRiskCountryWarning) },
 						{ key: "share", icon: Share2, label: "Share Picker", description: "The \"Send to…\" chat picker with sample images.", onSelect: () => afterSheetClose(() => void showSharePickerDebug()) },
 						{
 							key: "announcement",
@@ -1298,6 +1475,8 @@ export function SettingsPage() {
 									showHotswapUpdatePrompt({
 										version: `${frontendVersion}-ota.${getCurrentHotswapChannel()}.${Math.floor(Date.now() / 1000)}`,
 										notes: null,
+										// Any ref works for the diff link; the default branch always has one.
+										commit: "development",
 										preview: true,
 									}),
 								),
@@ -1305,6 +1484,8 @@ export function SettingsPage() {
 					]}
 				/>
 			)}
+
+			{isSeasonalSheetOpen && <SeasonalOverlaysSheet onClose={() => setIsSeasonalSheetOpen(false)} />}
 
 			{isFingerprintSheetOpen && (
 				<FingerprintCheckSheet check={fingerprintCheck} onClose={() => setIsFingerprintSheetOpen(false)} />

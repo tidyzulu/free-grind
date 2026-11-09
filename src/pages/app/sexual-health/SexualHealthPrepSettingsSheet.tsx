@@ -3,7 +3,7 @@ import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import { BottomSheet, SheetCloseButton } from "../../../components/ui/bottom-sheet";
 import { NATIVE_SHEET_BG } from "../../../components/ui/action-sheet";
-import { SheetCard, SheetSection } from "../../../components/ui/sheet-section";
+import { SHEET_GROUP_CLASS, SheetSection } from "../../../components/ui/sheet-section";
 import { cn } from "../../../utils/cn";
 import { useDesktopBreakpoint } from "../../../hooks/useDesktopBreakpoint";
 import type { PrepScheme } from "../../../services/prepTracking";
@@ -67,8 +67,8 @@ export function SexualHealthPrepSettingsSheet({
 			<div className="-mx-4 min-h-0 flex-1 overflow-y-auto px-4 pb-2" data-lenis-prevent>
 				<div className="space-y-5">
 					<SheetSection title={t("sexualHealth.info.scheme_section", { defaultValue: "Dosing scheme" })}>
-						{/* Native-style single choice: one card, a radio per row. */}
-						<SheetCard className="divide-y divide-[var(--border)] overflow-hidden px-0 py-0">
+						{/* Native-style single choice: a radio per row, one tile each. */}
+						<div className={SHEET_GROUP_CLASS}>
 							{SCHEME_OPTIONS.map((option) => {
 								const isSelected = scheme === option.value;
 								const Icon = option.icon;
@@ -79,7 +79,7 @@ export function SexualHealthPrepSettingsSheet({
 										role="radio"
 										aria-checked={isSelected}
 										onClick={() => onSchemeChange(option.value)}
-										className="flex w-full items-start gap-3 px-4 py-3.5 text-left transition-colors hover:ink-tint-6 active:ink-tint-10"
+										className="flex w-full items-start gap-3 px-4 py-3.5 text-start transition-colors hover:ink-tint-6 active:ink-tint-10"
 									>
 										<span
 											className={cn(
@@ -112,7 +112,7 @@ export function SexualHealthPrepSettingsSheet({
 									</button>
 								);
 							})}
-						</SheetCard>
+						</div>
 					</SheetSection>
 
 					<div className="flex gap-2.5 px-1">

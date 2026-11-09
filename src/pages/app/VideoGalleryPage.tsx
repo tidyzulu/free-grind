@@ -177,10 +177,10 @@ function VideoTile({ item, onClick }: { item: GalleryVideo; onClick: () => void 
 			<div className="absolute inset-0 flex items-center justify-center bg-black/15">
 				<Play className="h-8 w-8 text-white drop-shadow" fill="white" />
 			</div>
-			<div className="absolute left-2 top-2 inline-flex items-center rounded-full bg-black/50 p-1 text-white/85 backdrop-blur-sm">
+			<div className="absolute start-2 top-2 inline-flex items-center rounded-full bg-black/50 p-1 text-white/85 backdrop-blur-sm">
 				{item.source === "album" ? <Images className="h-3 w-3" /> : <MessageCircle className="h-3 w-3" />}
 			</div>
-			<div className="absolute inset-x-0 bottom-0 flex items-center gap-1.5 bg-gradient-to-t from-black/70 to-transparent px-2 pb-2 pt-6 text-left">
+			<div className="absolute inset-x-0 bottom-0 flex items-center gap-1.5 bg-gradient-to-t from-black/70 to-transparent px-2 pb-2 pt-6 text-start">
 				<div className="h-5 w-5 shrink-0 overflow-hidden rounded-full bg-white/15">
 					<ProfileImage
 						src={item.profileMediaHash ? getThumbImageUrl(item.profileMediaHash, "75x75") : null}
@@ -219,7 +219,7 @@ export function VideoGalleryPage() {
 				getAllAlbumVideos(),
 				getAllReceivedChatVideos(userId),
 			]);
-			const nameFallback = t("shared_albums.name_fallback");
+			const nameFallback = t("common.unknown_display_name");
 
 			const conversationIds = new Set<string>();
 			for (const row of albumVideos) if (row.conversationId) conversationIds.add(row.conversationId);
@@ -484,10 +484,10 @@ export function VideoGalleryPage() {
 
 	return (
 		<>
-			<div className="app-screen flex h-dvh w-full flex-col overflow-x-hidden !px-0 !pb-0" style={{ paddingTop: "calc(env(safe-area-inset-top, 0px) + 10px)" }}>
+			<div className="app-screen flex h-dvh w-full flex-col overflow-x-hidden !px-0 !pb-0" style={{ paddingTop: "calc(var(--safe-area-top) + 10px)" }}>
 				<header className="pointer-events-none relative z-20 shrink-0">
 					<PageHeaderBackground color="var(--accent)" />
-					<div className="pointer-events-auto mx-auto flex w-full max-w-6xl flex-col gap-3 px-4 sm:px-5">
+					<div className="pointer-events-auto mx-auto flex w-full max-w-6xl flex-col gap-3 px-4 sm:px-5 rail:max-w-none rail:px-[var(--app-px)]">
 						<div className="flex items-center justify-between gap-2">
 							<div className="flex min-w-0 items-center gap-2">
 								<HeaderBackButton onClick={() => navigate("/chat", { replace: true })} label={t("nav.inbox")} />
@@ -545,7 +545,7 @@ export function VideoGalleryPage() {
 				</header>
 
 				<FeedScrollContainer>
-					<div className="mx-auto w-full max-w-6xl px-[var(--app-px)] pb-[calc(env(safe-area-inset-bottom,0px)+120px)]">
+					<div className="mx-auto w-full max-w-6xl rail:max-w-none px-[var(--app-px)] pb-[calc(var(--safe-area-bottom)+120px)] rail:pb-[var(--page-bottom)]">
 						{isLoading ? (
 							<div
 								className="grid gap-3"

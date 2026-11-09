@@ -18,15 +18,21 @@
  *   `notifyLocal()`; Android goes through the native `FreeGrindBridge`, whose
  *   `NotificationPoster` dedupes against the later FCM push for the same
  *   message/tap so it never shows twice.
+ * - While the app is in the foreground, incoming messages (for a chat that
+ *   isn't open) and taps show an in-app toast instead of an OS notification;
+ *   tapping it opens the chat / the sender's profile.
  */
 
 import { useCallback, useEffect, useRef } from "react";
-import { useLocation } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import { platform } from "@tauri-apps/plugin-os";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useQueryClient } from "@tanstack/react-query";
 import toast from "react-hot-toast";
+import { BANNER_TOAST_CLASS } from "./AppToaster";
+import { NotificationBanner } from "./NotificationBanner";
+import { haptic } from "../utils/haptics";
 import { useAuth } from "../contexts/useAuth";
 import { ChatRealtimeManager, setActiveRealtimeManager } from "../services/chatRealtime";
 import { isTauriRuntime } from "../services/tauriWebSocket";
@@ -52,8 +58,7 @@ import {
 	getMediaCaptureTarget,
 	getOtherParticipant,
 	getNotificationBodyLabel,
-	getMessageImageUrl,
-	getGaymojiUrl,
+	getParticipantAvatarUrl,
 } from "../pages/app/chat/chatUtils";
 import { fetchAndStoreMedia } from "../services/mediaStore";
 import { captureAlbumsForMessages } from "../services/albumStore";
@@ -61,11 +66,14 @@ import { captureReplyPreviewsForMessages } from "../services/replyMediaStore";
 import { getConversation, getDisplayName } from "../services/conversationDirectory";
 import { hasMessage, saveProfileSnapshot } from "../services/chatDb";
 import { runAutomationRulesForSender } from "../utils/automationRules";
+import { getTapEmoji } from "../pages/app/interest/interestUtils";
 import { looksLikeMessageUpdate } from "../utils/messageUpdates";
+import { isChatOpen } from "../services/openChatState";
 import { useApiFunctions } from "../hooks/useApiFunctions";
 import { useBlockedProfileIds } from "../hooks/queries/useProfileQueries";
 import { isReadReceiptsHidden } from "../utils/privacy";
 import { classifyProfileAccess } from "../utils/profileAccessStatus";
+import { interestIdentityStore } from "../services/interestIdentityStore";
 import {
 	isChatNotificationsEnabled,
 	isForegroundNotificationsEnabled,
@@ -74,6 +82,7 @@ import {
 import {
 	notifyLocal,
 	clearChatNotifications,
+	markSeenInForeground,
 	withdrawMessageNotification,
 } from "../services/localNotify";
 
@@ -268,7 +277,7 @@ function parseViewPayload(payload: unknown): ViewReceivedDetail | null {
 	if (!payload || typeof payload !== "object") return null;
 	const r = payload as Record<string, unknown>;
 	const mostRecent = r.mostRecent as Record<string, unknown> | undefined;
-	if (!mostRecent) return null;
+	if (!mostRecent || mostRecent.profileId == null || mostRecent.profileId === "") return null;
 
 	return {
 		profileId: String(mostRecent.profileId),
@@ -327,6 +336,12 @@ export function ChatRealtimeBridge() {
 	useEffect(() => {
 		tRef.current = t;
 	}, [t]);
+
+	const navigate = useNavigate();
+	const navigateRef = useRef(navigate);
+	useEffect(() => {
+		navigateRef.current = navigate;
+	}, [navigate]);
 
 	const pathRef = useRef(location.pathname);
 	useEffect(() => {
@@ -585,66 +600,51 @@ export function ChatRealtimeBridge() {
 			void reconcileArchivedConversationForProfile(id, isProfileFound);
 		};
 
-		// Fires the OS notification straight from the WebSocket event so it
-		// shows up instantly, before FCM's delayed push would otherwise be
-		// the only source. Android routes through the native bridge (which
-		// dedupes against that later FCM push) and only needs to cover the
-		// foreground case there, since FCM already handles background —
-		// hence gating Android on `isAppForeground()` too. Desktop/iOS have
-		// no competing push channel at all, so they must notify regardless
-		// of foreground/background state (e.g. minimized): only the
-		// foreground-notifications toggle (suppressing a redundant popup
-		// while actively looking at the app) applies there, not the
-		// foreground/background state itself.
+		// While the app is in the foreground, incoming messages for a chat
+		// that isn't open (the caller already skips the open one) show an
+		// in-app toast instead of an OS notification. Android won't post the
+		// later FCM push on top of it: NotificationPoster drops pushes while
+		// the app is visible ("realtime bridge covers it"), and FCM handles
+		// the background case on its own. Desktop/iOS have no competing push
+		// channel at all, so in the background they still notify through
+		// notifyLocal() (e.g. minimized window).
 		const triggerIncomingMessageNotification = (m: Message) => {
 			if (!isChatNotificationsEnabled()) return;
 
-			if (isAndroidRuntime()) {
-				if (!isAppForeground() || !isForegroundNotificationsEnabled()) return;
-			} else if (isAppForeground() && !isForegroundNotificationsEnabled()) {
-				return;
-			}
-
 			const conv = getConversation(m.conversationId);
-			const other = conv ? getOtherParticipant(conv, userIdRef.current) : null;
 			const senderName = conv?.data.name?.trim() || tRef.current("common.unknown_display_name");
 			const bodyText = getNotificationBodyLabel(m, tRef.current);
-			// Same as the FCM-side native code: inline preview for picture/gif
-			// content, deliberately excluded for ExpiringImage (view-once) and
-			// Video (no thumbnail available).
-			const previewImageUrl =
-				m.type === "Image" || m.type === "Giphy"
-					? getMessageImageUrl(m)
-					: m.type === "Gaymoji"
-						? getGaymojiUrl(m)
-						: null;
 
-			if (isAndroidRuntime()) {
-				const payload = {
-					event: "received",
-					source: "realtime",
-					receivedAt: Date.now(),
-					senderName,
-					bodyText,
-					isTap: false,
-					action: `chat:${m.conversationId}`,
-					conversationId: m.conversationId,
-					senderId: String(m.senderId),
-					messageType: m.type,
-					messageId: m.messageId,
-					previewImageUrl,
-					rawData: {
-						senderProfileImageMediaHash: other?.primaryMediaHash ?? null,
+			if (isAppForeground()) {
+				if (!isForegroundNotificationsEnabled()) return;
+				const other = conv ? getOtherParticipant(conv, userIdRef.current) : null;
+				const avatarUrl = getParticipantAvatarUrl(other?.primaryMediaHash);
+				const chatPath = `/chat/${encodeURIComponent(m.conversationId)}`;
+				toast(
+					(tst) => (
+						<NotificationBanner
+							title={senderName}
+							body={bodyText}
+							avatarUrl={avatarUrl}
+							onOpen={() => {
+								toast.dismiss(tst.id);
+								navigateRef.current(chatPath);
+							}}
+						/>
+					),
+					{
+						// One toast per conversation — a burst of messages updates
+						// it in place instead of stacking.
+						id: `chat:${m.conversationId}`,
+						className: BANNER_TOAST_CLASS,
+						duration: 4000,
 					},
-				};
-				try {
-					window.FreeGrindBridge?.postLocalNotification?.(JSON.stringify(payload));
-				} catch (error) {
-					appLog.warn("[chat-ws:bridge] postLocalNotification failed", error);
-				}
+				);
+				haptic(15);
 				return;
 			}
 
+			if (isAndroidRuntime()) return;
 			void notifyLocal({ title: senderName, body: bodyText, group: m.conversationId });
 		};
 
@@ -656,40 +656,46 @@ export function ChatRealtimeBridge() {
 			)
 				return;
 
-			const senderName = tap.displayName || tRef.current("common.unknown_display_name");
-			const bodyText = tap.isMutual
-				? tRef.current("chat.notifications.tapped_you_back")
-				: tRef.current("chat.notifications.tapped_you");
-
-			if (isAndroidRuntime()) {
-				const payload = {
-					event: "received",
-					source: "realtime",
-					receivedAt: Date.now(),
-					senderName,
-					bodyText,
-					isTap: true,
-					action: "taps",
-					conversationId: null,
-					senderId: tap.profileId,
-					messageType: null,
-					rawData: {
-						senderProfileId: tap.profileId,
-						senderProfileImageMediaHash: tap.imageHash ?? null,
-					},
-				};
-				try {
-					window.FreeGrindBridge?.postLocalNotification?.(JSON.stringify(payload));
-				} catch (error) {
-					appLog.warn("[chat-ws:bridge] postLocalNotification failed (tap)", error);
-				}
-				return;
-			}
-
+			// The taps list already shows it live there — no need to announce it.
 			const onTapsRoute =
 				pathRef.current === "/interest" || pathRef.current.startsWith("/interest/");
 			if (onTapsRoute) return;
-			void notifyLocal({ title: senderName, body: bodyText, group: "taps" });
+
+			const senderName = tap.displayName || tRef.current("common.unknown_display_name");
+			// Plain taps use the native Android notification's text; a tap back
+			// keeps its own (the push has no mutual variant, but it's worth knowing).
+			const bodyText = tap.isMutual
+				? tRef.current("chat.notifications.tapped_you_back")
+				: tRef.current("push_notifications.tap_notification_body");
+
+			// This only ever runs in the foreground, so an in-app toast replaces
+			// the OS notification here rather than stacking on top of it. Android
+			// won't post the later FCM push either: NotificationPoster drops
+			// pushes while the app is visible ("realtime bridge covers it").
+			const profilePath = `/profile/${encodeURIComponent(tap.profileId)}`;
+			const tapEmoji = getTapEmoji(tap.tapType);
+			const avatarUrl = getParticipantAvatarUrl(tap.imageHash);
+			toast(
+				(tst) => (
+					<NotificationBanner
+						title={senderName}
+						body={bodyText}
+						avatarUrl={avatarUrl}
+						fallbackIcon={<span className="text-xl leading-none">{tapEmoji}</span>}
+						badge={avatarUrl ? tapEmoji : undefined}
+						onOpen={() => {
+							toast.dismiss(tst.id);
+							navigateRef.current(profilePath);
+						}}
+					/>
+				),
+				{
+					id: `tap:${tap.profileId}`,
+					className: BANNER_TOAST_CLASS,
+					duration: 3500,
+				},
+			);
+			haptic(15);
 		};
 
 		let lastResyncAt = 0;
@@ -728,6 +734,7 @@ export function ChatRealtimeBridge() {
 						shouldProcessIncomingTap(tap.profileId)
 					) {
 						appLog.debug(`[chat-ws:bridge] Incoming tap received from profileId: ${tap.profileId}`);
+						if (isAppForeground()) markSeenInForeground({ tapSenderId: String(tap.profileId) });
 						window.dispatchEvent(
 							new CustomEvent<TapReceivedDetail>(TAP_RECEIVED_EVENT, {
 								detail: tap,
@@ -743,11 +750,21 @@ export function ChatRealtimeBridge() {
 					const view = parseViewPayload(envelope.payload);
 					if (view) {
 						appLog.debug(`[chat-ws:bridge] Incoming view received. Total views: ${view.viewedCount}`);
-						window.dispatchEvent(
-							new CustomEvent<ViewReceivedDetail>(VIEW_RECEIVED_EVENT, {
-								detail: view,
-							}),
-						);
+						// The event names the real viewer even when the views list only
+						// returns a locked preview — persist it before the refetch the
+						// event triggers, so that refetch can already recover it.
+						void Promise.all([
+							interestIdentityStore.rememberViewEvent(view),
+							interestIdentityStore.rememberHashes([{ hash: view.imageHash, profileId: view.profileId }]),
+						])
+							.catch(() => {})
+							.finally(() => {
+								window.dispatchEvent(
+									new CustomEvent<ViewReceivedDetail>(VIEW_RECEIVED_EVENT, {
+										detail: view,
+									}),
+								);
+							});
 						maybeUnarchiveOnActivity(view.profileId);
 					}
 				}
@@ -916,22 +933,22 @@ export function ChatRealtimeBridge() {
 						byConv.set(m.conversationId, list);
 
 						if (isIncoming) {
+							// Already delivered in the app (open chat, banner or
+							// unread badge) — the later FCM push mustn't notify.
+							if (isAppForeground()) markSeenInForeground({ messageId: m.messageId });
 							maybeUnarchiveOnActivity(m.senderId);
 							void unhideConversationOnNewMessage(m.conversationId);
 						}
 
 						// Update local contact index for unread badge persistence
 						if (isIncoming) {
-							const path = pathRef.current;
-							// The route alone isn't enough — it stays on this
-							// chat's path even while the window is minimized,
-							// which would otherwise suppress the unread bump
-							// and notification for a message the user can't
-							// actually see.
+							// What ChatPage reports as on screen, not the route:
+							// the desktop split view and chats opened from a
+							// profile don't carry the conversation in the URL.
+							// Foreground too — a minimized window still "shows"
+							// the chat, but the user can't actually see it.
 							const isViewingThisChat =
-								isAppForeground() &&
-								(path === `/chat/${m.conversationId}` ||
-									path.startsWith(`/chat/${m.conversationId}/`));
+								isAppForeground() && isChatOpen(m.conversationId, m.senderId);
 							if (!isViewingThisChat) {
 								await incrementUnreadCountForProfile(
 									String(m.senderId),

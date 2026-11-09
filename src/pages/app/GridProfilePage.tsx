@@ -33,7 +33,6 @@ import {
 	getProfileSnapshot,
 	insertSystemMessage,
 	listHiddenProfileIds,
-	saveProfileSnapshot,
 } from "../../services/chatDb";
 import { profileDetailItemSchema } from "../../types/grid";
 import { hideProfile as hideProfileLocally, unhideProfile as unhideProfileLocally } from "../../services/profileHide";
@@ -56,7 +55,9 @@ const profileRouteParamsSchema = z.object({
 function unarchiveConversationIfArchived(profileId: string) {
 	void findConversationByProfileId(profileId)
 		.then(async (stored) => {
-			if (!stored?.archived) {
+			// A profile we blocked can still load fine — that says nothing about
+			// an unblock; our own unblock is handled by the mutation.
+			if (!stored?.archived || stored.blockState === "blocked_by_me") {
 				return;
 			}
 			const isSelf = consumeSelfBlockAction(stored.conversationId, "unblock");
@@ -120,6 +121,7 @@ export function GridProfilePage() {
 	const [chatContactStatus, setChatContactStatus] = useState<ChatContactIndexRecord | null>(null);
 	const [localNickname, setLocalNickname] = useState<string | null>(null);
 	const [isSnapshotProfile, setIsSnapshotProfile] = useState(false);
+	const [profileReloadKey, setProfileReloadKey] = useState(0);
 
 	const [mutatingFavoriteProfileId, setMutatingFavoriteProfileId] = useState<string | null>(
 		null,
@@ -237,9 +239,12 @@ export function GridProfilePage() {
 	const isTappingProfile = tappingProfileId === profileId;
 
 	const locationState =
-		(location.state as { returnTo?: unknown; profileIds?: unknown; fromChat?: unknown } | null) ?? {};
+		(location.state as { returnTo?: unknown; profileIds?: unknown; fromChat?: unknown; backgroundLocation?: unknown; editOwnProfile?: unknown } | null) ?? {};
 	// Opened from a chat thread, which sits directly below in history.
 	const openedFromChat = locationState.fromChat === true;
+	// Shown as a modal over the page that opened it (see App.tsx), which is
+	// also directly below in history.
+	const isOverBackground = locationState.backgroundLocation != null;
 	const returnToFromState =
 		typeof locationState.returnTo === "string" ? locationState.returnTo : null;
 	const profileIds: string[] = Array.isArray(locationState.profileIds)
@@ -294,11 +299,17 @@ export function GridProfilePage() {
 	}, [prevProfileId, nextProfileId]);
 
 	const handlePrevProfile = prevProfileId
-		? () => navigate(`/profile/${prevProfileId}`, { replace: true, state: { returnTo: safeReturnTo, profileIds } })
+		? () => navigate(`/profile/${prevProfileId}`, { replace: true, state: { returnTo: safeReturnTo, profileIds, backgroundLocation: locationState.backgroundLocation } })
 		: undefined;
 	const handleNextProfile = nextProfileId
-		? () => navigate(`/profile/${nextProfileId}`, { replace: true, state: { returnTo: safeReturnTo, profileIds } })
+		? () => navigate(`/profile/${nextProfileId}`, { replace: true, state: { returnTo: safeReturnTo, profileIds, backgroundLocation: locationState.backgroundLocation } })
 		: undefined;
+
+	useEffect(() => {
+		if (profileId) {
+			void apiFunctions.recordProfileView(profileId);
+		}
+	}, [apiFunctions, profileId]);
 
 	useEffect(() => {
 		if (!profileId) {
@@ -311,8 +322,6 @@ export function GridProfilePage() {
 
 		let cancelled = false;
 		setIsSnapshotProfile(false);
-
-		void apiFunctions.recordProfileView(profileId);
 
 		const loadLocalSnapshot = async (): Promise<ProfileDetail | null> => {
 			const stored = await getProfileSnapshot(profileId).catch(() => null);
@@ -347,10 +356,8 @@ export function GridProfilePage() {
 					if (classifyProfileAccess(parsed) === "accessible") {
 						setActiveProfile(parsed);
 						setIsSnapshotProfile(false);
+						// The local snapshot is refreshed by getProfileDetail itself.
 						setCachedProfileDetail(profileId, parsed);
-						void saveProfileSnapshot(profileId, JSON.stringify(parsed)).catch((error) => {
-							appLog.warn("[grid-profile] failed to persist profile snapshot", error);
-						});
 						unarchiveConversationIfArchived(profileId);
 					} else {
 						// Live data is just the blocked/gone stub — prefer the last
@@ -397,7 +404,7 @@ export function GridProfilePage() {
 		return () => {
 			cancelled = true;
 		};
-	}, [apiFunctions, profileId]);
+	}, [apiFunctions, profileId, profileReloadKey]);
 
 	const activeProfilePhotoHashes = useMemo(() => {
 		if (!activeProfile) {
@@ -438,6 +445,7 @@ export function GridProfilePage() {
 	const handleSendQuickMessage = async (targetProfileId: string, text: string) => {
 		try {
 			await apiFunctions.sendText({ targetProfileId: Number(targetProfileId), text });
+			toast.success(t("chat.toasts.message_sent", { defaultValue: "Message sent" }));
 		} catch (error) {
 			toast.error(error instanceof Error ? error.message : t("chat.errors.send_failed"));
 		}
@@ -472,6 +480,10 @@ export function GridProfilePage() {
 	const performUnblockProfile = async (targetProfileId: string) => {
 		try {
 			await unblockProfileMutation(targetProfileId);
+			// While blocked, the live fetch only returned a stub, so we're showing
+			// the local snapshot (which hides the chat bar) — refetch now that the
+			// real profile is readable again.
+			setProfileReloadKey((key) => key + 1);
 			toast.success(t("profile_details.unblock_success"));
 		} catch (error) {
 			toast.error(
@@ -589,9 +601,12 @@ export function GridProfilePage() {
 		<>
 			<ProfileDetailsModal
 				variant={isDesktopLike ? "modal" : "page"}
+				isOverBackground={isOverBackground}
 				isOpen
+				// Settings' profile row opens your own profile straight in edit mode.
+				initialEditMode={locationState.editOwnProfile === true}
 				onClose={() => {
-					if (openedFromChat) {
+					if (openedFromChat || isOverBackground) {
 						navigateBackTo(navigate, safeReturnTo);
 					} else {
 						navigate(safeReturnTo, { replace: true });

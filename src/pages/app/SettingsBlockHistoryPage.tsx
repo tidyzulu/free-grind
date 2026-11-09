@@ -54,7 +54,8 @@ export function SettingsBlockHistoryPage() {
 
 	return (
 		<PullToRefreshContainer
-			className="app-screen"
+			className="app-screen flex flex-col"
+			contentClassName="flex flex-1 flex-col"
 			onRefresh={load}
 			isDisabled={isLoading}
 			refreshingLabel={t("settings_block_history.refreshing")}
@@ -65,9 +66,10 @@ export function SettingsBlockHistoryPage() {
 				subtitle={t("settings_block_history.subtitle")}
 			/>
 
-			<div className="grid gap-6">
+			{/* Fills the rest of the screen so the empty state can sit centered in it. */}
+			<div className={`grid flex-1 gap-6 ${!isLoading && !error && (!events || events.length === 0) ? "content-center" : "content-start"}`}>
 				{isLoading ? (
-					<div className="native-card divide-y divide-[color-mix(in_srgb,var(--text)_8%,transparent)] overflow-hidden">
+					<div className="native-group">
 						{Array.from({ length: 4 }).map((_, i) => (
 							<div key={i} className="flex items-center gap-3 px-4 py-3">
 								<div className="h-11 w-11 shrink-0 animate-pulse rounded-full overflow-hidden ink-tint-10" />
@@ -101,16 +103,16 @@ export function SettingsBlockHistoryPage() {
 								{events.length}
 							</span>
 						</div>
-						<div className="native-card divide-y divide-[color-mix(in_srgb,var(--text)_8%,transparent)] overflow-hidden">
+						<div className="native-group">
 							{events.map((event) => {
 								const displayName =
-									event.displayName || t("settings_block_history.name_fallback");
+									event.displayName || t("common.unknown_display_name");
 								const avatarSrc = resolveAvatarSrc(
 									event.avatarMediaHash,
 									getParticipantAvatarUrl(event.avatarMediaHash),
 								);
 								const isBlocked = event.eventType === "blocked";
-								const rowClassName = "flex w-full items-center gap-3 px-4 py-3 text-left";
+								const rowClassName = "flex w-full items-center gap-3 px-4 py-3 text-start";
 								const content = (
 									<>
 										<div className="relative h-11 w-11 shrink-0 rounded-full overflow-hidden bg-[var(--surface-2)] drop-shadow-sm">

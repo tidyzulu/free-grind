@@ -11,6 +11,15 @@ import { useDesktopBreakpoint } from "../hooks/useDesktopBreakpoint";
 import { menuTransitionStyle, usePresence } from "../hooks/usePresence";
 import { proxyMediaUrl } from "../utils/mediaProxy";
 
+/** A video position as the player shows it: m:ss, or h:mm:ss past an hour. */
+function formatVideoTime(seconds: number): string {
+	const whole = Number.isFinite(seconds) ? Math.max(0, Math.floor(seconds)) : 0;
+	const pad = (value: number) => String(value).padStart(2, "0");
+	const hours = Math.floor(whole / 3600);
+	const minutes = Math.floor((whole % 3600) / 60);
+	return hours > 0 ? `${hours}:${pad(minutes)}:${pad(whole % 60)}` : `${minutes}:${pad(whole % 60)}`;
+}
+
 export type PhotoViewerMedia = {
 	url: string;
 	type: "image" | "video";
@@ -244,8 +253,8 @@ export function PhotoViewer({
 	const [isVideoMuted, setIsVideoMuted] = useState(true);
 	// Drives the fade of every chrome element (header, buttons, page-count
 	// pill, video controls, footer) on mobile — a tap on the media toggles
-	// this. Always treated as visible on desktop (see `chromeVisible` below),
-	// since this is a mobile-only gesture.
+	// this. On desktop it's only turned off while a video plays and the mouse
+	// rests (see the desktop auto-hide effect).
 	const [showChrome, setShowChrome] = useState(true);
 	// Vertical drag-to-dismiss (mobile, unzoomed): the media follows the finger
 	// while the backdrop fades; past the threshold it closes, otherwise snaps back.
@@ -280,6 +289,10 @@ export function PhotoViewer({
 	// handlers below — a ref avoids re-rendering the whole viewer on every move.
 	const isScrubbingRef = useRef(false);
 	const trackBarRef = useRef<HTMLDivElement | null>(null);
+	// The seek bar's fill and knob, moved directly every frame while playing
+	// (see paintVideoProgress) rather than through state.
+	const progressFillRef = useRef<HTMLDivElement | null>(null);
+	const progressKnobRef = useRef<HTMLDivElement | null>(null);
 
 	const mediaRef = useRef<HTMLImageElement | HTMLVideoElement | null>(null);
 	// Video elements are torn down and recreated whenever a carousel slot's
@@ -493,10 +506,32 @@ export function PhotoViewer({
 	// (see the media click handler below) without pausing, which re-arms this
 	// same timer.
 	useEffect(() => {
-		if (!isCurrentVideo || !isVideoPlaying || !showChrome) return;
+		if (isDesktop || !isCurrentVideo || !isVideoPlaying || !showChrome) return;
 		const timer = setTimeout(() => setShowChrome(false), 2500);
 		return () => clearTimeout(timer);
-	}, [isCurrentVideo, isVideoPlaying, showChrome]);
+	}, [isDesktop, isCurrentVideo, isVideoPlaying, showChrome]);
+
+	// Desktop's take on it, as video players there do: the chrome (and the
+	// cursor) fade out once the mouse has rested a moment while it plays,
+	// and any movement brings them back. Never while scrubbing.
+	useEffect(() => {
+		if (!isDesktop) return;
+		if (!isCurrentVideo || !isVideoPlaying || isScrubbing) {
+			setShowChrome(true);
+			return;
+		}
+		let timer = setTimeout(() => setShowChrome(false), 2500);
+		const onMove = () => {
+			setShowChrome(true);
+			clearTimeout(timer);
+			timer = setTimeout(() => setShowChrome(false), 2500);
+		};
+		window.addEventListener("mousemove", onMove);
+		return () => {
+			clearTimeout(timer);
+			window.removeEventListener("mousemove", onMove);
+		};
+	}, [isDesktop, isCurrentVideo, isVideoPlaying, isScrubbing]);
 
 	useEffect(() => {
 		if (!isMenuOpen) return;
@@ -871,6 +906,18 @@ export function PhotoViewer({
 			if (e.key === "Escape") { e.stopPropagation(); closeAnimated(); return; }
 			if (e.key === "ArrowLeft") showPrev();
 			if (e.key === "ArrowRight") showNext();
+			// Space plays/pauses a video, as in any player — unless it's typed
+			// (the footer's reply bar). Prevented, so a focused button isn't
+			// clicked by it too.
+			if (e.key === " " && !e.repeat) {
+				const target = e.target as HTMLElement | null;
+				if (target?.closest("input, textarea, [contenteditable='true']")) return;
+				const el = mediaRef.current;
+				if (!(el instanceof HTMLVideoElement)) return;
+				e.preventDefault();
+				if (el.paused) void el.play();
+				else el.pause();
+			}
 		};
 		window.addEventListener("keydown", onKey, { capture: true });
 		return () => window.removeEventListener("keydown", onKey, { capture: true });
@@ -921,6 +968,29 @@ export function PhotoViewer({
 		el.currentTime = ratio * videoDuration;
 		setVideoCurrentTime(el.currentTime);
 	}, [videoDuration]);
+
+	// The seek bar follows the video every frame while it plays: timeupdate
+	// only comes a few times a second (the bar would jump), and goes through
+	// state, re-rendering the whole viewer. The time labels only change once
+	// a second (see onTimeUpdate).
+	const paintVideoProgress = useCallback(() => {
+		const el = mediaRef.current;
+		if (!(el instanceof HTMLVideoElement) || !Number.isFinite(el.duration) || el.duration <= 0) return;
+		const at = `${Math.min(100, (el.currentTime / el.duration) * 100)}%`;
+		if (progressFillRef.current) progressFillRef.current.style.width = at;
+		if (progressKnobRef.current) progressKnobRef.current.style.left = at;
+	}, []);
+	useLayoutEffect(paintVideoProgress);
+	useEffect(() => {
+		if (!isCurrentVideo || !isVideoPlaying) return;
+		let frame = 0;
+		const follow = () => {
+			paintVideoProgress();
+			frame = requestAnimationFrame(follow);
+		};
+		frame = requestAnimationFrame(follow);
+		return () => cancelAnimationFrame(frame);
+	}, [isCurrentVideo, isVideoPlaying, paintVideoProgress]);
 
 	if (!isOpen || (N === 0 && !isLoading)) return null;
 
@@ -1014,11 +1084,12 @@ export function PhotoViewer({
 	const activeSlot = N <= 1 ? 0 : trackPos;
 	const canAnimate = dragOffset === 0 && !noTransition;
 	const footerContent = renderFooter ? renderFooter(centerIdx) : null;
-	// The tap-to-hide-chrome gesture is mobile-only — desktop keeps chrome on
-	// permanently (showChrome still exists in state there, it's just never
-	// toggled since the click handler below only flips it off-desktop).
+	// The tap-to-hide-chrome gesture is mobile-only; on desktop showChrome is
+	// only ever turned off by the resting mouse over a playing video (see the
+	// desktop auto-hide effect), which also hides the cursor then.
 	const dismissProgress = Math.min(1, Math.abs(dismissY) / (DISMISS_THRESHOLD_PX * 2.5));
-	const chromeVisible = (isDesktop || showChrome) && dismissY === 0 && !isClosing && !isHeroBeforeFlight;
+	const chromeVisible = showChrome && dismissY === 0 && !isClosing && !isHeroBeforeFlight;
+	const hideCursor = isDesktop && !showChrome;
 	const chromeFadeClass = `transition-opacity duration-300 ${chromeVisible ? "opacity-100" : "pointer-events-none opacity-0"}`;
 
 	return createPortal(
@@ -1028,7 +1099,7 @@ export function PhotoViewer({
 			// pan/fling or a Lenis scroll, which could swallow the next tap after
 			// closing. Gestures are all handled in JS.
 			data-lenis-prevent
-			className="fixed inset-0 z-[80] touch-none overscroll-none"
+			className={`fixed inset-0 z-[80] touch-none overscroll-none ${hideCursor ? "cursor-none [&_*]:!cursor-none" : ""}`}
 			onClick={closeAnimated}
 			style={{
 				// Once closing, taps go straight through to the page below, even
@@ -1121,7 +1192,7 @@ export function PhotoViewer({
 								onClick={() => setIsMenuOpen((v) => !v)}
 								onTouchStart={(e) => { e.stopPropagation(); gestureMovedRef.current = false; }}
 								onTouchEnd={(e) => handleButtonTouchEnd(e, () => setIsMenuOpen((v) => !v))}
-								aria-label="More options"
+								aria-label={t("common.more_options")}
 								aria-expanded={isMenuOpen}
 								className="header-icon-btn inline-flex shrink-0 items-center justify-center rounded-xl border border-white/45 bg-black/40 p-2 text-white backdrop-blur-md drop-shadow-[0_1px_2px_rgba(0,0,0,0.85)] transition active:scale-90"
 							>
@@ -1193,20 +1264,20 @@ export function PhotoViewer({
 						onClick={(e) => { e.stopPropagation(); showPrev(); }}
 						onTouchStart={(e) => { e.stopPropagation(); gestureMovedRef.current = false; }}
 						onTouchEnd={(e) => handleButtonTouchEnd(e, showPrev)}
-						className="absolute left-4 top-1/2 z-[83] inline-flex h-11 w-11 -translate-y-1/2 items-center justify-center rounded-full border border-white/15 bg-black/40 text-white shadow-lg backdrop-blur-md transition active:scale-90"
+						className={`absolute left-4 top-1/2 z-[83] glass-icon-btn inline-flex h-11 w-11 -translate-y-1/2 items-center justify-center rounded-full text-white drop-shadow-[0_1px_2px_rgba(0,0,0,0.85)] active:scale-90 ${chromeFadeClass}`}
 						aria-label={t("profile_details.previous_photo")}
 					>
-						<ChevronLeft className="h-5 w-5" />
+						<ChevronLeft className="no-rtl-flip h-5 w-5" />
 					</button>
 					<button
 						type="button"
 						onClick={(e) => { e.stopPropagation(); showNext(); }}
 						onTouchStart={(e) => { e.stopPropagation(); gestureMovedRef.current = false; }}
 						onTouchEnd={(e) => handleButtonTouchEnd(e, showNext)}
-						className="absolute right-4 top-1/2 z-[83] inline-flex h-11 w-11 -translate-y-1/2 items-center justify-center rounded-full border border-white/15 bg-black/40 text-white shadow-lg backdrop-blur-md transition active:scale-90"
+						className={`absolute right-4 top-1/2 z-[83] glass-icon-btn inline-flex h-11 w-11 -translate-y-1/2 items-center justify-center rounded-full text-white drop-shadow-[0_1px_2px_rgba(0,0,0,0.85)] active:scale-90 ${chromeFadeClass}`}
 						aria-label={t("profile_details.next_photo")}
 					>
-						<ChevronRight className="h-5 w-5" />
+						<ChevronRight className="no-rtl-flip h-5 w-5" />
 					</button>
 				</>
 			)}
@@ -1220,11 +1291,11 @@ export function PhotoViewer({
 					className={`absolute left-1/2 z-[83] -translate-x-1/2 rounded-full bg-black/50 px-3 py-1 text-xs font-medium text-white shadow-[0_2px_8px_rgba(0,0,0,0.3)] backdrop-blur-md ${chromeFadeClass} ${
 						isCurrentVideo
 							? footerContent
-								? "bottom-[calc(env(safe-area-inset-bottom,0px)+9.25rem)]"
-								: "bottom-[calc(env(safe-area-inset-bottom,0px)+4.75rem)]"
+								? "bottom-[calc(var(--safe-area-bottom)+9.75rem)]"
+								: "bottom-[calc(var(--safe-area-bottom)+5.25rem)]"
 							: footerContent
-								? "bottom-[calc(env(safe-area-inset-bottom,0px)+5.5rem)]"
-								: "bottom-[calc(env(safe-area-inset-bottom,0px)+1.25rem)]"
+								? "bottom-[calc(var(--safe-area-bottom)+5.5rem)]"
+								: "bottom-[calc(var(--safe-area-bottom)+1.25rem)]"
 					}`}
 				>
 					{centerIdx + 1} / {N}
@@ -1236,67 +1307,77 @@ export function PhotoViewer({
 					type="button"
 					onClick={(e) => { e.stopPropagation(); toggleVideoPlay(); }}
 					aria-label={isVideoPlaying ? t("profile_details.pause_video", { defaultValue: "Pause" }) : t("profile_details.play_video", { defaultValue: "Play" })}
-					className={`absolute left-1/2 top-1/2 z-[84] flex h-16 w-16 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full border border-white/25 bg-black/45 text-white shadow-lg backdrop-blur-md active:scale-90 ${chromeFadeClass}`}
+					className={`absolute left-1/2 top-1/2 z-[84] glass-icon-btn flex h-16 w-16 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full text-white drop-shadow-[0_1px_2px_rgba(0,0,0,0.85)] transition active:scale-90 ${chromeFadeClass}`}
 				>
-					{isVideoPlaying ? <Pause className="h-7 w-7 fill-current" /> : <Play className="h-7 w-7 fill-current pl-0.5" />}
+					{isVideoPlaying ? <Pause className="h-9 w-9 fill-current" /> : <Play className="h-9 w-9 fill-current pl-0.5" />}
 				</button>
 			)}
 
 			{isCurrentVideo && (
-				// Seek bar + mute toggle share one control row (rather than the mute
-				// button floating alone bottom-right) — sits above the page-count
-				// pill (1.25rem/5.5rem above the safe area), clearing both it and the
-				// footer/reply bar underneath instead of overlapping.
+				// One frosted pill: elapsed time, seek bar, length and the sound
+				// toggle. Sits above the footer/reply bar, and below the page-count
+				// pill (5.25rem/9.75rem above the safe area for a video), clearing both.
 				<div
-					className={`absolute inset-x-0 z-[84] flex items-center gap-3 px-6 sm:px-8 ${chromeFadeClass} ${
+					className={`absolute inset-x-0 z-[84] flex justify-center px-4 sm:px-8 ${chromeFadeClass} ${
 						footerContent
-							? "bottom-[calc(env(safe-area-inset-bottom,0px)+6.75rem)]"
-							: "bottom-[calc(env(safe-area-inset-bottom,0px)+2.25rem)]"
+							? "bottom-[calc(var(--safe-area-bottom)+5.5rem)]"
+							: "bottom-[calc(var(--safe-area-bottom)+1.25rem)]"
 					}`}
 					onClick={(e) => e.stopPropagation()}
 				>
-					<div
-						ref={trackBarRef}
-						className="flex h-4 flex-1 cursor-pointer items-center touch-none"
-						onClick={(e) => handleSeek(e.clientX)}
-						onPointerDown={(e) => {
-							e.currentTarget.setPointerCapture(e.pointerId);
-							isScrubbingRef.current = true;
-							setIsScrubbing(true);
-							handleSeek(e.clientX);
-						}}
-						onPointerMove={(e) => {
-							if (isScrubbingRef.current) handleSeek(e.clientX);
-						}}
-						onPointerUp={() => {
-							isScrubbingRef.current = false;
-							setIsScrubbing(false);
-						}}
-					>
-						<div className={`w-full overflow-hidden rounded-full bg-white/35 transition-[height] ${isScrubbing ? "h-1.5" : "h-1"}`}>
-							<div
-								className="h-full rounded-full bg-[var(--accent)]"
-								style={{
-									// A min-width floor (rather than a literal 0-100%) keeps a
-									// small visible nub at the current position even at 0:00 —
-									// without it, the bar reads as empty/inert until you've
-									// already played or scrubbed some way into the video.
-									width: videoDuration
-										? `max(6px, ${Math.min(100, (videoCurrentTime / videoDuration) * 100)}%)`
-										: "0px",
-								}}
-							/>
+					<div className="flex w-full max-w-xl items-center gap-3 rounded-full bg-black/45 py-1.5 pl-4 pr-1.5 text-white shadow-[0_4px_20px_rgba(0,0,0,0.35)] backdrop-blur-md">
+						<span className="shrink-0 text-xs font-medium tabular-nums">{formatVideoTime(videoCurrentTime)}</span>
+						<div
+							ref={trackBarRef}
+							className="relative flex h-8 flex-1 cursor-pointer touch-none items-center"
+							onClick={(e) => handleSeek(e.clientX)}
+							onPointerDown={(e) => {
+								e.currentTarget.setPointerCapture(e.pointerId);
+								isScrubbingRef.current = true;
+								setIsScrubbing(true);
+								handleSeek(e.clientX);
+							}}
+							onPointerMove={(e) => {
+								if (isScrubbingRef.current) handleSeek(e.clientX);
+							}}
+							onPointerUp={() => {
+								isScrubbingRef.current = false;
+								setIsScrubbing(false);
+							}}
+							onPointerCancel={() => {
+								isScrubbingRef.current = false;
+								setIsScrubbing(false);
+							}}
+						>
+							<div className={`relative w-full overflow-hidden rounded-full bg-white/25 transition-[height] ${isScrubbing ? "h-1.5" : "h-1"}`}>
+								<div ref={progressFillRef} className="absolute inset-y-0 left-0 w-0 rounded-full bg-[var(--accent)]" />
+							</div>
+							{/* The knob shows where it is even at 0:00; scrubbing, it grows and
+							    tells the time it's at. */}
+							<div ref={progressKnobRef} className="pointer-events-none absolute left-0 top-1/2 -translate-x-1/2 -translate-y-1/2">
+								<div
+									className={`rounded-full bg-white shadow-[0_1px_4px_rgba(0,0,0,0.5)] transition-[width,height] ${
+										isScrubbing ? "h-4 w-4" : "h-3 w-3"
+									}`}
+								/>
+								{isScrubbing && (
+									<span className="absolute bottom-full left-1/2 mb-2.5 -translate-x-1/2 whitespace-nowrap rounded-full bg-black/70 px-2 py-0.5 text-[11px] font-semibold tabular-nums backdrop-blur-sm">
+										{formatVideoTime(videoCurrentTime)}
+									</span>
+								)}
+							</div>
 						</div>
+						<span className="shrink-0 text-xs tabular-nums text-white/70">{formatVideoTime(videoDuration)}</span>
+						<button
+							type="button"
+							onClick={toggleVideoMute}
+							aria-label={isVideoMuted ? t("profile_details.unmute_video", { defaultValue: "Unmute" }) : t("profile_details.mute_video", { defaultValue: "Mute" })}
+							aria-pressed={!isVideoMuted}
+							className="glass-icon-btn flex h-8 w-8 shrink-0 items-center justify-center rounded-full transition active:scale-90"
+						>
+							{isVideoMuted ? <VolumeX className="h-4 w-4" /> : <Volume2 className="h-4 w-4" />}
+						</button>
 					</div>
-					<button
-						type="button"
-						onClick={toggleVideoMute}
-						aria-label={isVideoMuted ? t("profile_details.unmute_video", { defaultValue: "Unmute" }) : t("profile_details.mute_video", { defaultValue: "Mute" })}
-						className="inline-flex shrink-0 items-center justify-center p-1 text-white transition active:scale-90"
-						style={{ filter: "drop-shadow(0 1px 4px rgba(0,0,0,0.7))" }}
-					>
-						{isVideoMuted ? <VolumeX className="h-4 w-4" /> : <Volume2 className="h-4 w-4" />}
-					</button>
 				</div>
 			)}
 
@@ -1482,7 +1563,8 @@ export function PhotoViewer({
 													onPause={isCurrent ? () => { setIsVideoPlaying(false); setShowChrome(true); } : undefined}
 													onEnded={isCurrent ? () => { setIsVideoPlaying(false); setShowChrome(true); } : undefined}
 													onTimeUpdate={isCurrent ? (e) => {
-														if (!isScrubbingRef.current) setVideoCurrentTime(e.currentTarget.currentTime);
+														// Whole seconds, so the viewer re-renders once a second at most (the bar moves on its own, see paintVideoProgress).
+														if (!isScrubbingRef.current) setVideoCurrentTime(Math.floor(e.currentTarget.currentTime));
 													} : undefined}
 													onLoadedMetadata={(e) => {
 														if (isCurrent) setVideoDuration(e.currentTarget.duration);

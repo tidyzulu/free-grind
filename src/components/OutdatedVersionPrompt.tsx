@@ -1,5 +1,5 @@
-import { AlertTriangle, ChevronRight, Download, ExternalLink, Loader2, Smartphone, Sparkles } from "lucide-react";
-import { FullscreenPrompt, fullscreenPrimaryButtonClass, fullscreenSecondaryButtonClass, fullscreenCardClass } from "./FullscreenPrompt";
+import { ChevronRight, Download, ExternalLink, Loader2, Smartphone, Sparkles } from "lucide-react";
+import { FullscreenPrompt, fullscreenPrimaryButtonClass, fullscreenSecondaryButtonClass } from "./FullscreenPrompt";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
@@ -10,8 +10,10 @@ import { getCurrentHotswapChannel, isHotswapAvailable, whenStartupHotswapSettled
 import { areUpdateChecksEnabled } from "../services/updateChecks";
 import { formatRelativeTime } from "../utils/relativeTime";
 import { VersionCompare } from "./ui/version-compare";
+import { VersionChangesLink } from "./VersionChangesSheet";
+import { RELEASES_URL } from "../config/links-config";
 
-const DEFAULT_RELEASES_URL = "https://github.com/fdev8974/free-grind/releases";
+const DEFAULT_RELEASES_URL = RELEASES_URL;
 // Used when the release lookup fails: assume the running version is current,
 // so being offline never flags a build (e.g. a pre-release) as outdated.
 const DEFAULT_LATEST_VERSION = normalizeVersion(import.meta.env.VITE_APP_VERSION ?? "0.0.0");
@@ -40,6 +42,8 @@ export type ReleaseInfo = {
     apkUrl?: string;
     /** Releases on this channel, for the installed release's date and how many came after it. */
     releases?: { version: string; publishedAt: string | null }[];
+    /** Commit (or any ref) the latest release was built from, for the "See what's changed" diff. */
+    commit?: string;
 };
 
 function normalizeVersion(value: string): string {
@@ -110,6 +114,10 @@ function parseReleaseVersion(release: GitHubRelease): string | null {
     return semver.valid(version) ? version : null;
 }
 
+function parseReleaseCommit(release: GitHubRelease): string | undefined {
+    return release.name?.match(/\(([0-9a-f]{7,40})\)\s*$/)?.[1];
+}
+
 /**
  * Highest published release by semver. GitHub's `releases/latest` skips
  * pre-releases entirely, so this walks the release list instead and only lets
@@ -157,6 +165,7 @@ export async function fetchLatestRelease(signal: AbortSignal, includePrerelease:
                 : DEFAULT_RELEASES_URL,
         apkUrl: pickApkAsset(latest.release.assets ?? [], latest.version),
         releases: channelReleases,
+        commit: parseReleaseCommit(latest.release),
     };
 }
 
@@ -276,7 +285,7 @@ export function OutdatedVersionPromptView({
 
 	return (
 		<FullscreenPrompt
-			icon={manual ? Download : AlertTriangle}
+			icon={Download}
 			title={t("update_prompt.title", { defaultValue: "Update Available" })}
 			description={
 				manual
@@ -287,7 +296,7 @@ export function OutdatedVersionPromptView({
 			}
 			footer={footer}
 		>
-			<div className={`${fullscreenCardClass} overflow-hidden text-left`}>
+			<div className={"native-group text-start"}>
 				<VersionCompare
 					from={{
 						icon: Smartphone,
@@ -314,6 +323,7 @@ export function OutdatedVersionPromptView({
 					}}
 				/>
 			</div>
+			<VersionChangesLink from={import.meta.env.VITE_COMMIT_HASH} to={releaseInfo.commit} />
 		</FullscreenPrompt>
 	);
 }

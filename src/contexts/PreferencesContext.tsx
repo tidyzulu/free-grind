@@ -7,6 +7,8 @@ import {
 	useCallback,
 	useRef,
 	useState,
+	useLayoutEffect,
+	useSyncExternalStore,
 } from "react";
 import z from "zod";
 import { appLog } from "../utils/logger";
@@ -16,6 +18,17 @@ import { UNIT_PRESETS, type UnitsPreset } from "../utils/units";
 import { REVEAL_STRENGTH_SUBTLE, REVEAL_STRENGTH_PRONOUNCED, type RevealStrength } from "../config/ui-constants";
 import { getSetting, setSetting } from "../services/chatDb";
 import { useAuth } from "./useAuth";
+import {
+	DEFAULT_GRID_QUICK_FILTERS,
+	DEFAULT_INBOX_QUICK_FILTERS,
+	DEFAULT_RIGHT_NOW_QUICK_FILTERS,
+	GRID_QUICK_FILTER_KEYS,
+	INBOX_QUICK_FILTER_KEYS,
+	RIGHT_NOW_QUICK_FILTER_KEYS,
+	type GridQuickFilterKey,
+	type InboxQuickFilterKey,
+	type RightNowQuickFilterKey,
+} from "../config/quick-filters";
 
 export const COLOR_SCHEMES = ["system", "light", "dark"] as const;
 export type ColorScheme = (typeof COLOR_SCHEMES)[number];
@@ -182,14 +195,20 @@ const preferencesSchema = z.object({
 	showAlbumSensitiveContentWarning: z.boolean().default(true),
 	openAlbumAsBottomSheet: z.boolean().default(false),
 	splitDrawerCategories: z.boolean().default(true),
+	// Chat composer: the action buttons sit inside the input pill (WhatsApp-style) instead of in a row below.
+	compactComposer: z.boolean().default(false),
 	sortDrawerMediaByFrequency: z.boolean().default(true),
 	keepScreenOn: z.boolean().default(false),
 	autoFocusLocationSearch: z.boolean().default(false),
 	autoFocusRightNowText: z.boolean().default(true),
 	// Swipe a chat row right to pin, left to delete (mobile).
 	chatRowSwipeActions: z.boolean().default(true),
-	// Enter sends a chat message on mobile too (desktop always does; Shift+Enter is a newline there).
-	mobileEnterToSend: z.boolean().default(false),
+	// Enter sends a chat message (Shift+Enter is a newline). Device default: on for desktop, off on mobile.
+	enterToSend: z.boolean().default(false),
+	// Gesture that sends a saved phrase right away; the other one puts it into the composer ("off": tap only fills the composer).
+	savedPhraseSendGesture: z.enum(["off", "tap", "longPress"]).default("off"),
+	// Direction a chat message is swiped to reply to it (mobile). "outward": partner's messages left, ours right; "inward": the reverse.
+	swipeToReplyDirection: z.enum(["right", "left", "outward", "inward"]).default("right"),
 	// Video calls start with the camera on; when off, it has to be turned on in the call.
 	startCallsWithCameraOn: z.boolean().default(true),
 	// Camera a video call opens first on phones (front "user" / back "environment").
@@ -199,10 +218,30 @@ const preferencesSchema = z.object({
 	// What the grid double tap does while enabled: send the tap above or open the chat.
 	doubleTapAction: z.enum(["tap", "chat"]).default("tap"),
 	showGridTapStatus: z.boolean().default(true),
+	// Grid tiles of profiles hiding their distance show the estimated distance next to the icon; off: icon only.
+	showEstimatedDistance: z.boolean().default(true),
+	// Profile and chat status lines read "Online (12m left)"; off: just "Online".
+	showOnlineTimeLeft: z.boolean().default(true),
+	showLastOnline: z.boolean().default(true),
+	// Ordered quick filter pills shown above the grid, inbox and Right Now lists.
+	gridQuickFilters: z
+		.array(z.enum(GRID_QUICK_FILTER_KEYS))
+		.default([...DEFAULT_GRID_QUICK_FILTERS])
+		.catch([...DEFAULT_GRID_QUICK_FILTERS]),
+	inboxQuickFilters: z
+		.array(z.enum(INBOX_QUICK_FILTER_KEYS))
+		.default([...DEFAULT_INBOX_QUICK_FILTERS])
+		.catch([...DEFAULT_INBOX_QUICK_FILTERS]),
+	rightNowQuickFilters: z
+		.array(z.enum(RIGHT_NOW_QUICK_FILTER_KEYS))
+		.default([...DEFAULT_RIGHT_NOW_QUICK_FILTERS])
+		.catch([...DEFAULT_RIGHT_NOW_QUICK_FILTERS]),
 	defaultExpiringPhotos: z.boolean().default(false),
 	defaultAlbumExpirationType: z
 		.enum(["INDEFINITE", "ONCE", "TEN_MINUTES", "ONE_HOUR", "ONE_DAY"])
 		.default("INDEFINITE"),
+	// Own album uploads are sent with isFresh, so the people the album is shared with hear about them.
+	notifyAlbumUpdates: z.boolean().default(false),
 });
 
 type Preferences = z.infer<typeof preferencesSchema>;
@@ -244,19 +283,29 @@ type PreferencesAction =
 	| { type: "SET_SHOW_ALBUM_SENSITIVE_CONTENT_WARNING"; payload: boolean }
 	| { type: "SET_OPEN_ALBUM_AS_BOTTOM_SHEET"; payload: boolean }
 	| { type: "SET_SPLIT_DRAWER_CATEGORIES"; payload: boolean }
+	| { type: "SET_COMPACT_COMPOSER"; payload: boolean }
 	| { type: "SET_SORT_DRAWER_MEDIA_BY_FREQUENCY"; payload: boolean }
 	| { type: "SET_KEEP_SCREEN_ON"; payload: boolean }
 	| { type: "SET_DOUBLE_TAP_TAP_TYPE"; payload: number | null }
 	| { type: "SET_DOUBLE_TAP_ACTION"; payload: DoubleTapAction }
 	| { type: "SET_SHOW_GRID_TAP_STATUS"; payload: boolean }
+	| { type: "SET_SHOW_ESTIMATED_DISTANCE"; payload: boolean }
+	| { type: "SET_SHOW_ONLINE_TIME_LEFT"; payload: boolean }
+	| { type: "SET_SHOW_LAST_ONLINE"; payload: boolean }
+	| { type: "SET_GRID_QUICK_FILTERS"; payload: GridQuickFilterKey[] }
+	| { type: "SET_INBOX_QUICK_FILTERS"; payload: InboxQuickFilterKey[] }
+	| { type: "SET_RIGHT_NOW_QUICK_FILTERS"; payload: RightNowQuickFilterKey[] }
 	| { type: "SET_AUTO_FOCUS_LOCATION_SEARCH"; payload: boolean }
 	| { type: "SET_AUTO_FOCUS_RIGHT_NOW_TEXT"; payload: boolean }
 	| { type: "SET_CHAT_ROW_SWIPE_ACTIONS"; payload: boolean }
-	| { type: "SET_MOBILE_ENTER_TO_SEND"; payload: boolean }
+	| { type: "SET_ENTER_TO_SEND"; payload: boolean }
+	| { type: "SET_SAVED_PHRASE_SEND_GESTURE"; payload: Preferences["savedPhraseSendGesture"] }
+	| { type: "SET_SWIPE_TO_REPLY_DIRECTION"; payload: Preferences["swipeToReplyDirection"] }
 	| { type: "SET_START_CALLS_WITH_CAMERA_ON"; payload: boolean }
 	| { type: "SET_DEFAULT_CALL_CAMERA"; payload: Preferences["defaultCallCamera"] }
 	| { type: "SET_DEFAULT_EXPIRING_PHOTOS"; payload: boolean }
 	| { type: "SET_DEFAULT_ALBUM_EXPIRATION_TYPE"; payload: Preferences["defaultAlbumExpirationType"] }
+	| { type: "SET_NOTIFY_ALBUM_UPDATES"; payload: boolean }
 	| { type: "SET_RIGHT_NOW_STATUS"; payload: { id: number | null; expiresAt: number | null } }
 	| { type: "SET_ACCENT"; payload: { color: string; contrast: string } };
 
@@ -317,6 +366,8 @@ function preferencesReducer(
 			return { ...state, openAlbumAsBottomSheet: action.payload };
 		case "SET_SPLIT_DRAWER_CATEGORIES":
 			return { ...state, splitDrawerCategories: action.payload };
+		case "SET_COMPACT_COMPOSER":
+			return { ...state, compactComposer: action.payload };
 		case "SET_SORT_DRAWER_MEDIA_BY_FREQUENCY":
 			return { ...state, sortDrawerMediaByFrequency: action.payload };
 		case "SET_KEEP_SCREEN_ON":
@@ -327,8 +378,12 @@ function preferencesReducer(
 			return { ...state, autoFocusRightNowText: action.payload };
 		case "SET_CHAT_ROW_SWIPE_ACTIONS":
 			return { ...state, chatRowSwipeActions: action.payload };
-		case "SET_MOBILE_ENTER_TO_SEND":
-			return { ...state, mobileEnterToSend: action.payload };
+		case "SET_ENTER_TO_SEND":
+			return { ...state, enterToSend: action.payload };
+		case "SET_SAVED_PHRASE_SEND_GESTURE":
+			return { ...state, savedPhraseSendGesture: action.payload };
+		case "SET_SWIPE_TO_REPLY_DIRECTION":
+			return { ...state, swipeToReplyDirection: action.payload };
 		case "SET_START_CALLS_WITH_CAMERA_ON":
 			return { ...state, startCallsWithCameraOn: action.payload };
 		case "SET_DEFAULT_CALL_CAMERA":
@@ -339,10 +394,24 @@ function preferencesReducer(
 			return { ...state, doubleTapAction: action.payload };
 		case "SET_SHOW_GRID_TAP_STATUS":
 			return { ...state, showGridTapStatus: action.payload };
+		case "SET_SHOW_ESTIMATED_DISTANCE":
+			return { ...state, showEstimatedDistance: action.payload };
+		case "SET_SHOW_ONLINE_TIME_LEFT":
+			return { ...state, showOnlineTimeLeft: action.payload };
+		case "SET_SHOW_LAST_ONLINE":
+			return { ...state, showLastOnline: action.payload };
+		case "SET_GRID_QUICK_FILTERS":
+			return { ...state, gridQuickFilters: action.payload };
+		case "SET_INBOX_QUICK_FILTERS":
+			return { ...state, inboxQuickFilters: action.payload };
+		case "SET_RIGHT_NOW_QUICK_FILTERS":
+			return { ...state, rightNowQuickFilters: action.payload };
 		case "SET_DEFAULT_EXPIRING_PHOTOS":
 			return { ...state, defaultExpiringPhotos: action.payload };
 		case "SET_DEFAULT_ALBUM_EXPIRATION_TYPE":
 			return { ...state, defaultAlbumExpirationType: action.payload };
+		case "SET_NOTIFY_ALBUM_UPDATES":
+			return { ...state, notifyAlbumUpdates: action.payload };
 		case "SET_RIGHT_NOW_STATUS":
 			return {
 				...state,
@@ -360,9 +429,41 @@ function preferencesReducer(
 	}
 }
 
+// Screens that always render dark (e.g. Right Now) bump this while mounted;
+// light then resolves to dark, while AMOLED still applies on top.
+let forcedDarkCount = 0;
+let lastThemeArgs: Parameters<typeof applyTheme> | null = null;
+const forcedDarkListeners = new Set<() => void>();
+
+function subscribeForcedDark(listener: () => void) {
+	forcedDarkListeners.add(listener);
+	return () => {
+		forcedDarkListeners.delete(listener);
+	};
+}
+
+function setForcedDark(delta: number) {
+	forcedDarkCount += delta;
+	if (lastThemeArgs) applyTheme(...lastThemeArgs);
+	forcedDarkListeners.forEach((listener) => listener());
+}
+
+export function useIsDarkSchemeForced(): boolean {
+	return useSyncExternalStore(subscribeForcedDark, () => forcedDarkCount > 0);
+}
+
+/** Forces the dark color scheme while the calling component is mounted. */
+export function useForceDarkScheme() {
+	useLayoutEffect(() => {
+		setForcedDark(1);
+		return () => setForcedDark(-1);
+	}, []);
+}
+
 function applyTheme(colorScheme: ColorScheme, amoledMode: boolean, accentColor: string, accentContrast: string, revealStrength: RevealStrength) {
+	lastThemeArgs = [colorScheme, amoledMode, accentColor, accentContrast, revealStrength];
 	const root = document.documentElement;
-	root.setAttribute("data-scheme", colorScheme);
+	root.setAttribute("data-scheme", forcedDarkCount > 0 ? "dark" : colorScheme);
 	if (amoledMode) {
 		root.setAttribute("data-amoled", "true");
 	} else {
@@ -395,7 +496,8 @@ export const PREFERENCES_STORAGE_KEY = "app_preferences";
 // Per-profile location settings — backed by the active account's chatDb
 // (see chatDb.ts's generic settings key/value store), not this shared
 // localStorage blob, so switching accounts switches location too.
-const LOCATION_SETTINGS_KEY = "locationPreferences";
+/** Per-profile db setting holding the location (geohash, name, auto); also read by restoredFavorites.ts. */
+export const LOCATION_SETTINGS_KEY = "locationPreferences";
 
 interface StoredLocationPrefs {
 	geohash: string | null;
@@ -470,19 +572,29 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
 		showAlbumSensitiveContentWarning: true,
 		openAlbumAsBottomSheet: false,
 		splitDrawerCategories: true,
+		compactComposer: false,
 		sortDrawerMediaByFrequency: true,
 		keepScreenOn: false,
 		autoFocusLocationSearch: false,
 		autoFocusRightNowText: true,
 		chatRowSwipeActions: true,
-		mobileEnterToSend: false,
+		enterToSend: false,
+		savedPhraseSendGesture: "off",
+		swipeToReplyDirection: "right",
 		startCallsWithCameraOn: true,
 		defaultCallCamera: "user",
 		doubleTapTapType: 1,
 		doubleTapAction: "tap",
 		showGridTapStatus: true,
+		showEstimatedDistance: true,
+		showOnlineTimeLeft: true,
+		showLastOnline: true,
+		gridQuickFilters: [...DEFAULT_GRID_QUICK_FILTERS],
+		inboxQuickFilters: [...DEFAULT_INBOX_QUICK_FILTERS],
+		rightNowQuickFilters: [...DEFAULT_RIGHT_NOW_QUICK_FILTERS],
 		defaultExpiringPhotos: false,
 		defaultAlbumExpirationType: "INDEFINITE",
+		notifyAlbumUpdates: false,
 		isLoading: true,
 	});
 
@@ -492,6 +604,10 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
 			try {
 				const stored = localStorage.getItem(PREFERENCES_STORAGE_KEY);
 				const deviceDefaultStrength = isDesktopDevice() ? "pronounced" : "subtle";
+				// Compact message bar on desktop, the full action row on mobile.
+				const deviceDefaultCompactComposer = isDesktopDevice();
+				// Enter sends on desktop; on a phone keyboard it starts a new line.
+				const deviceDefaultEnterToSend = isDesktopDevice();
 
 				if (stored) {
 					const decoded = JSON.parse(stored) as Record<string, unknown>;
@@ -500,6 +616,14 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
 					if (decoded.revealEffectStrength === undefined) {
 						decoded.revealEffectStrength = deviceDefaultStrength;
 					}
+					if (decoded.compactComposer === undefined) {
+						decoded.compactComposer = deviceDefaultCompactComposer;
+					}
+					// Formerly mobileEnterToSend (desktop always sent): keep a mobile opt-in.
+					if (decoded.enterToSend === undefined) {
+						decoded.enterToSend = deviceDefaultEnterToSend || decoded.mobileEnterToSend === true;
+					}
+					delete decoded.mobileEnterToSend;
 
 					const parsed = preferencesSchema.parse(decoded);
 					// geohash/locationName/useAutoLocation are intentionally not
@@ -525,20 +649,30 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
 					dispatch({ type: "SET_SHOW_ALBUM_SENSITIVE_CONTENT_WARNING", payload: parsed.showAlbumSensitiveContentWarning });
 					dispatch({ type: "SET_OPEN_ALBUM_AS_BOTTOM_SHEET", payload: parsed.openAlbumAsBottomSheet });
 					dispatch({ type: "SET_SPLIT_DRAWER_CATEGORIES", payload: parsed.splitDrawerCategories });
+					dispatch({ type: "SET_COMPACT_COMPOSER", payload: parsed.compactComposer });
 					dispatch({ type: "SET_SORT_DRAWER_MEDIA_BY_FREQUENCY", payload: parsed.sortDrawerMediaByFrequency });
 					dispatch({ type: "SET_KEEP_SCREEN_ON", payload: parsed.keepScreenOn });
 					dispatch({ type: "SET_RIGHT_NOW_REMAINING", payload: parsed.rightNowRemaining });
 					dispatch({ type: "SET_AUTO_FOCUS_LOCATION_SEARCH", payload: parsed.autoFocusLocationSearch });
 					dispatch({ type: "SET_AUTO_FOCUS_RIGHT_NOW_TEXT", payload: parsed.autoFocusRightNowText });
 					dispatch({ type: "SET_CHAT_ROW_SWIPE_ACTIONS", payload: parsed.chatRowSwipeActions });
-					dispatch({ type: "SET_MOBILE_ENTER_TO_SEND", payload: parsed.mobileEnterToSend });
+					dispatch({ type: "SET_ENTER_TO_SEND", payload: parsed.enterToSend });
+					dispatch({ type: "SET_SAVED_PHRASE_SEND_GESTURE", payload: parsed.savedPhraseSendGesture });
+					dispatch({ type: "SET_SWIPE_TO_REPLY_DIRECTION", payload: parsed.swipeToReplyDirection });
 					dispatch({ type: "SET_START_CALLS_WITH_CAMERA_ON", payload: parsed.startCallsWithCameraOn });
 					dispatch({ type: "SET_DEFAULT_CALL_CAMERA", payload: parsed.defaultCallCamera });
 					dispatch({ type: "SET_DOUBLE_TAP_TAP_TYPE", payload: parsed.doubleTapTapType });
 					dispatch({ type: "SET_DOUBLE_TAP_ACTION", payload: parsed.doubleTapAction });
 					dispatch({ type: "SET_SHOW_GRID_TAP_STATUS", payload: parsed.showGridTapStatus });
+					dispatch({ type: "SET_SHOW_ESTIMATED_DISTANCE", payload: parsed.showEstimatedDistance });
+					dispatch({ type: "SET_SHOW_ONLINE_TIME_LEFT", payload: parsed.showOnlineTimeLeft });
+					dispatch({ type: "SET_SHOW_LAST_ONLINE", payload: parsed.showLastOnline });
+					dispatch({ type: "SET_GRID_QUICK_FILTERS", payload: parsed.gridQuickFilters });
+					dispatch({ type: "SET_INBOX_QUICK_FILTERS", payload: parsed.inboxQuickFilters });
+					dispatch({ type: "SET_RIGHT_NOW_QUICK_FILTERS", payload: parsed.rightNowQuickFilters });
 					dispatch({ type: "SET_DEFAULT_EXPIRING_PHOTOS", payload: parsed.defaultExpiringPhotos });
 					dispatch({ type: "SET_DEFAULT_ALBUM_EXPIRATION_TYPE", payload: parsed.defaultAlbumExpirationType });
+					dispatch({ type: "SET_NOTIFY_ALBUM_UPDATES", payload: parsed.notifyAlbumUpdates });
 					dispatch({
 						type: "SET_ACCENT",
 						payload: { color: parsed.accentColor, contrast: parsed.accentContrast },
@@ -547,6 +681,8 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
 				} else {
 					// No stored preferences at all, apply device defaults immediately
 					dispatch({ type: "SET_REVEAL_EFFECT_STRENGTH", payload: deviceDefaultStrength });
+					dispatch({ type: "SET_COMPACT_COMPOSER", payload: deviceDefaultCompactComposer });
+					dispatch({ type: "SET_ENTER_TO_SEND", payload: deviceDefaultEnterToSend });
 					// We also need to apply the theme with these defaults
 					applyTheme("dark", false, "#7c3aed", "#ffffff", deviceDefaultStrength);
 				}
@@ -658,19 +794,29 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
 				showAlbumSensitiveContentWarning: currentState.showAlbumSensitiveContentWarning,
 				openAlbumAsBottomSheet: currentState.openAlbumAsBottomSheet,
 				splitDrawerCategories: currentState.splitDrawerCategories,
+				compactComposer: currentState.compactComposer,
 				sortDrawerMediaByFrequency: currentState.sortDrawerMediaByFrequency,
 				keepScreenOn: currentState.keepScreenOn,
 				autoFocusLocationSearch: currentState.autoFocusLocationSearch,
 				autoFocusRightNowText: currentState.autoFocusRightNowText,
 				chatRowSwipeActions: currentState.chatRowSwipeActions,
-				mobileEnterToSend: currentState.mobileEnterToSend,
+				enterToSend: currentState.enterToSend,
+				savedPhraseSendGesture: currentState.savedPhraseSendGesture,
+				swipeToReplyDirection: currentState.swipeToReplyDirection,
 				startCallsWithCameraOn: currentState.startCallsWithCameraOn,
 				defaultCallCamera: currentState.defaultCallCamera,
 				doubleTapTapType: currentState.doubleTapTapType,
 				doubleTapAction: currentState.doubleTapAction,
 				showGridTapStatus: currentState.showGridTapStatus,
+				showEstimatedDistance: currentState.showEstimatedDistance,
+				showOnlineTimeLeft: currentState.showOnlineTimeLeft,
+				showLastOnline: currentState.showLastOnline,
+				gridQuickFilters: currentState.gridQuickFilters,
+				inboxQuickFilters: currentState.inboxQuickFilters,
+				rightNowQuickFilters: currentState.rightNowQuickFilters,
 				defaultExpiringPhotos: currentState.defaultExpiringPhotos,
 				defaultAlbumExpirationType: currentState.defaultAlbumExpirationType,
+				notifyAlbumUpdates: currentState.notifyAlbumUpdates,
 				activeRightNowId: currentState.activeRightNowId ?? null,
 				activeRightNowExpiresAt: currentState.activeRightNowExpiresAt ?? null,
 				activeRightNowHidden: currentState.activeRightNowHidden ?? false,
@@ -761,6 +907,9 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
 			if (newValues.splitDrawerCategories !== undefined) {
 				dispatch({ type: "SET_SPLIT_DRAWER_CATEGORIES", payload: newValues.splitDrawerCategories });
 			}
+			if (newValues.compactComposer !== undefined) {
+				dispatch({ type: "SET_COMPACT_COMPOSER", payload: newValues.compactComposer });
+			}
 			if (newValues.sortDrawerMediaByFrequency !== undefined) {
 				dispatch({ type: "SET_SORT_DRAWER_MEDIA_BY_FREQUENCY", payload: newValues.sortDrawerMediaByFrequency });
 			}
@@ -776,8 +925,14 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
 			if (newValues.chatRowSwipeActions !== undefined) {
 				dispatch({ type: "SET_CHAT_ROW_SWIPE_ACTIONS", payload: newValues.chatRowSwipeActions });
 			}
-			if (newValues.mobileEnterToSend !== undefined) {
-				dispatch({ type: "SET_MOBILE_ENTER_TO_SEND", payload: newValues.mobileEnterToSend });
+			if (newValues.enterToSend !== undefined) {
+				dispatch({ type: "SET_ENTER_TO_SEND", payload: newValues.enterToSend });
+			}
+			if (newValues.savedPhraseSendGesture !== undefined) {
+				dispatch({ type: "SET_SAVED_PHRASE_SEND_GESTURE", payload: newValues.savedPhraseSendGesture });
+			}
+			if (newValues.swipeToReplyDirection !== undefined) {
+				dispatch({ type: "SET_SWIPE_TO_REPLY_DIRECTION", payload: newValues.swipeToReplyDirection });
 			}
 			if (newValues.startCallsWithCameraOn !== undefined) {
 				dispatch({ type: "SET_START_CALLS_WITH_CAMERA_ON", payload: newValues.startCallsWithCameraOn });
@@ -794,11 +949,32 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
 			if (newValues.showGridTapStatus !== undefined) {
 				dispatch({ type: "SET_SHOW_GRID_TAP_STATUS", payload: newValues.showGridTapStatus });
 			}
+			if (newValues.showEstimatedDistance !== undefined) {
+				dispatch({ type: "SET_SHOW_ESTIMATED_DISTANCE", payload: newValues.showEstimatedDistance });
+			}
+			if (newValues.showOnlineTimeLeft !== undefined) {
+				dispatch({ type: "SET_SHOW_ONLINE_TIME_LEFT", payload: newValues.showOnlineTimeLeft });
+			}
+			if (newValues.showLastOnline !== undefined) {
+				dispatch({ type: "SET_SHOW_LAST_ONLINE", payload: newValues.showLastOnline });
+			}
+			if (newValues.gridQuickFilters !== undefined) {
+				dispatch({ type: "SET_GRID_QUICK_FILTERS", payload: newValues.gridQuickFilters });
+			}
+			if (newValues.inboxQuickFilters !== undefined) {
+				dispatch({ type: "SET_INBOX_QUICK_FILTERS", payload: newValues.inboxQuickFilters });
+			}
+			if (newValues.rightNowQuickFilters !== undefined) {
+				dispatch({ type: "SET_RIGHT_NOW_QUICK_FILTERS", payload: newValues.rightNowQuickFilters });
+			}
 			if (newValues.defaultExpiringPhotos !== undefined) {
 				dispatch({ type: "SET_DEFAULT_EXPIRING_PHOTOS", payload: newValues.defaultExpiringPhotos });
 			}
 			if (newValues.defaultAlbumExpirationType !== undefined) {
 				dispatch({ type: "SET_DEFAULT_ALBUM_EXPIRATION_TYPE", payload: newValues.defaultAlbumExpirationType });
+			}
+			if (newValues.notifyAlbumUpdates !== undefined) {
+				dispatch({ type: "SET_NOTIFY_ALBUM_UPDATES", payload: newValues.notifyAlbumUpdates });
 			}
 			if (
 				newValues.activeRightNowId !== undefined ||
@@ -890,20 +1066,30 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
 					showAlbumSensitiveContentWarning: preferences.showAlbumSensitiveContentWarning,
 					openAlbumAsBottomSheet: preferences.openAlbumAsBottomSheet,
 					splitDrawerCategories: preferences.splitDrawerCategories,
+					compactComposer: preferences.compactComposer,
 					sortDrawerMediaByFrequency: preferences.sortDrawerMediaByFrequency,
 					keepScreenOn: preferences.keepScreenOn,
 					rightNowRemaining: preferences.rightNowRemaining,
 					autoFocusLocationSearch: preferences.autoFocusLocationSearch,
 					autoFocusRightNowText: preferences.autoFocusRightNowText,
 					chatRowSwipeActions: preferences.chatRowSwipeActions,
-					mobileEnterToSend: preferences.mobileEnterToSend,
+					enterToSend: preferences.enterToSend,
+					savedPhraseSendGesture: preferences.savedPhraseSendGesture,
+					swipeToReplyDirection: preferences.swipeToReplyDirection,
 					startCallsWithCameraOn: preferences.startCallsWithCameraOn,
 					defaultCallCamera: preferences.defaultCallCamera,
 					doubleTapTapType: preferences.doubleTapTapType,
 					doubleTapAction: preferences.doubleTapAction,
 					showGridTapStatus: preferences.showGridTapStatus,
+					showEstimatedDistance: preferences.showEstimatedDistance,
+					showOnlineTimeLeft: preferences.showOnlineTimeLeft,
+					showLastOnline: preferences.showLastOnline,
+					gridQuickFilters: preferences.gridQuickFilters,
+					inboxQuickFilters: preferences.inboxQuickFilters,
+					rightNowQuickFilters: preferences.rightNowQuickFilters,
 					defaultExpiringPhotos: preferences.defaultExpiringPhotos,
 					defaultAlbumExpirationType: preferences.defaultAlbumExpirationType,
+					notifyAlbumUpdates: preferences.notifyAlbumUpdates,
 				}),
 			);
 		},
@@ -940,19 +1126,29 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
 		showAlbumSensitiveContentWarning: state.showAlbumSensitiveContentWarning,
 		openAlbumAsBottomSheet: state.openAlbumAsBottomSheet,
 		splitDrawerCategories: state.splitDrawerCategories,
+		compactComposer: state.compactComposer,
 		sortDrawerMediaByFrequency: state.sortDrawerMediaByFrequency,
 		keepScreenOn: state.keepScreenOn,
 		autoFocusLocationSearch: state.autoFocusLocationSearch,
 		autoFocusRightNowText: state.autoFocusRightNowText,
 		chatRowSwipeActions: state.chatRowSwipeActions,
-		mobileEnterToSend: state.mobileEnterToSend,
+		enterToSend: state.enterToSend,
+		savedPhraseSendGesture: state.savedPhraseSendGesture,
+		swipeToReplyDirection: state.swipeToReplyDirection,
 		startCallsWithCameraOn: state.startCallsWithCameraOn,
 		defaultCallCamera: state.defaultCallCamera,
 		doubleTapTapType: state.doubleTapTapType,
 		doubleTapAction: state.doubleTapAction,
 		showGridTapStatus: state.showGridTapStatus,
+		showEstimatedDistance: state.showEstimatedDistance,
+		showOnlineTimeLeft: state.showOnlineTimeLeft,
+		showLastOnline: state.showLastOnline,
+		gridQuickFilters: state.gridQuickFilters,
+		inboxQuickFilters: state.inboxQuickFilters,
+		rightNowQuickFilters: state.rightNowQuickFilters,
 		defaultExpiringPhotos: state.defaultExpiringPhotos,
 		defaultAlbumExpirationType: state.defaultAlbumExpirationType,
+		notifyAlbumUpdates: state.notifyAlbumUpdates,
 		setPreferences,
 		isLoading: state.isLoading || !isLocationLoaded,
 	};

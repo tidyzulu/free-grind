@@ -1,5 +1,7 @@
-import { AlertTriangle, Bell, Camera, Check, ChevronRight, ExternalLink, Loader2, MapPin, Mic, Monitor, Moon, RefreshCcw, Sun, X } from "lucide-react";
+import { AlertTriangle, Bell, Camera, Check, ChevronRight, ExternalLink, Loader2, MapPin, Mic, RefreshCcw, X } from "lucide-react";
 import { useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
 import {
 	isPermissionGranted,
 	requestPermission,
@@ -21,6 +23,8 @@ import type { ColorScheme } from "../contexts/PreferencesContext";
 import { LoadingScreen } from "./LoadingScreen";
 import logo from "../images/freegrind-logo.webp";
 import { fullscreenIconTileClass, fullscreenPrimaryButtonClass, fullscreenSecondaryButtonClass } from "./FullscreenPrompt";
+import { SchemePreview } from "./SchemePreview";
+import { cn } from "../utils/cn";
 
 type PermissionStatus = "idle" | "granted" | "denied" | "unavailable";
 
@@ -65,6 +69,7 @@ function withTimeout<T>(promise: Promise<T>, ms = PERMISSION_TIMEOUT_MS): Promis
 function classifyMediaError(
 	error: unknown,
 	kind: "microphone" | "camera",
+	t: TFunction,
 ): { status: PermissionStatus; detail: string } {
 	const name = error instanceof DOMException ? error.name : null;
 	const message = error instanceof Error ? error.message : String(error);
@@ -77,15 +82,15 @@ function classifyMediaError(
 		lowerMessage.includes("constraint") ||
 		lowerMessage.includes("no device")
 	) {
-		return { status: "unavailable", detail: `No ${kind} found on this device.` };
+		return { status: "unavailable", detail: t(`onboarding.errors.${kind}_not_found`) };
 	}
 	if (name === "NotReadableError") {
-		return { status: "unavailable", detail: `${kind === "microphone" ? "Microphone" : "Camera"} is in use by another app.` };
+		return { status: "unavailable", detail: t(`onboarding.errors.${kind}_in_use`) };
 	}
 	if (name === "NotAllowedError" || name === "SecurityError") {
-		return { status: "denied", detail: "Access was denied." };
+		return { status: "denied", detail: t("onboarding.errors.access_denied") };
 	}
-	return { status: "denied", detail: message || `Couldn't access the ${kind}.` };
+	return { status: "denied", detail: message || t(`onboarding.errors.${kind}_failed`) };
 }
 
 const PERM_STEPS = ["notifications", "location", "microphone", "camera"] as const;
@@ -124,7 +129,7 @@ function TopDots({ current }: { current: Step }) {
 	return (
 		<div
 			className="top-dots-wrap flex justify-center pb-3 pt-5"
-			style={{ paddingTop: "max(36px, env(safe-area-inset-top))" }}
+			style={{ paddingTop: "max(36px, var(--safe-area-top))" }}
 		>
 			<StepDots current={current} />
 		</div>
@@ -157,6 +162,7 @@ function StatusBadge({ status, isRequesting }: { status: PermissionStatus; isReq
 }
 
 export function PermissionsOnboarding({ onComplete }: { onComplete: () => void }) {
+	const { t } = useTranslation();
 	const { colorScheme, amoledMode, accentColor, setPreferences } = usePreferences();
 	const [step, setStep] = useState<Step>("loading");
 	// Which side the current step slides in from: 1 = forward, -1 = back.
@@ -339,7 +345,7 @@ export function PermissionsOnboarding({ onComplete }: { onComplete: () => void }
 			}
 		} catch (error) {
 			appLog.warn("[Onboarding] Failed to request microphone permission", error);
-			const { status, detail } = classifyMediaError(error, "microphone");
+			const { status, detail } = classifyMediaError(error, "microphone", t);
 			setMicrophoneStatus(status);
 			setMicrophoneDetail(detail);
 		} finally {
@@ -369,7 +375,7 @@ export function PermissionsOnboarding({ onComplete }: { onComplete: () => void }
 			}
 		} catch (error) {
 			appLog.warn("[Onboarding] Failed to request camera permission", error);
-			const { status, detail } = classifyMediaError(error, "camera");
+			const { status, detail } = classifyMediaError(error, "camera", t);
 			setCameraStatus(status);
 			setCameraDetail(detail);
 		} finally {
@@ -393,27 +399,27 @@ export function PermissionsOnboarding({ onComplete }: { onComplete: () => void }
 					<div
 						key={step} className={`flex flex-1 flex-col items-center justify-center px-8 text-center ${pageClass}`}
 						style={{
-							paddingTop: "max(48px, env(safe-area-inset-top))",
-							paddingBottom: "max(48px, calc(env(safe-area-inset-bottom) + 80px))",
+							paddingTop: "max(48px, var(--safe-area-top))",
+							paddingBottom: "max(48px, calc(var(--safe-area-bottom) + 80px))",
 						}}
 					>
 						<img src={logo} alt="" className="mb-6 h-16 w-16 rounded-2xl object-cover" />
-						<h1 className="text-2xl font-bold text-[var(--text)]">Let's get you set up</h1>
+						<h1 className="text-2xl font-bold text-[var(--text)]">{t("onboarding.welcome_title")}</h1>
 						<p className="mt-2 max-w-xs text-sm leading-relaxed text-[var(--text-muted)]">
-							Just a few quick steps to get the most out of Free Grind.
+							{t("onboarding.welcome_desc")}
 						</p>
 					</div>
 
 					<div
 						className="flex h-28 shrink-0 flex-col justify-end gap-2 px-6"
-						style={{ paddingBottom: "max(28px, calc(env(safe-area-inset-bottom) + 12px))" }}
+						style={{ paddingBottom: "max(28px, calc(var(--safe-area-bottom) + 12px))" }}
 					>
 						<button
 							type="button"
 							onClick={advance}
 							className={fullscreenPrimaryButtonClass}
 						>
-							Get Started
+							{t("onboarding.get_started")}
 							<ChevronRight className="h-4 w-4" />
 						</button>
 					</div>
@@ -425,11 +431,11 @@ export function PermissionsOnboarding({ onComplete }: { onComplete: () => void }
 	// ── Theme ────────────────────────────────────────────────────────────────
 	if (step === "theme") {
 		// AMOLED isn't a color scheme of its own: it's dark plus the pure-black flag.
-		const options: { key: string; value: ColorScheme; amoled: boolean; label: string; sub: string; icon: typeof Sun; previewBg: string; previewFg: string }[] = [
-			{ key: "system", value: "system", amoled: false, label: "System", sub: "Follows your device", icon: Monitor, previewBg: "linear-gradient(135deg, #eceff4 50%, #1f2835 50%)", previewFg: "#96a2b6" },
-			{ key: "light",  value: "light",  amoled: false, label: "Light",  sub: "Always light",        icon: Sun,     previewBg: "#eceff4",  previewFg: "#6d28d9" },
-			{ key: "dark",   value: "dark",   amoled: false, label: "Dark",   sub: "Always dark",         icon: Moon,    previewBg: "#1f2835",  previewFg: "#96a2b6" },
-			{ key: "amoled", value: "dark",   amoled: true,  label: "AMOLED", sub: "Pure black for OLED screens", icon: Moon, previewBg: "#000000", previewFg: "#96a2b6" },
+		const options: { key: string; value: ColorScheme; amoled: boolean; label: string; sub: string }[] = [
+			{ key: "system", value: "system", amoled: false, label: t("customizability.schemes.system"), sub: t("onboarding.theme_system_desc") },
+			{ key: "light",  value: "light",  amoled: false, label: t("customizability.schemes.light"), sub: t("onboarding.theme_light_desc") },
+			{ key: "dark",   value: "dark",   amoled: false, label: t("customizability.schemes.dark"), sub: t("onboarding.theme_dark_desc") },
+			{ key: "amoled", value: "dark",   amoled: true,  label: t("customizability.schemes.amoled", { defaultValue: "AMOLED" }), sub: t("onboarding.theme_amoled_desc") },
 		];
 		return (
 			<div className="fs-card-outer fs-card-overlay z-[300] no-touch-callout">
@@ -438,27 +444,24 @@ export function PermissionsOnboarding({ onComplete }: { onComplete: () => void }
 
 					<div key={step} className={`flex flex-1 flex-col justify-center px-6 ${pageClass}`}>
 						<div className="mb-7 text-center">
-							<h2 className="text-xl font-bold text-[var(--text)]">Choose Your Theme</h2>
-							<p className="mt-1 text-sm text-[var(--text-muted)]">You can change this anytime in Settings.</p>
+							<h2 className="text-xl font-bold text-[var(--text)]">{t("onboarding.theme_title")}</h2>
+							<p className="mt-1 text-sm text-[var(--text-muted)]">{t("onboarding.change_later")}</p>
 						</div>
 
-						<div className="flex flex-col gap-2.5">
-							{options.map(({ key, value, amoled, label, sub, icon: Icon, previewBg, previewFg }) => {
+						{/* One group of tiles, like the settings lists; each option shows the
+						    same mini app preview as the color scheme picker in Settings. */}
+						<div className="native-group">
+							{options.map(({ key, value, amoled, label, sub }) => {
 								const active = colorScheme === value && (value !== "dark" || amoledMode === amoled);
 								return (
 									<button
 										key={key}
 										type="button"
 										onClick={() => setPreferences({ colorScheme: value, amoledMode: amoled })}
-										className={`flex items-center gap-4 rounded-2xl p-4 text-left transition-[transform,background-color] duration-150 active:scale-[0.99] native-card ${active ? "accent-tint-18" : "hover:brightness-110"}`}
+										aria-pressed={active}
+										className={`flex items-center gap-4 px-4 py-3.5 text-start transition-[transform,background-color] duration-150 active:scale-[0.99] ${active ? "accent-tint-14" : "hover-fill"}`}
 									>
-										<div
-											className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl"
-											// Inset hairline so the black AMOLED swatch doesn't vanish on a black page.
-											style={{ background: previewBg, boxShadow: "inset 0 0 0 1px color-mix(in srgb, var(--text) 14%, transparent)" }}
-										>
-											<Icon className="h-5 w-5" style={{ color: previewFg }} />
-										</div>
+										<SchemePreview scheme={value} amoled={amoled} className="w-16 shrink-0 rounded-lg" />
 
 										<div className="flex-1">
 											<p className="text-sm font-semibold text-[var(--text)]">{label}</p>
@@ -482,14 +485,14 @@ export function PermissionsOnboarding({ onComplete }: { onComplete: () => void }
 
 					<div
 						className="flex h-28 shrink-0 flex-col justify-end gap-2 px-6"
-						style={{ paddingBottom: "max(28px, calc(env(safe-area-inset-bottom) + 12px))" }}
+						style={{ paddingBottom: "max(28px, calc(var(--safe-area-bottom) + 12px))" }}
 					>
 						<button
 							type="button"
 							onClick={advance}
 							className={fullscreenPrimaryButtonClass}
 						>
-							Continue
+							{t("onboarding.continue")}
 							<ChevronRight className="h-4 w-4" />
 						</button>
 					</div>
@@ -507,46 +510,63 @@ export function PermissionsOnboarding({ onComplete }: { onComplete: () => void }
 
 					<div key={step} className={`flex flex-1 flex-col justify-center px-6 ${pageClass}`}>
 						<div className="mb-7 text-center">
-							<h2 className="text-xl font-bold text-[var(--text)]">Pick Your Color</h2>
-							<p className="mt-1 text-sm text-[var(--text-muted)]">You can change this anytime in Settings.</p>
+							<h2 className="text-xl font-bold text-[var(--text)]">{t("onboarding.accent_title")}</h2>
+							<p className="mt-1 text-sm text-[var(--text-muted)]">{t("onboarding.change_later")}</p>
 						</div>
 
-						{/* Same height as the theme step's four option rows, so the
-						    title doesn't jump between the two steps. */}
-						<div className="mx-auto grid h-[358px] grid-cols-4 content-start gap-4 pt-16">
-							{ACCENT_PRESETS.map((preset) => {
-								const active = accentColor === preset.color;
-								return (
-									<button
-										key={preset.color}
-										type="button"
-										onClick={() => setPreferences({ accentColor: preset.color, accentContrast: preset.contrast })}
-										title={preset.name}
-										aria-label={preset.name}
-										className="flex h-14 w-14 items-center justify-center rounded-full transition-transform active:scale-95"
-										style={{
-											background: preset.color,
-											outline: active ? `2.5px solid ${preset.color}` : "none",
-											outlineOffset: "3px",
-										}}
-									>
-										{active && <Check className="h-5 w-5" style={{ color: preset.contrast }} />}
-									</button>
-								);
-							})}
+						{/* Two columns of tiles in the theme step's style: color, name and the
+						    same radio. A native-group laid out as a grid, so the tiles get the
+						    group's fill (raised on the desktop card too); the corner classes
+						    round only the block's four outer corners. Its fixed height keeps
+						    the title level with the theme step's. */}
+						<div className="flex h-[358px] items-center">
+							<div className="native-group grid w-full grid-cols-2">
+								{ACCENT_PRESETS.map((preset, index) => {
+									const active = accentColor === preset.color;
+									const lastRow = index >= ACCENT_PRESETS.length - 2;
+									return (
+										<button
+											key={preset.color}
+											type="button"
+											onClick={() => setPreferences({ accentColor: preset.color, accentContrast: preset.contrast })}
+											aria-pressed={active}
+											className={cn(
+												"flex items-center gap-3 !rounded-[6px] px-3 py-3 text-start transition-[transform,background-color] duration-150 active:scale-[0.99]",
+												index === 0 && "!rounded-ss-[20px]",
+												index === 1 && "!rounded-se-[20px]",
+												lastRow && index % 2 === 0 && "!rounded-es-[20px]",
+												lastRow && index % 2 === 1 && "!rounded-ee-[20px]",
+												active ? "accent-tint-14" : "hover-fill",
+											)}
+										>
+											<span className="h-7 w-7 shrink-0 rounded-lg" style={{ background: preset.color }} />
+											<span className="min-w-0 flex-1 truncate text-sm font-semibold text-[var(--text)]">{preset.name}</span>
+											<span
+												className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full border-2 transition-all"
+												style={{
+													borderColor: active ? "var(--accent)" : "color-mix(in srgb, var(--text) 25%, transparent)",
+													background: active ? "var(--accent)" : "transparent",
+												}}
+											>
+												{active && <Check className="h-3 w-3 text-[var(--accent-contrast)]" />}
+											</span>
+										</button>
+									);
+								})}
+							</div>
 						</div>
 					</div>
 
 					<div
 						className="flex h-28 shrink-0 flex-col justify-end gap-2 px-6"
-						style={{ paddingBottom: "max(28px, calc(env(safe-area-inset-bottom) + 12px))" }}
+						style={{ paddingBottom: "max(28px, calc(var(--safe-area-bottom) + 12px))" }}
 					>
 						<button
 							type="button"
 							onClick={advance}
 							className={fullscreenPrimaryButtonClass}
 						>
-							Continue
+							{t("onboarding.continue")}
 							<ChevronRight className="h-4 w-4" />
 						</button>
 					</div>
@@ -572,26 +592,26 @@ export function PermissionsOnboarding({ onComplete }: { onComplete: () => void }
 							<div className={fullscreenIconTileClass}>
 								<RefreshCcw className="h-9 w-9" />
 							</div>
-							<div className="absolute -right-2 -top-2">
+							<div className="absolute -end-2 -top-2">
 								<StatusBadge status={updatesStatus} />
 							</div>
 						</div>
-						<h2 className="text-xl font-bold text-[var(--text)]">Automatic Updates</h2>
+						<h2 className="text-xl font-bold text-[var(--text)]">{t("onboarding.updates_title")}</h2>
 						<div className="flex min-h-24 flex-col items-center">
 							<p className="mt-2 max-w-xs text-sm leading-relaxed text-[var(--text-muted)]">
-								Automatically downloads the newest app interface built by GitHub Actions and reloads as soon as it's available. Only updates signed with our key are installed. When off, you'll be asked before each update.
+								{t("onboarding.updates_desc")}
 							</p>
 							<button
 								type="button"
 								onClick={() => void openExternalUrl(GITHUB_OTA_SIGNING_URL)}
 								className="mt-2 inline-flex items-center gap-1 text-xs font-medium text-[var(--accent)] hover:underline"
 							>
-								More about that
+								{t("onboarding.updates_more")}
 								<ExternalLink className="h-3 w-3" />
 							</button>
 							{updatesStatus === "denied" && (
 								<p className="mt-2 text-xs text-[var(--text-muted)]">
-									You can turn this on in Settings later.
+									{t("onboarding.updates_later")}
 								</p>
 							)}
 						</div>
@@ -599,7 +619,7 @@ export function PermissionsOnboarding({ onComplete }: { onComplete: () => void }
 
 					<div
 						className="flex h-44 shrink-0 flex-col justify-end gap-2 px-6"
-						style={{ paddingBottom: "max(28px, calc(env(safe-area-inset-bottom) + 12px))" }}
+						style={{ paddingBottom: "max(28px, calc(var(--safe-area-bottom) + 12px))" }}
 					>
 						{settled ? (
 							<button
@@ -607,7 +627,7 @@ export function PermissionsOnboarding({ onComplete }: { onComplete: () => void }
 								onClick={advance}
 								className={fullscreenPrimaryButtonClass}
 							>
-								Continue
+								{t("onboarding.continue")}
 								<ChevronRight className="h-4 w-4" />
 							</button>
 						) : (
@@ -617,14 +637,14 @@ export function PermissionsOnboarding({ onComplete }: { onComplete: () => void }
 									onClick={() => choose(true)}
 									className={fullscreenPrimaryButtonClass}
 								>
-									Turn On
+									{t("onboarding.updates_on")}
 								</button>
 								<button
 									type="button"
 									onClick={() => choose(false)}
 									className={fullscreenSecondaryButtonClass}
 								>
-									Ask me each time
+									{t("onboarding.updates_ask")}
 								</button>
 							</>
 						)}
@@ -645,24 +665,24 @@ export function PermissionsOnboarding({ onComplete }: { onComplete: () => void }
 						<div className="mb-6 flex h-20 w-20 shrink-0 items-center justify-center rounded-[1.5rem] bg-gradient-to-br from-amber-400 to-amber-600 text-white shadow-xl shadow-amber-500/25">
 							<AlertTriangle className="h-9 w-9" />
 						</div>
-						<h2 className="text-xl font-bold text-[var(--text)]">Caution</h2>
+						<h2 className="text-xl font-bold text-[var(--text)]">{t("onboarding.scam_title")}</h2>
 						<div className="flex min-h-24 flex-col items-center">
 							<p className="mt-2 max-w-xs text-sm leading-relaxed text-[var(--text-muted)]">
-								Free Grind is free — and always will be. If someone sold you access or is asking you to pay, it's a scam. Don't pay, and report it.
+								{t("onboarding.scam_desc")}
 							</p>
 						</div>
 					</div>
 
 					<div
 						className="flex h-44 shrink-0 flex-col justify-end gap-2 px-6"
-						style={{ paddingBottom: "max(28px, calc(env(safe-area-inset-bottom) + 12px))" }}
+						style={{ paddingBottom: "max(28px, calc(var(--safe-area-bottom) + 12px))" }}
 					>
 						<button
 							type="button"
 							onClick={handleDone}
 							className={fullscreenPrimaryButtonClass}
 						>
-							Got it
+							{t("onboarding.got_it")}
 							<ChevronRight className="h-4 w-4" />
 						</button>
 					</div>
@@ -675,30 +695,34 @@ export function PermissionsOnboarding({ onComplete }: { onComplete: () => void }
 	const permConfig = {
 		notifications: {
 			icon: Bell,
-			title: "Notifications",
-			description: "Stay up to date with new messages, taps, and activity from people nearby.",
+			title: t("onboarding.notifications_title"),
+			allow: t("onboarding.notifications_allow"),
+			description: t("onboarding.notifications_desc"),
 			status: notificationStatus,
 			onRequest: requestNotifications,
 		},
 		location: {
 			icon: MapPin,
-			title: "Location",
-			description: "Discover people near you and appear on the map for others to find you.",
+			title: t("onboarding.location_title"),
+			allow: t("onboarding.location_allow"),
+			description: t("onboarding.location_desc"),
 			status: locationStatus,
 			onRequest: requestLocation,
 		},
 		microphone: {
 			icon: Mic,
-			title: "Microphone",
-			description: "Record and send voice messages in conversations.",
+			title: t("onboarding.microphone_title"),
+			allow: t("onboarding.microphone_allow"),
+			description: t("onboarding.microphone_desc"),
 			status: microphoneStatus,
 			detail: microphoneDetail,
 			onRequest: requestMicrophone,
 		},
 		camera: {
 			icon: Camera,
-			title: "Camera",
-			description: "Take photos and videos to share, and use video calls.",
+			title: t("onboarding.camera_title"),
+			allow: t("onboarding.camera_allow"),
+			description: t("onboarding.camera_desc"),
 			status: cameraStatus,
 			detail: cameraDetail,
 			onRequest: requestCamera,
@@ -721,7 +745,7 @@ export function PermissionsOnboarding({ onComplete }: { onComplete: () => void }
 						<div className={fullscreenIconTileClass}>
 							<Icon className="h-9 w-9" />
 						</div>
-						<div className="absolute -right-2 -top-2">
+						<div className="absolute -end-2 -top-2">
 							<StatusBadge status={status} isRequesting={isRequesting} />
 						</div>
 					</div>
@@ -738,7 +762,7 @@ export function PermissionsOnboarding({ onComplete }: { onComplete: () => void }
 
 						{(status === "denied" || status === "unavailable") && (
 							<p className="mt-2 text-xs text-[var(--text-muted)]">
-								You can enable this in Settings later.
+								{t("onboarding.permission_later")}
 							</p>
 						)}
 					</div>
@@ -746,7 +770,7 @@ export function PermissionsOnboarding({ onComplete }: { onComplete: () => void }
 
 				<div
 					className="flex h-44 shrink-0 flex-col justify-end gap-2 px-6"
-					style={{ paddingBottom: "max(28px, calc(env(safe-area-inset-bottom) + 12px))" }}
+					style={{ paddingBottom: "max(28px, calc(var(--safe-area-bottom) + 12px))" }}
 				>
 					<button
 						type="button"
@@ -755,11 +779,11 @@ export function PermissionsOnboarding({ onComplete }: { onComplete: () => void }
 						className={fullscreenPrimaryButtonClass}
 					>
 						{settled ? (
-							<>Continue <ChevronRight className="h-4 w-4" /></>
+							<>{t("onboarding.continue")} <ChevronRight className="h-4 w-4" /></>
 						) : isRequesting ? (
-							<><Loader2 className="h-4 w-4 animate-spin" /> Requesting…</>
+							<><Loader2 className="h-4 w-4 animate-spin" /> {t("onboarding.requesting")}</>
 						) : (
-							<>Allow {cfg.title}</>
+							cfg.allow
 						)}
 					</button>
 					{!settled && (
@@ -768,7 +792,7 @@ export function PermissionsOnboarding({ onComplete }: { onComplete: () => void }
 							onClick={advance}
 							className={fullscreenSecondaryButtonClass}
 						>
-							Skip for now
+							{t("onboarding.skip")}
 						</button>
 					)}
 				</div>

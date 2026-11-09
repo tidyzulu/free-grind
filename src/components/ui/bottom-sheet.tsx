@@ -7,6 +7,8 @@ import { useTranslation } from "react-i18next";
 const BottomSheetContext = createContext<() => void>(() => {});
 // Whether the enclosing sheet has detents (a fixed height its content fills).
 const BottomSheetDetentedContext = createContext(false);
+// The enclosing sheet's entry in openSheets.
+const BottomSheetIdContext = createContext<object | null>(null);
 
 /** How far the panel extends below the screen edge, hidden, so the bouncy
  * open/settle overshoot never reveals a gap underneath it. */
@@ -15,7 +17,7 @@ const SHEET_BLEED = 48;
 /** The panel's bottom padding (safe area + bleed). Content that should run
  * edge to edge down to the sheet's bottom (e.g. a map) cancels it with a
  * negative margin and re-adds it inside. */
-export const SHEET_BOTTOM_PADDING = `calc(max(16px, env(safe-area-inset-bottom)) + ${SHEET_BLEED}px)`;
+export const SHEET_BOTTOM_PADDING = `calc(max(16px, var(--safe-area-bottom)) + ${SHEET_BLEED}px)`;
 
 /** True inside an `expandable` sheet on mobile: the panel has a fixed height,
  * so a scroll area should fill it (`min-h-0 flex-1`) rather than cap itself. */
@@ -46,6 +48,14 @@ export const isSheetDragHeld = () => sheetDragHolds > 0;
 
 /** Lets other back-button handlers (useAndroidBackToGrid) stand aside while a sheet handles it. */
 export const isAnyBottomSheetOpen = () => openSheets.length > 0;
+
+/** Whether the enclosing sheet is currently the topmost one (no other sheet
+ * stacked on it) — for its own keyboard shortcuts. A stable function, to call
+ * when the key is pressed. */
+export function useIsTopmostBottomSheet(): () => boolean {
+	const id = useContext(BottomSheetIdContext);
+	return useCallback(() => id != null && openSheets[openSheets.length - 1] === id, [id]);
+}
 
 function isAndroid(): boolean {
 	try {
@@ -109,6 +119,17 @@ function sheetBgColor(bgClass: string): string {
 	return match ? match[1].replace(/_/g, " ") : "var(--surface)";
 }
 
+const SUPPORTS_COLOR_MIX = typeof CSS !== "undefined" && CSS.supports("color", "color-mix(in srgb, red, blue)");
+
+/** The sheet's fill with a light accent tint, like the cards. Mixed into
+ * --sheet-bg itself (not laid over the panel) so the footer fade and the
+ * tinted sheet buttons match it. Only for a plain `bg-[...]` fill, and only
+ * with color-mix support: without it the var() would leave the panel see-through. */
+function tintedSheetBg(bgClass: string): string | null {
+	if (!SUPPORTS_COLOR_MIX || !/(?:^|\s)bg-\[/.test(bgClass)) return null;
+	return `color-mix(in srgb, ${sheetBgColor(bgClass)} 95%, var(--accent))`;
+}
+
 // The press scale is gentler than on the compact footer controls (0.96):
 // these pills are flex-1 and often full width, and a scale shrinks a wide
 // button by many more pixels than a narrow one.
@@ -123,6 +144,11 @@ const SHEET_BUTTON_VARIANTS = {
 	// content, a transparent tint looked washed out and barely visible.
 	/** Soft neutral fill. */
 	secondary: "bg-[color-mix(in_srgb,var(--text)_12%,var(--sheet-bg,var(--surface)))] text-[var(--text)] hover:bg-[color-mix(in_srgb,var(--text)_16%,var(--sheet-bg,var(--surface)))] active:bg-[color-mix(in_srgb,var(--text)_20%,var(--sheet-bg,var(--surface)))]",
+	/** A light accent tint, e.g. Cancel beside a filled or red confirm. The
+	 * sheet color comes first in the mix: the build falls back to the first
+	 * color where color-mix is unsupported, and accent text on solid accent
+	 * would vanish. */
+	accent: "bg-[color-mix(in_srgb,var(--sheet-bg,var(--surface))_86%,var(--accent))] text-[var(--accent-readable)] hover:bg-[color-mix(in_srgb,var(--sheet-bg,var(--surface))_80%,var(--accent))] active:bg-[color-mix(in_srgb,var(--sheet-bg,var(--surface))_74%,var(--accent))]",
 	destructive: "bg-[color-mix(in_srgb,#ef4444_18%,var(--sheet-bg,var(--surface)))] text-red-500 hover:bg-[color-mix(in_srgb,#ef4444_26%,var(--sheet-bg,var(--surface)))]",
 	warning: "bg-[color-mix(in_srgb,#f97316_18%,var(--sheet-bg,var(--surface)))] text-orange-500 hover:bg-[color-mix(in_srgb,#f97316_26%,var(--sheet-bg,var(--surface)))]",
 } as const;
@@ -156,6 +182,17 @@ export function SheetCloseButton({ disabled, label }: { disabled?: boolean; labe
 	);
 }
 
+/** "2/5" pill beside a sheet title, for a step through several picked files.
+ * Tinted like the `accent` sheet button, sheet color first in the mix. */
+export function SheetStepBadge({ index, total }: { index: number; total: number }) {
+	return (
+		<span className="inline-flex shrink-0 items-center rounded-full bg-[color-mix(in_srgb,var(--sheet-bg,var(--surface))_84%,var(--accent))] px-2 py-0.5 text-xs font-bold tabular-nums text-[var(--accent-readable)]">
+			{index}
+			<span className="opacity-60">/{total}</span>
+		</span>
+	);
+}
+
 interface BottomSheetProps {
 	onClose: () => void;
 	/** Gives the sheet two native-style detents: it opens at medium height
@@ -170,6 +207,9 @@ interface BottomSheetProps {
 	zIndex?: string;
 	bg?: string;
 	panelClassName?: string;
+	/** Replaces the app accent inside the sheet (e.g. Right Now's own color),
+	 * contrasted with white. */
+	accentColor?: string;
 	/** Receives the sheet's animated close, for code outside its children —
 	 * e.g. a parent closing it once an async action succeeded. Use this
 	 * instead of unmounting the sheet directly, which skips the slide-out
@@ -187,6 +227,7 @@ export function BottomSheet({
 	zIndex = "z-[60]",
 	bg = "bg-[var(--surface)]",
 	panelClassName = "",
+	accentColor,
 	closeRef,
 	children,
 }: BottomSheetProps) {
@@ -249,7 +290,10 @@ export function BottomSheet({
 		const historyId = historyIdRef.current;
 		if (!didPushHistoryRef.current) {
 			didPushHistoryRef.current = true;
-			history.pushState({ bottomSheet: true, bottomSheetId: historyId }, "");
+			// Keeps the router's state (location state, key, index): landing on
+			// this entry by a back press — e.g. one a sheet unmounted without
+			// popping left behind — mustn't lose it, like a profile's edit mode.
+			history.pushState({ ...(history.state as object | null), bottomSheet: true, bottomSheetId: historyId }, "");
 		}
 		const onPopState = () => {
 			// Ids grow in stacking order, so a pop that lands on this sheet's
@@ -555,6 +599,7 @@ export function BottomSheet({
 
 	return (
 		<BottomSheetContext.Provider value={animateClose}>
+		<BottomSheetIdContext.Provider value={sheetIdRef.current}>
 		<BottomSheetDetentedContext.Provider value={isDetented}>
 			<div
 				ref={rootRef}
@@ -572,11 +617,18 @@ export function BottomSheet({
 				/>
 				<div
 					ref={panelRef}
-					className={`relative flex flex-col ${bg} overflow-hidden overscroll-contain ${isDesktop ? "w-full max-w-[800px] mx-auto rounded-t-2xl border-x border-t border-[var(--border)] shadow-2xl" : "w-full rounded-t-[24px] shadow-[0_-1px_4px_rgba(0,0,0,0.25),0_-10px_36px_rgba(0,0,0,0.5)]"} ${panelClassName}`}
+					data-sheet-panel
+					className={`relative flex flex-col ${bg} overflow-hidden overscroll-contain ${isDesktop ? "w-full max-w-[800px] mx-auto rounded-t-2xl shadow-[0_-1px_6px_rgba(0,0,0,0.2),0_-8px_40px_rgba(0,0,0,0.45)]" : "w-full rounded-t-[24px] shadow-[0_-1px_4px_rgba(0,0,0,0.25),0_-10px_36px_rgba(0,0,0,0.5)]"} ${panelClassName}`}
 					// transform, height and transition are set by applyLayout.
 					style={{
 						willChange: "transform",
-						"--sheet-bg": sheetBgColor(bg),
+						// Set here so --sheet-bg below already mixes in this accent.
+						...(accentColor ? { "--accent": accentColor, "--accent-contrast": "#fff", "--accent-readable": accentColor } : {}),
+						"--sheet-bg": tintedSheetBg(bg) ?? sheetBgColor(bg),
+						backgroundColor: tintedSheetBg(bg) ? "var(--sheet-bg)" : undefined,
+						// Inside the sheet, surface-2 (code blocks, fields, icon tiles) is the
+						// SheetCard fill, derived from the tinted sheet, not the palette's own.
+						"--surface-2": tintedSheetBg(bg) ? "color-mix(in srgb, var(--sheet-bg) 93%, var(--text))" : undefined,
 						// Extends SHEET_BLEED past the screen edge so the open/settle overshoot
 						// never shows a gap under the sheet.
 						marginBottom: -SHEET_BLEED,
@@ -592,9 +644,11 @@ export function BottomSheet({
 					)}
 					{isDesktop && <div className="pt-4" />}
 					{children}
+					{!isDesktop && <div aria-hidden className="sheet-nav-fade" />}
 				</div>
 			</div>
 		</BottomSheetDetentedContext.Provider>
+		</BottomSheetIdContext.Provider>
 		</BottomSheetContext.Provider>
 	);
 }

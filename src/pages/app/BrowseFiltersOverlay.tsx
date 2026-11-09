@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { RangeSlider } from "../../components/ui/range-slider";
+import { EditQuickFiltersButton } from "../../components/quick-filters/EditQuickFiltersButton";
 import { BottomSheet, useBottomSheetClose, SheetCloseButton, SHEET_FOOTER_CLASS, sheetButtonClass } from "../../components/ui/bottom-sheet";
 import { SheetChip, SheetMoreButton, SheetSearchInput, SheetSection } from "../../components/ui/sheet-section";
 import { usePreferences } from "../../contexts/PreferencesContext";
@@ -102,6 +103,7 @@ function BrowseFiltersSheetContent({
 	const [weightGramsMax, setWeightGramsMax] = useState(normalized.weightGramsMax);
 	const [genders, setGenders] = useState<number[]>(normalized.genders);
 	const [tribes, setTribes] = useState<number[]>(normalized.tribes);
+	const [tribesImInto, setTribesImInto] = useState<number[]>(normalized.tribesImInto);
 	const [lookingFor, setLookingFor] = useState<number[]>(normalized.lookingFor);
 	const [relationshipStatuses, setRelationshipStatuses] = useState<number[]>(normalized.relationshipStatuses);
 	const [bodyTypes, setBodyTypes] = useState<number[]>(normalized.bodyTypes);
@@ -169,6 +171,7 @@ function BrowseFiltersSheetContent({
 		() => [{ value: -1, label: t("browse_filters.not_specified") }, ...getTribeOptions(t)],
 		[t],
 	);
+	const tribesImIntoFilterOptions = useMemo<ManagedOption[]>(() => getTribeOptions(t), [t]);
 	const lookingForFilterOptions = useMemo<ManagedOption[]>(
 		() => [{ value: -1, label: t("browse_filters.not_specified") }, ...getLookingForOptions(t)],
 		[t],
@@ -236,7 +239,7 @@ function BrowseFiltersSheetContent({
 			ageMin, ageMax,
 			heightCmMin, heightCmMax,
 			weightGramsMin, weightGramsMax,
-			genders, tribes, lookingFor, relationshipStatuses,
+			genders, tribes, tribesImInto, lookingFor, relationshipStatuses,
 			bodyTypes, sexualPositions, meetAt,
 			nsfwPics, tags,
 			nicknameFilter,
@@ -307,8 +310,15 @@ function BrowseFiltersSheetContent({
 	return (
 		<>
 			<div className="mb-3 flex items-center justify-between gap-3">
-				<h3 className="text-sm font-semibold text-[var(--text)]">{t("browse_filters.title")}</h3>
-				<SheetCloseButton />
+				<h3 className="text-sm font-semibold text-[var(--text)]">{t("right_now.filters")}</h3>
+				<div className="flex shrink-0 items-center gap-2">
+					<EditQuickFiltersButton
+						scope="grid"
+						accentColor={accentColor}
+						accentContrast={isExploreActive ? "#ffffff" : "var(--accent-contrast)"}
+					/>
+					<SheetCloseButton />
+				</div>
 			</div>
 
 			<div className="-mx-4 min-h-0 flex-1 overflow-y-auto px-4" data-lenis-prevent>
@@ -407,6 +417,12 @@ function BrowseFiltersSheetContent({
 						tribeFilterOptions,
 						tribes,
 						(value) => toggleMultiSelect(value, setTribes),
+					)}
+					{renderChipSection(
+						t("browse_filters.tribes_theyre_into"),
+						tribesImIntoFilterOptions,
+						tribesImInto,
+						(value) => toggleMultiSelect(value, setTribesImInto),
 					)}
 					{renderChipSection(
 						t("profile_editor.sections.expectations.looking_for"),

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
 	CheckCheck,
@@ -12,11 +12,13 @@ import { ToggleRow } from "../../components/ui/toggle-row";
 import { SelectRow } from "../../components/ui/select-row";
 import { usePreferences } from "../../contexts/PreferencesContext";
 import { useSettingsHighlight } from "../../hooks/useSettingsHighlight";
+import { MapVisibilitySection, RightNowExplicitImagesRow } from "./MapPrivacySettings";
 import {
 	type AppDisguiseId,
 	getCurrentAppDisguise,
 	isAppDisguiseSupported,
 	setAppDisguise,
+	syncAppDisguiseFromNative,
 } from "../../utils/appDisguise";
 import {
 	getHideReadReceiptsGlobal,
@@ -36,6 +38,11 @@ const DISGUISE_OPTIONS: { id: AppDisguiseId; icon: typeof GhostFilled; iconClass
 	{ id: "weather", icon: CloudSunFilled, iconClass: "bg-sky-500/15 text-sky-400", labelKey: "privacy.app_disguise_weather" },
 ];
 
+/** Explanation under a settings group, outside its tiles so it doesn't read as a row. */
+function Footnote({ children }: { children: React.ReactNode }) {
+	return <p className="mt-2 px-4 text-xs leading-relaxed text-[var(--text-muted)]">{children}</p>;
+}
+
 export function SettingsPrivacyPage() {
 	const { t } = useTranslation();
 	const highlightId = useSettingsHighlight();
@@ -47,6 +54,7 @@ export function SettingsPrivacyPage() {
 		blurAlbumMedia,
 		blurRightNowMedia,
 		showAlbumSensitiveContentWarning,
+		notifyAlbumUpdates,
 		setPreferences,
 	} = usePreferences();
 
@@ -56,6 +64,16 @@ export function SettingsPrivacyPage() {
 	const [incognitoMode, setIncognitoModeState] = useState(() => getIncognitoMode());
 	const [disguiseSupported] = useState(() => isAppDisguiseSupported());
 	const [disguise, setDisguiseState] = useState<AppDisguiseId>(() => getCurrentAppDisguise());
+
+	useEffect(() => {
+		let cancelled = false;
+		void syncAppDisguiseFromNative().then((id) => {
+			if (!cancelled && id) setDisguiseState(id);
+		});
+		return () => {
+			cancelled = true;
+		};
+	}, []);
 
 	function handleSelectDisguise(id: AppDisguiseId) {
 		const previous = disguise;
@@ -74,11 +92,11 @@ export function SettingsPrivacyPage() {
 			/>
 
 			<div className="grid gap-6">
-
-				{/* Incognito Mode */}
+				{/* Activity: incognito mode switches off everything below it at once,
+				    the other rows control read receipts and profile views on their own. */}
 				<div>
-					<p className="mb-2 px-1 text-xs font-semibold uppercase tracking-widest text-[var(--text-muted)]">{t("privacy.grid_visibility")}</p>
-					<div className="native-card overflow-hidden divide-y divide-[var(--border)]">
+					<p className="mb-2 px-1 text-xs font-semibold uppercase tracking-widest text-[var(--text-muted)]">{t("privacy.activity", { defaultValue: "Activity" })}</p>
+					<div className="native-group">
 						<ToggleRow
 							id="privacy-incognito-mode"
 							highlighted={highlightId === "privacy-incognito-mode"}
@@ -92,25 +110,17 @@ export function SettingsPrivacyPage() {
 								void setIncognitoMode(checked);
 							}}
 						/>
-						<div className="px-4 py-3">
-							<p className="text-xs text-[var(--text-muted)] leading-relaxed">
-								{t("privacy.incognito_mode_note")}
-							</p>
-						</div>
-					</div>
-				</div>
-
-				{/* Read Receipts */}
-				<div>
-					<p className="mb-2 px-1 text-xs font-semibold uppercase tracking-widest text-[var(--text-muted)]">{t("privacy.read_receipts")}</p>
-					<div className="native-card overflow-hidden divide-y divide-[var(--border)]">
 						<ToggleRow
 							id="privacy-send-read-receipts"
 							highlighted={highlightId === "privacy-send-read-receipts"}
 							icon={<CheckCheck className="h-5 w-5" />}
 							iconClass="bg-indigo-500/15 text-indigo-400"
 							label={t("privacy.send_read_receipts")}
-							description={t("privacy.send_read_receipts_desc")}
+							// The Grid-unread caveat belongs to this switch, so it's part of its description.
+							description={`${t("privacy.send_read_receipts_desc")} ${t("privacy.read_receipts_grid_unread_note", {
+								defaultValue:
+									"With read receipts off, there's no way to tell the server you've read a message — so a chat can still show up as unread on the Grid even after you've read or deleted it.",
+							})}`}
 							checked={readReceiptsEnabled}
 							onChange={(checked) => {
 								setReadReceiptsEnabled(checked);
@@ -130,21 +140,16 @@ export function SettingsPrivacyPage() {
 								void persistShowReadReceiptToggle(checked);
 							}}
 						/>
-						<div className="px-4 py-3">
-							<p className="text-xs text-[var(--text-muted)] leading-relaxed">
-								{t("privacy.read_receipts_grid_unread_note", {
-									defaultValue:
-										"With read receipts off, there's no way to tell the server you've read a message — so a chat can still show up as unread on the Grid even after you've read or deleted it.",
-								})}
-							</p>
-						</div>
-					</div>
-				</div>
-
-				{/* Profile Views */}
-				<div>
-					<p className="mb-2 px-1 text-xs font-semibold uppercase tracking-widest text-[var(--text-muted)]">{t("privacy.profile_views")}</p>
-					<div className="native-card overflow-hidden">
+						<ToggleRow
+							id="privacy-notify-album-updates"
+							highlighted={highlightId === "privacy-notify-album-updates"}
+							icon={<ImagesFilled className="h-5 w-5" />}
+							iconClass="bg-violet-500/15 text-violet-400"
+							label={t("privacy.notify_album_updates")}
+							description={t("privacy.notify_album_updates_desc")}
+							checked={notifyAlbumUpdates}
+							onChange={(checked) => void setPreferences({ notifyAlbumUpdates: checked })}
+						/>
 						<ToggleRow
 							id="privacy-record-profile-views"
 							highlighted={highlightId === "privacy-record-profile-views"}
@@ -161,10 +166,14 @@ export function SettingsPrivacyPage() {
 					</div>
 				</div>
 
-				{/* NSFW Content */}
+				{/* Map visibility (account setting) */}
+				<MapVisibilitySection highlightId={highlightId} />
+
+				{/* Blur & Hide: safe-for-work mode overrides the individual blur
+				    options (photos hidden, all media blurred), so they're hidden then. */}
 				<div>
-					<p className="mb-2 px-1 text-xs font-semibold uppercase tracking-widest text-[var(--text-muted)]">{t("privacy.nsfw_content")}</p>
-					<div className="native-card overflow-hidden divide-y divide-[var(--border)]">
+					<p className="mb-2 px-1 text-xs font-semibold uppercase tracking-widest text-[var(--text-muted)]">{t("privacy.blur_hide", { defaultValue: "Blur & Hide" })}</p>
+					<div className="native-group">
 						<ToggleRow
 							id="privacy-safe-for-work"
 							highlighted={highlightId === "privacy-safe-for-work"}
@@ -175,7 +184,6 @@ export function SettingsPrivacyPage() {
 							checked={hideProfilePictures}
 							onChange={(checked) => void setPreferences({ hideProfilePictures: checked })}
 						/>
-						{/* Safe-for-work mode overrides these (photos hidden, all media blurred). */}
 						{!hideProfilePictures && (
 							<>
 								<ToggleRow
@@ -230,6 +238,13 @@ export function SettingsPrivacyPage() {
 								/>
 							</>
 						)}
+					</div>
+				</div>
+
+				{/* NSFW Content */}
+				<div>
+					<p className="mb-2 px-1 text-xs font-semibold uppercase tracking-widest text-[var(--text-muted)]">{t("privacy.nsfw_content")}</p>
+					<div className="native-group">
 						<ToggleRow
 							id="privacy-sensitive-warning"
 							highlighted={highlightId === "privacy-sensitive-warning"}
@@ -240,14 +255,15 @@ export function SettingsPrivacyPage() {
 							checked={showAlbumSensitiveContentWarning}
 							onChange={(checked) => void setPreferences({ showAlbumSensitiveContentWarning: checked })}
 						/>
+						<RightNowExplicitImagesRow highlightId={highlightId} />
 					</div>
 				</div>
 
-				{/* App Disguise (Android only) */}
+				{/* App Disguise (Android, iOS, Windows) */}
 				{disguiseSupported && (
 					<div>
 						<p className="mb-2 px-1 text-xs font-semibold uppercase tracking-widest text-[var(--text-muted)]">{t("privacy.app_disguise")}</p>
-						<div className="native-card overflow-hidden divide-y divide-[var(--border)]">
+						<div className="native-group">
 							{(() => {
 								const current = DISGUISE_OPTIONS.find((option) => option.id === disguise) ?? DISGUISE_OPTIONS[0];
 								const CurrentIcon = current.icon;
@@ -270,12 +286,8 @@ export function SettingsPrivacyPage() {
 									/>
 								);
 							})()}
-							<div className="px-4 py-3">
-								<p className="text-xs text-[var(--text-muted)] leading-relaxed">
-									{t("privacy.app_disguise_note")}
-								</p>
-							</div>
 						</div>
+						<Footnote>{t("privacy.app_disguise_note")}</Footnote>
 					</div>
 				)}
 			</div>

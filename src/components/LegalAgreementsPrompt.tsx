@@ -3,7 +3,7 @@ import { ChevronRight, ExternalLink, FileText, Loader2, ScrollText, ShieldCheck,
 import { openUrl } from "@tauri-apps/plugin-opener";
 import toast from "react-hot-toast";
 import { useTranslation } from "react-i18next";
-import { FullscreenPrompt, fullscreenPrimaryButtonClass, fullscreenSecondaryButtonClass, fullscreenCardClass } from "./FullscreenPrompt";
+import { FullscreenPrompt, fullscreenPrimaryButtonClass, fullscreenSecondaryButtonClass } from "./FullscreenPrompt";
 import {
 	isLegalVersionOutdated,
 	useAcceptLegalAgreements,
@@ -35,7 +35,7 @@ function PolicyRow({
 		<button
 			type="button"
 			onClick={() => openExternal(url)}
-			className="flex w-full items-center gap-3 px-4 py-3.5 text-left transition hover:ink-tint-6"
+			className="flex w-full items-center gap-3 px-4 py-3.5 text-start transition hover:ink-tint-6"
 		>
 			<div className="shrink-0 rounded-2xl ink-tint-8 p-2.5 text-[var(--accent)]">
 				<Icon className="h-5 w-5" />
@@ -144,7 +144,7 @@ export function LegalAgreementsGate({ userId, children }: { userId: number; chil
 				</>
 			}
 		>
-			<div className={`${fullscreenCardClass} divide-y divide-[var(--border)] overflow-hidden text-left`}>
+			<div className={"native-group text-start"}>
 				<PolicyRow
 					icon={ScrollText}
 					title={t("legal_agreements.tos_title", { defaultValue: "Terms of Service" })}

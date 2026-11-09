@@ -1,14 +1,17 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ChangeEvent, type CSSProperties, type HTMLAttributes, type MouseEvent, type PointerEvent, type ReactNode } from "react";
+import { createContext, Fragment, useCallback, useContext, useEffect, useLayoutEffect, useRef, useState, type ChangeEvent, type CSSProperties, type HTMLAttributes, type MouseEvent, type PointerEvent, type ReactElement, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
-import { Check, ChevronDown, Eye, Hourglass, Image as ImageIcon, Images, Infinity as InfinityIcon, Loader2, Play, RefreshCw, Repeat, Video, X } from "lucide-react";
+import { Check, ChevronDown, Eye, Film, Folder, Hourglass, Image as ImageIcon, Images, Infinity as InfinityIcon, Loader2, Play, Plus, RefreshCw, Repeat, Video, X } from "lucide-react";
 import type { AlbumMediaCount } from "../../../types/chat-page";
-import { CameraFilled, CameraPlusFilled } from "../../../components/icons/FilledIcons";
+import { CameraFilled } from "../../../components/icons/FilledIcons";
 import { holdSheetDrag, SHEET_FOOTER_CLASS, SHEET_ICON_BUTTON_CLASS, SheetCloseButton, SheetCloseIcon, sheetButtonClass, useIsBottomSheetDetented } from "../../../components/ui/bottom-sheet";
 import { haptic } from "../../../utils/haptics";
 import freegrindLogo from "../../../images/freegrind-logo.webp";
 import { proxyMediaUrl } from "../../../utils/mediaProxy";
-import { SheetActionList } from "../../../components/ui/action-sheet";
+import { VideoFirstFrame } from "../../../components/VideoFirstFrame";
+import { EmptyStateCreateButton, SheetActionList } from "../../../components/ui/action-sheet";
+import { MediaUploadOverlay } from "../../../components/ui/progress-ring";
+import type { DrawerUpload } from "./useUploadTiles";
 
 // Shared building blocks for every media drawer sheet (chat drawer, collection
 // editor, album "add from drawer", profile pictures), so they stay in sync:
@@ -43,7 +46,7 @@ export function DrawerActionButton({ icon, label, onClick, disabled, layout = "c
 			onClick={onClick}
 			disabled={disabled}
 			className={`flex items-center rounded-[var(--radius-sm)] ink-tint-10 text-[var(--text)] transition active:scale-95 hover:ink-tint-14 disabled:pointer-events-none disabled:opacity-40 ${
-				layout === "row" ? "w-full gap-3 px-3 py-2.5 text-left" : "flex-col gap-1.5 px-2 py-3"
+				layout === "row" ? "w-full gap-3 px-3 py-2.5 text-start" : "flex-col gap-1.5 px-2 py-3"
 			}`}
 		>
 			<span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-[var(--accent)] text-[var(--accent-contrast)]">
@@ -55,9 +58,10 @@ export function DrawerActionButton({ icon, label, onClick, disabled, layout = "c
 }
 
 /** Capture/upload actions as one flat row across the top of a media grid
- * (it spans all columns): much lower than a square tile, borderless, on a
- * see-through text tint (like the sheet chips), so it reads on every sheet
- * background; a darkened fill vanished on the plain dark theme. */
+ * (it spans all columns): a light toolbar rather than a row of tiles, so it
+ * doesn't weigh as much as the media below. No fill of its own (nothing to
+ * vanish on the plain dark theme): accent icon and label, thin dividers
+ * between, a see-through text tint (like the sheet chips) on hover/press. */
 export function DrawerActionBar({
 	actions,
 	disabled,
@@ -67,19 +71,21 @@ export function DrawerActionBar({
 }) {
 	if (actions.length === 0) return null;
 	return (
-		<div className="col-span-full flex gap-1.5">
-			{actions.map((action) => (
-				<button
-					key={action.key}
-					type="button"
-					onClick={action.onClick}
-					disabled={disabled}
-					className="flex h-11 min-w-0 flex-1 items-center justify-center gap-2 rounded-lg ink-tint-10 px-2 text-[var(--text)] transition active:scale-[0.97] hover:ink-tint-14 active:ink-tint-18 disabled:pointer-events-none disabled:opacity-40"
-				>
-					{/* Icon sized here rather than by the caller, so the bar doesn't depend on the icon's own classes. */}
-					<span className="flex shrink-0 items-center justify-center text-[var(--accent-readable)] [&_svg]:h-[18px] [&_svg]:w-[18px]">{action.icon}</span>
-					<span className="truncate text-[12.5px] font-semibold">{action.label}</span>
-				</button>
+		<div className="col-span-full flex items-center">
+			{actions.map((action, index) => (
+				<Fragment key={action.key}>
+					{index > 0 && <span aria-hidden="true" className="h-5 w-px shrink-0 bg-[var(--border)]" />}
+					<button
+						type="button"
+						onClick={action.onClick}
+						disabled={disabled}
+						className="flex h-10 min-w-0 flex-1 items-center justify-center gap-2 rounded-lg px-2 text-[var(--accent-readable)] transition active:scale-[0.97] hover:ink-tint-8 active:ink-tint-12 disabled:pointer-events-none disabled:opacity-40"
+					>
+						{/* Icon sized here rather than by the caller, so the bar doesn't depend on the icon's own classes. */}
+						<span className="flex shrink-0 items-center justify-center [&_svg]:h-[18px] [&_svg]:w-[18px]">{action.icon}</span>
+						<span className="truncate text-[13px] font-semibold">{action.label}</span>
+					</button>
+				</Fragment>
 			))}
 		</div>
 	);
@@ -94,17 +100,20 @@ export function DrawerEmptyState({
 	title,
 	hint,
 	fanned = true,
+	className = "",
 	children,
 }: {
 	icon: ReactNode;
 	title: string;
 	hint: string;
 	fanned?: boolean;
+	/** E.g. "my-auto" to centre it vertically in a flex column. */
+	className?: string;
 	children?: ReactNode;
 }) {
 	const tileClass = "absolute inset-0 rounded-[var(--radius-sm)] border border-[var(--border)] bg-[var(--surface-2)] shadow-sm";
 	return (
-		<div className="flex flex-col items-center gap-5 px-2 pb-8 pt-10 text-center">
+		<div className={`flex flex-col items-center gap-5 px-2 pb-8 pt-10 text-center ${className}`}>
 			<div className="relative h-24 w-32">
 				{/* Soft glow from the gradient alone (no blur filter), kept inside the
 				    empty state's padding so the scroll container doesn't clip it. */}
@@ -140,11 +149,16 @@ export function DrawerEmptyState({
 	);
 }
 
+/** DrawerMediaTile placeholder while its local copy is still being read back. */
+export const DRAWER_TILE_LOADING = <div className="h-full w-full animate-pulse bg-[var(--surface-2)]" />;
+
 export type DrawerPreviewMedia = {
 	src: string;
 	isVideo: boolean;
 	/** Already-loaded lower-res image to show until `src` has loaded (images only). */
 	placeholderSrc?: string;
+	/** Videos in a group peek: stable key of the stored first frame (see VideoFirstFrame). */
+	posterKey?: string;
 };
 /** A group peek (a collection): all its media at once, in order. */
 export type DrawerPreviewGroup = { title: string; items: DrawerPreviewMedia[] };
@@ -401,19 +415,29 @@ export const DRAWER_ICON_BUTTON_CLASS = SHEET_ICON_BUTTON_CLASS;
  * Pass `onClose` to close through your own handler instead of the sheet's. */
 export function DrawerHeader({
 	title,
+	description,
 	actions,
 	onClose,
 	className = "mb-4",
 }: {
 	title: ReactNode;
+	/** Short muted line right under the title, beside the close button. */
+	description?: ReactNode;
 	actions?: ReactNode;
 	onClose?: () => void;
 	className?: string;
 }) {
 	const { t } = useTranslation();
 	return (
-		<div className={`flex items-center justify-between ${className}`}>
-			<h3 className="min-w-0 truncate text-sm font-semibold text-[var(--text)]">{title}</h3>
+		<div className={`flex items-center justify-between gap-3 ${className}`}>
+			{description ? (
+				<div className="min-w-0">
+					<h3 className="truncate text-sm font-semibold text-[var(--text)]">{title}</h3>
+					<p className="mt-0.5 text-xs leading-snug text-[var(--text-muted)]">{description}</p>
+				</div>
+			) : (
+				<h3 className="min-w-0 truncate text-sm font-semibold text-[var(--text)]">{title}</h3>
+			)}
 			<div className="flex shrink-0 items-center gap-2">
 				{actions}
 				{onClose ? (
@@ -428,16 +452,80 @@ export function DrawerHeader({
 	);
 }
 
-/** Placeholder tiles in the drawer grid's layout, shown while it loads. */
-export function DrawerGridSkeleton({ isDesktop = false, count }: { isDesktop?: boolean; count?: number }) {
-	const tiles = count ?? (isDesktop ? 12 : 9);
-	return (
-		<div className={drawerGridClass(isDesktop)} aria-busy="true">
+// How many tiles a drawer showed the last time it finished loading, per
+// `skeletonKey` — kept in memory and, as a per-device convenience, in
+// localStorage, so the next loading skeleton matches it.
+const TILE_COUNT_STORAGE_KEY = "drawer-skeleton-tile-counts";
+const MAX_REMEMBERED_TILE_COUNTS = 100;
+const tileCounts = new Map<string, number>();
+let tileCountsLoaded = false;
+
+function loadTileCounts() {
+	if (tileCountsLoaded) return;
+	tileCountsLoaded = true;
+	try {
+		const raw = localStorage.getItem(TILE_COUNT_STORAGE_KEY);
+		const parsed: unknown = raw ? JSON.parse(raw) : null;
+		if (parsed && typeof parsed === "object") {
+			for (const [key, value] of Object.entries(parsed)) {
+				if (typeof value === "number" && Number.isFinite(value) && value >= 0) tileCounts.set(key, value);
+			}
+		}
+	} catch {
+		// Storage unavailable: memory only.
+	}
+}
+
+function rememberTileCount(key: string, count: number) {
+	loadTileCounts();
+	if (tileCounts.get(key) === count) return;
+	// Re-inserted, so the oldest keys (e.g. per-conversation ones) drop first.
+	tileCounts.delete(key);
+	tileCounts.set(key, count);
+	while (tileCounts.size > MAX_REMEMBERED_TILE_COUNTS) {
+		tileCounts.delete(tileCounts.keys().next().value as string);
+	}
+	try {
+		localStorage.setItem(TILE_COUNT_STORAGE_KEY, JSON.stringify(Object.fromEntries(tileCounts)));
+	} catch {
+		// Storage unavailable: memory only.
+	}
+}
+
+function useRememberedTileCount(key: string | null): number | null {
+	if (!key) return null;
+	loadTileCounts();
+	return tileCounts.get(key) ?? null;
+}
+
+const DrawerSkeletonKeyContext = createContext<string | null>(null);
+
+/** Placeholder tiles in the drawer grid's layout, shown while it loads.
+ * In an expanded sheet (or with `fill`) it fills the height it's given —
+ * enough tiles, clipped — instead of a few rows over empty space. Placed
+ * absolutely, so the tiles never make the scroll area scrollable. */
+export function DrawerGridSkeleton({ isDesktop = false, count, fill }: { isDesktop?: boolean; count?: number; fill?: boolean }) {
+	const isDetented = useIsBottomSheetDetented();
+	// The enclosing DrawerBody's tile count from the last load, so the
+	// skeleton is as big as what's about to show instead of shrinking to it.
+	const rememberedCount = useRememberedTileCount(useContext(DrawerSkeletonKeyContext));
+	const fills = count == null && rememberedCount == null ? (fill ?? isDetented) : false;
+	const columns = isDesktop ? 4 : 3;
+	const tiles = count ?? (rememberedCount != null
+		? Math.min(Math.max(rememberedCount, 1), 60)
+		: fills ? 60 : columns * 3);
+	const grid = (
+		<div
+			className={`${drawerGridClass(isDesktop)} ${fills ? "absolute inset-0 content-start overflow-hidden" : ""}`}
+			aria-busy="true"
+		>
 			{Array.from({ length: tiles }, (_, i) => (
 				<div key={i} className="aspect-square animate-pulse rounded-lg bg-[var(--surface-2)]" />
 			))}
 		</div>
 	);
+	// h-full in a block scroll area, flex-1 in a flex column (see ChatDrawerPanel's tabs).
+	return fills ? <div className="relative h-full min-h-0 flex-1">{grid}</div> : grid;
 }
 
 /** Scrollable drawer content with the shared loading, error (with retry) and
@@ -451,8 +539,13 @@ export function DrawerBody({
 	empty,
 	className = "max-h-[60vh]",
 	gestureProps,
+	skeletonKey,
 	children,
 }: {
+	/** Names this drawer's content (e.g. per tab): its tile count is
+	 * remembered once loaded, and the next loading skeleton — this body's or
+	 * a DrawerGridSkeleton inside it — shows that many tiles. */
+	skeletonKey?: string;
 	isLoading?: boolean;
 	/** Column count of the loading skeleton, matching the DrawerGrid. */
 	isDesktop?: boolean;
@@ -493,11 +586,28 @@ export function DrawerBody({
 	} else {
 		content = empty ?? children;
 	}
+
+	// Once loaded (no skeleton anywhere inside), count the grid tiles shown.
+	const bodyRef = useRef<HTMLDivElement>(null);
+	useLayoutEffect(() => {
+		const body = bodyRef.current;
+		if (!skeletonKey || !body || isLoading || error) return;
+		if (body.querySelector("[aria-busy='true']")) return;
+		let count = 0;
+		body.querySelectorAll<HTMLElement>("[data-drawer-grid]").forEach((grid) => {
+			count += grid.childElementCount;
+		});
+		rememberTileCount(skeletonKey, count);
+	});
+
 	// min-h-0 + data-lenis-prevent: both are needed for the inner scroll to work in a sheet.
+	// A flex column, so content can fill the body (flex-1) and an empty state centre in it (my-auto).
 	return (
-		<div data-lenis-prevent {...gestureProps} className={`min-h-0 flex-1 overflow-y-auto ${isDetented ? "" : className}`}>
-			{content}
-		</div>
+		<DrawerSkeletonKeyContext.Provider value={skeletonKey ?? null}>
+			<div ref={bodyRef} data-lenis-prevent {...gestureProps} className={`flex min-h-0 flex-1 flex-col overflow-y-auto ${isDetented ? "" : className}`}>
+				{content}
+			</div>
+		</DrawerSkeletonKeyContext.Provider>
 	);
 }
 
@@ -533,7 +643,7 @@ export function GroupTileOverlay({ icon, name, counts, badge }: { icon: ReactNod
 }
 
 export function DrawerGrid({ isDesktop, children }: { isDesktop: boolean; children: ReactNode }) {
-	return <div className={drawerGridClass(isDesktop)}>{children}</div>;
+	return <div data-drawer-grid className={drawerGridClass(isDesktop)}>{children}</div>;
 }
 
 /**
@@ -553,6 +663,10 @@ export function DrawerMediaTile({
 	previewProps,
 	consumePreviewClick,
 	mediaClassName = "",
+	posterSrc,
+	posterKey,
+	placeholder,
+	onMediaError,
 	takenOnGrindr = false,
 	onDelete,
 	isDeleting = false,
@@ -575,6 +689,13 @@ export function DrawerMediaTile({
 	previewProps?: Record<string, unknown>;
 	consumePreviewClick?: () => boolean;
 	mediaClassName?: string;
+	/** For a video: this still is shown instead of loading the video itself. */
+	posterSrc?: string;
+	/** For a video without `posterSrc`: stable key its first frame is stored under (see VideoFirstFrame). */
+	posterKey?: string;
+	/** Shown instead of the media, e.g. while the server still processes it. */
+	placeholder?: ReactNode;
+	onMediaError?: () => void;
 	/** Shows the "taken on Grindr" logo bottom left. */
 	takenOnGrindr?: boolean;
 	onDelete?: (event: MouseEvent<HTMLButtonElement>) => void;
@@ -586,25 +707,41 @@ export function DrawerMediaTile({
 		if (consumePreviewClick?.()) return;
 		onSelect?.(tile);
 	};
+	// No preview on this device (e.g. a video format the webview can't
+	// decode): the tile says so instead of staying blank.
+	const shownSrc = posterSrc ?? src;
+	const [failedSrc, setFailedSrc] = useState<string | null>(null);
+	const mediaFailed = failedSrc === shownSrc;
+	const failPreview = () => {
+		setFailedSrc(shownSrc);
+		onMediaError?.();
+	};
 	return (
 		<div
 			role="button"
 			tabIndex={onSelect && !muted ? 0 : -1}
-			{...previewProps}
+			// No peek of media that can't be shown here either.
+			{...(mediaFailed ? undefined : previewProps)}
 			onClick={(e) => select(e.currentTarget)}
 			onKeyDown={(e) => { if (e.key === "Enter") onSelect?.(e.currentTarget); }}
-			className={`${DRAWER_TILE_CLASS} no-touch-callout transition ${onSelect ? "cursor-pointer" : "cursor-default"} ${busy ? "opacity-60" : ""} ${muted ? "pointer-events-none opacity-30" : ""}`}
+			// drawer-tile-zoom: the picture zooms in on hover (see index.css), only where a click does something.
+			className={`${DRAWER_TILE_CLASS} no-touch-callout transition ${onSelect ? "drawer-tile-zoom cursor-pointer" : "cursor-default"} ${busy ? "opacity-60" : ""} ${muted ? "pointer-events-none opacity-30" : ""}`}
 			style={{ outline: selected ? "2px solid var(--accent)" : "none", outlineOffset: "-2px" }}
 		>
-			{isVideo ? (
+			{placeholder ?? (mediaFailed ? (
+				<MediaPreviewFallback isVideo={isVideo} />
+			) : isVideo ? (
 				<>
-					<video
-						src={proxyMediaUrl(src, { as: "video" })}
-						preload="metadata"
-						muted
-						onLoadedMetadata={(e) => { e.currentTarget.currentTime = 0.001; }}
-						className={`h-full w-full object-cover ${mediaClassName}`}
-					/>
+					{posterSrc ? (
+						<img src={proxyMediaUrl(posterSrc)} alt={alt ?? ""} draggable={false} onError={failPreview} className={`drawer-tile-media h-full w-full object-cover ${mediaClassName}`} />
+					) : (
+						<VideoFirstFrame
+							src={src}
+							posterKey={posterKey}
+							onFail={failPreview}
+							className={`drawer-tile-media h-full w-full object-cover ${mediaClassName}`}
+						/>
+					)}
 					<div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-black/20">
 						<div className="flex h-8 w-8 items-center justify-center rounded-full bg-black/60 backdrop-blur-sm">
 							<Play className="h-4 w-4 fill-white text-white" />
@@ -612,8 +749,8 @@ export function DrawerMediaTile({
 					</div>
 				</>
 			) : (
-				<img src={proxyMediaUrl(src)} alt={alt ?? ""} draggable={false} className={`h-full w-full object-cover ${mediaClassName}`} />
-			)}
+				<img src={proxyMediaUrl(src)} alt={alt ?? ""} draggable={false} onError={failPreview} className={`drawer-tile-media h-full w-full object-cover ${mediaClassName}`} />
+			))}
 
 			{children}
 
@@ -627,7 +764,7 @@ export function DrawerMediaTile({
 			) : null}
 
 			{takenOnGrindr ? (
-				<img src={freegrindLogo} alt="" className="logo-shine pointer-events-none absolute bottom-1 left-1 h-4 w-4 rounded-full" />
+				<img src={freegrindLogo} alt="" className="logo-shine pointer-events-none absolute bottom-1 start-1 h-4 w-4 rounded-full" />
 			) : null}
 
 			{onDelete ? (
@@ -639,6 +776,60 @@ export function DrawerMediaTile({
 					disabled={isDeleting}
 				/>
 			) : null}
+		</div>
+	);
+}
+
+/** A file still uploading (to the drawer, an album), from its local copy
+ * or the media already online, with the progress over it like a chat
+ * bubble's (see useUploadTiles). */
+export function DrawerUploadTile({ upload, label }: { upload: DrawerUpload; label?: string }) {
+	// Media already online goes through the proxy, like any other tile's.
+	const src = upload.isLocal ? upload.previewUrl : proxyMediaUrl(upload.previewUrl, upload.isVideo ? { as: "video" } : undefined);
+	const [previewFailed, setPreviewFailed] = useState(false);
+	return (
+		<div className={DRAWER_TILE_CLASS} aria-busy="true">
+			{upload.posterUrl ? (
+				<img src={upload.posterUrl} alt="" draggable={false} className="h-full w-full object-cover" />
+			) : previewFailed ? (
+				<MediaPreviewFallback isVideo={upload.isVideo} />
+			) : upload.isVideo ? (
+				<video
+					src={src}
+					preload="metadata"
+					muted
+					playsInline
+					onLoadedMetadata={(e) => {
+						if (!videoHasPicture(e.currentTarget)) setPreviewFailed(true);
+						else e.currentTarget.currentTime = 0.001;
+					}}
+					onError={() => setPreviewFailed(true)}
+					className="h-full w-full object-cover"
+				/>
+			) : (
+				<img src={src} alt="" draggable={false} onError={() => setPreviewFailed(true)} className="h-full w-full object-cover" />
+			)}
+			<MediaUploadOverlay progress={upload.progress} label={label} />
+		</div>
+	);
+}
+
+/** A video this device can't show a picture of: its format isn't decoded
+ * here (it loads, but without a picture), or it errors outright. */
+function videoHasPicture(video: HTMLVideoElement): boolean {
+	return video.videoWidth > 0 && video.videoHeight > 0;
+}
+
+/** In a tile whose media can't be shown on this device: what it is, and that
+ * there's no preview — not a blank or black tile. */
+export function MediaPreviewFallback({ isVideo }: { isVideo: boolean }) {
+	const { t } = useTranslation();
+	return (
+		<div className="flex h-full w-full flex-col items-center justify-center gap-1.5 px-2 text-center text-[var(--text-muted)]">
+			{isVideo ? <Film className="h-6 w-6 opacity-60" /> : <Images className="h-6 w-6 opacity-60" />}
+			<span className="text-[10px] font-semibold uppercase tracking-wider">
+				{t("chat_drawer.no_preview", { defaultValue: "No preview" })}
+			</span>
 		</div>
 	);
 }
@@ -665,7 +856,7 @@ export function DrawerTileCornerButton({
 			// Keeps a press on the button from starting the tile's hold-to-peek.
 			onPointerDown={(event) => event.stopPropagation()}
 			disabled={disabled}
-			className={`absolute top-1.5 z-[1] inline-flex h-5 w-5 items-center justify-center rounded-full bg-black/60 text-white transition hover:bg-black/80 disabled:opacity-60 ${corner === "left" ? "left-1.5" : "right-1.5"}`}
+			className={`absolute top-1.5 z-[1] inline-flex h-5 w-5 items-center justify-center rounded-full bg-black/60 text-white transition hover:bg-black/80 disabled:opacity-60 ${corner === "left" ? "start-1.5" : "end-1.5"}`}
 			aria-label={label}
 			title={label}
 		>
@@ -831,36 +1022,169 @@ export function ExpiryToggleButton({
 	);
 }
 
-export type DrawerAddAction = { key: string; label: string; icon: ReactNode; onClick: () => void };
+/** Header chip of the upload sheets, next to the close button: also save
+ * what's sent to the drawer. As tall and tinted as the close button, the
+ * accent while on. */
+export function AddToDrawerChip({
+	checked,
+	onChange,
+	disabled,
+}: {
+	checked: boolean;
+	onChange: (checked: boolean) => void;
+	disabled?: boolean;
+}) {
+	const { t } = useTranslation();
+	return (
+		<button
+			type="button"
+			onClick={() => {
+				haptic(10);
+				onChange(!checked);
+			}}
+			disabled={disabled}
+			aria-pressed={checked}
+			aria-label={t("chat.attachments.add_to_drawer", { defaultValue: "Add to drawer" })}
+			title={t("chat.attachments.add_to_drawer_description", {
+				defaultValue: "Also save this to your drawer so you can send it again later",
+			})}
+			className={`inline-flex h-8 shrink-0 items-center gap-1.5 rounded-full ps-2.5 pe-3 text-xs font-semibold transition active:scale-95 disabled:pointer-events-none disabled:opacity-40 ${
+				checked
+					? "bg-[color-mix(in_srgb,var(--accent)_18%,transparent)] text-[var(--accent-readable)]"
+					: "ink-tint-8 text-[var(--text-muted)] hover:ink-tint-12 hover:text-[var(--text)]"
+			}`}
+		>
+			{checked ? <Check className="h-3.5 w-3.5" strokeWidth={2.5} /> : <Plus className="h-3.5 w-3.5" strokeWidth={2.5} />}
+			<span>{t("chat.attachments.add_to_drawer_chip", { defaultValue: "Drawer" })}</span>
+		</button>
+	);
+}
+
+/** One of a drawer's add actions; `description` and `iconClassName` (its
+ * tile's colors) are for the add sheet's rows (see DrawerAddTile). */
+export type DrawerAddAction = {
+	key: string;
+	label: string;
+	icon: ReactElement<{ className?: string }>;
+	description?: string;
+	iconClassName?: string;
+	onClick: () => void;
+};
+
+/**
+ * A drawer's "add" tile, the first in its grid: one action runs straight
+ * away; several (take a photo, record a video, upload…) open an action sheet
+ * listing them all, like the album editor's "Add media".
+ */
+export function DrawerAddTile({
+	actions,
+	label,
+	isDesktop,
+	disabled,
+}: {
+	actions: DrawerAddAction[];
+	/** The tile's caption, e.g. "Add media" or "Create album". */
+	label: string;
+	isDesktop: boolean;
+	disabled?: boolean;
+}) {
+	const addSheet = useDrawerAddSheet(actions, label, isDesktop);
+	if (actions.length === 0) return null;
+	return (
+		<>
+			<button
+				type="button"
+				onClick={addSheet.open}
+				disabled={disabled}
+				className="flex aspect-square flex-col items-center justify-center gap-2 rounded-lg ink-tint-8 p-2 text-[var(--text)] transition hover:ink-tint-12 active:scale-[0.97] active:ink-tint-14 disabled:pointer-events-none disabled:opacity-40"
+			>
+				<span className="flex h-10 w-10 items-center justify-center rounded-full bg-[var(--accent)] text-[var(--accent-contrast)]">
+					<Plus className="h-5 w-5" strokeWidth={2.5} />
+				</span>
+				<span className="line-clamp-2 text-center text-xs font-semibold leading-tight">{label}</span>
+			</button>
+			{addSheet.sheet}
+		</>
+	);
+}
+
+/**
+ * The empty state's single add button (like the collections tab's "Create
+ * collection"): opens the same action sheet as DrawerAddTile.
+ */
+export function DrawerAddButton({
+	actions,
+	label,
+	isDesktop,
+	disabled,
+}: {
+	actions: DrawerAddAction[];
+	label: string;
+	isDesktop: boolean;
+	disabled?: boolean;
+}) {
+	const addSheet = useDrawerAddSheet(actions, label, isDesktop);
+	if (actions.length === 0) return null;
+	return (
+		<>
+			<EmptyStateCreateButton label={label} onClick={addSheet.open} disabled={disabled} />
+			{addSheet.sheet}
+		</>
+	);
+}
+
+/** One action runs straight away; several open an action sheet listing them. */
+function useDrawerAddSheet(actions: DrawerAddAction[], label: string, isDesktop: boolean) {
+	const [isSheetOpen, setIsSheetOpen] = useState(false);
+	const only = actions.length === 1 ? actions[0] : null;
+	return {
+		open: () => (only ? only.onClick() : setIsSheetOpen(true)),
+		sheet: (
+			<>
+			{/* Portalled out of the drawer: inside its (transformed) panel the
+			    sheet's fixed position would be the panel's, and it got cut off. */}
+			{isSheetOpen && createPortal(
+				<SheetActionList
+					title={label}
+					onClose={() => setIsSheetOpen(false)}
+					isDesktop={isDesktop}
+					actions={actions.map((action) => ({
+						key: action.key,
+						icon: action.icon,
+						iconClassName: action.iconClassName,
+						label: action.label,
+						description: action.description,
+						// Clicked synchronously, so a file picker still counts as a user gesture.
+						onSelect: action.onClick,
+					}))}
+				/>,
+				document.body,
+			)}
+			</>
+		),
+	};
+}
 
 /**
  * The drawer's add actions (take photo, record video, upload from device):
- * render `inputs` once in the sheet and `actions` as DrawerActionBar /
- * DrawerActionButton. `onFiles` gets whatever was picked.
+ * render `inputs` once in the sheet and `actions` in a DrawerAddTile (or the
+ * empty state's DrawerAddButton). `onFiles` gets whatever was picked.
  */
 export function useDrawerAddActions({
 	onFiles,
 	multiple = false,
 	allowVideo = true,
-	busy = false,
-	busyLabel,
 }: {
 	onFiles: (files: File[]) => void;
 	/** Allow picking several files at once from the device. */
 	multiple?: boolean;
 	/** False drops "record video" and limits uploads to photos. */
 	allowVideo?: boolean;
-	/** Shows a spinner on the action that was used, while its upload runs. */
-	busy?: boolean;
-	/** Replaces that action's label while busy, e.g. with upload progress. */
-	busyLabel?: string;
 }) {
 	const { t } = useTranslation();
 	const uploadInputRef = useRef<HTMLInputElement | null>(null);
 	const cameraInputRef = useRef<HTMLInputElement | null>(null);
 	const cameraVideoInputRef = useRef<HTMLInputElement | null>(null);
-	// Which action the current upload came from, so its status shows there.
-	const [usedKey, setUsedKey] = useState<string | null>(null);
 
 	const onChange = (event: ChangeEvent<HTMLInputElement>) => {
 		const files = Array.from(event.target.files ?? []);
@@ -869,23 +1193,36 @@ export function useDrawerAddActions({
 	};
 
 	const actions: DrawerAddAction[] = [
-		{ key: "photo", label: t("chat_drawer.take_photo"), icon: <CameraFilled className="h-4 w-4" />, input: cameraInputRef },
+		{
+			key: "photo",
+			label: t("chat_drawer.take_photo"),
+			description: t("chat_drawer.take_photo_desc", { defaultValue: "Take a new one with the camera" }),
+			icon: <CameraFilled className="h-4 w-4" />,
+			iconClassName: "bg-sky-500/15 text-sky-400",
+			input: cameraInputRef,
+		},
 		...(allowVideo
-			? [{ key: "video", label: t("chat_drawer.record_video", { defaultValue: "Record video" }), icon: <Video className="h-4 w-4 fill-current" />, input: cameraVideoInputRef }]
+			? [{
+				key: "video",
+				label: t("chat_drawer.record_video", { defaultValue: "Record video" }),
+				description: t("chat_drawer.record_video_desc", { defaultValue: "Record a new one with the camera" }),
+				icon: <Video className="h-4 w-4 fill-current" />,
+				iconClassName: "bg-rose-500/15 text-rose-400",
+				input: cameraVideoInputRef,
+			}]
 			: []),
-		{ key: "upload", label: t("chat_drawer.add_media", { defaultValue: "Add media" }), icon: <CameraPlusFilled className="h-4 w-4" />, input: uploadInputRef },
-	].map(({ key, label, icon, input }) => {
-		const isBusyHere = busy && key === (usedKey ?? "upload");
-		return {
-			key,
-			label: isBusyHere && busyLabel ? busyLabel : label,
-			icon: isBusyHere ? <Loader2 className="h-4 w-4 animate-spin" /> : icon,
-			onClick: () => {
-				setUsedKey(key);
-				input.current?.click();
-			},
-		};
-	});
+		{
+			key: "upload",
+			// The add tile's sheet is "Add media" already; this is where from.
+			label: t("settings_albums.add_upload", { defaultValue: "Upload from device" }),
+			description: allowVideo
+				? t("chat_drawer.add_media_desc", { defaultValue: "Photos and videos stored on this device" })
+				: t("chat_drawer.add_photo_desc", { defaultValue: "Photos stored on this device" }),
+			icon: <Folder className="h-4 w-4 fill-current" />,
+			iconClassName: "bg-violet-500/15 text-violet-400",
+			input: uploadInputRef,
+		},
+	].map(({ input, ...action }) => ({ ...action, onClick: () => input.current?.click() }));
 
 	const inputs = (
 		<>
@@ -911,23 +1248,16 @@ function DrawerPreviewGroupGrid({ group }: { group: DrawerPreviewGroup }) {
 				{visible.map((item, index) => (
 					<div key={`${item.src}-${index}`} className="relative aspect-square overflow-hidden rounded-md bg-black">
 						{item.isVideo ? (
-							<video
-								src={proxyMediaUrl(item.src, { as: "video" })}
-								preload="metadata"
-								muted
-								playsInline
-								onLoadedMetadata={(e) => { e.currentTarget.currentTime = 0.001; }}
-								className="h-full w-full object-cover"
-							/>
+							<VideoFirstFrame src={item.src} posterKey={item.posterKey} className="h-full w-full object-cover" />
 						) : (
 							<img src={proxyMediaUrl(item.src)} alt="" className="h-full w-full object-cover" />
 						)}
 						{/* Send order, like the numbers in the collection editor. */}
-						<span className="absolute right-1 top-1 flex h-5 min-w-5 items-center justify-center rounded-full bg-[var(--accent)] px-1 text-[11px] font-bold text-[var(--accent-contrast)]">
+						<span className="absolute end-1 top-1 flex h-5 min-w-5 items-center justify-center rounded-full bg-[var(--accent)] px-1 text-[11px] font-bold text-[var(--accent-contrast)]">
 							{index + 1}
 						</span>
 						{item.isVideo ? (
-							<Play className="absolute bottom-1 left-1 h-3.5 w-3.5 fill-white text-white drop-shadow" />
+							<Play className="absolute bottom-1 start-1 h-3.5 w-3.5 fill-white text-white drop-shadow" />
 						) : null}
 						{hidden > 0 && index === visible.length - 1 ? (
 							<div className="absolute inset-0 flex items-center justify-center bg-black/55 text-lg font-bold text-white">

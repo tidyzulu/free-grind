@@ -1,5 +1,6 @@
-import { ArrowDown, Package, type LucideIcon } from "lucide-react";
+import { ArrowDown, ExternalLink, Package, type LucideIcon } from "lucide-react";
 import type { ReactNode } from "react";
+import { openExternalUrl } from "../../utils/githubIssues";
 
 export type VersionCompareSide = {
 	/** Small caps label above the title ("Installed build", "Latest"). */
@@ -30,22 +31,38 @@ function VersionCompareRow({ side, highlight }: { side: VersionCompareSide; high
 }
 
 /**
- * Installed → new comparison used by the update prompts: two equal-height rows
- * (so the arrow on the divider sits visually centered), the new one highlighted.
- * Renders no card of its own — place it inside a `fullscreenCardClass` card.
+ * Installed → new comparison used by the update prompts: two rows, the new one
+ * highlighted, with an arrow badge in the gap between them. Renders the rows
+ * as direct children, so each is its own tile of the surrounding `native-group`.
  */
 export function VersionCompare({ from, to }: { from?: VersionCompareSide; to: VersionCompareSide }) {
 	return (
-		<div className="grid auto-rows-fr divide-y divide-[var(--border)]">
+		<>
 			{from && (
 				<div className="relative">
 					<VersionCompareRow side={from} />
-					<div className="absolute bottom-0 left-6 z-10 flex translate-y-[calc(50%+0.5px)] rounded-full border border-[var(--border)] bg-[var(--surface)] p-1 text-[var(--text-muted)]">
+					<div className="absolute bottom-0 start-6 z-10 flex translate-y-[calc(50%+2px)] rounded-full bg-[var(--surface-2)] p-1 text-[var(--text-muted)] shadow-[0_1px_4px_rgba(0,0,0,0.25)]">
 						<ArrowDown className="h-3.5 w-3.5" />
 					</div>
 				</div>
 			)}
 			<VersionCompareRow side={to} highlight />
+		</>
+	);
+}
+
+/** Small accent link under the comparison, styled like the one in the updates onboarding step. */
+export function VersionCompareLink({ url, label }: { url: string; label: string }) {
+	return (
+		<div className="mt-3 flex justify-center">
+			<button
+				type="button"
+				onClick={() => void openExternalUrl(url)}
+				className="inline-flex items-center gap-1 text-xs font-medium text-[var(--accent)] hover:underline"
+			>
+				{label}
+				<ExternalLink className="h-3 w-3" />
+			</button>
 		</div>
 	);
 }

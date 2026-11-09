@@ -9,6 +9,8 @@ import type {
 } from "./albums";
 import type { InterestSentTapsResponse, InterestTapsResponse, InterestViewsResponse } from "./interest";
 import type { MultipartUpload } from "./chat-service";
+import type { VideoEdit } from "../services/videoEdit";
+import type { UploadProgress } from "../services/stagedVideoUpload";
 import type {
 	RightNowCreatePostRequest,
 	RightNowCreatePostResponse,
@@ -24,6 +26,7 @@ export type ApiFunctionName =
 	| "renameOwnAlbum"
 	| "deleteOwnAlbum"
 	| "uploadOwnAlbumContent"
+	| "uploadOwnAlbumVideo"
 	| "reorderOwnAlbumContent"
 	| "deleteOwnAlbumContent"
 	| "getSharedAlbums"
@@ -55,6 +58,24 @@ export interface UploadOwnAlbumContentInput {
 	multipart: MultipartUpload;
 	width?: number;
 	height?: number;
+	/** Whether the people the album is shared with hear about the upload. */
+	isFresh: boolean;
+}
+
+/**
+ * `maxBodySize`: the album plan's `maxContentSize`, when known. `edit` and
+ * `onLandscapeKept` as for chat videos (see UploadChatVideoParams).
+ */
+export interface UploadOwnAlbumVideoInput {
+	albumId: string;
+	file: File;
+	/** As for UploadOwnAlbumContentInput. */
+	isFresh: boolean;
+	maxBodySize?: number;
+	edit?: VideoEdit | null;
+	onLandscapeKept?: () => void;
+	/** Where the upload is, as for a chat video (see uploadProgressReporter). */
+	onProgress?: (progress: UploadProgress) => void;
 }
 
 export interface ReorderOwnAlbumContentInput {
@@ -65,6 +86,8 @@ export interface ReorderOwnAlbumContentInput {
 export interface AddOwnAlbumContentByIdsInput {
 	albumId: string;
 	ids: number[];
+	/** As for UploadOwnAlbumContentInput. */
+	isFresh: boolean;
 }
 
 export interface DeleteOwnAlbumContentInput {
@@ -124,6 +147,8 @@ export interface ApiFunctionResultMap {
 	renameOwnAlbum: ApiFunctionVoidResult;
 	deleteOwnAlbum: ApiFunctionVoidResult;
 	uploadOwnAlbumContent: { contentId: number };
+	/** null when this binary can't stream uploads (see stagedVideoUpload). */
+	uploadOwnAlbumVideo: { contentId: number } | null;
 	reorderOwnAlbumContent: ApiFunctionVoidResult;
 	deleteOwnAlbumContent: ApiFunctionVoidResult;
 	getSharedAlbums: SharedAlbumView;

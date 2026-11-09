@@ -1,10 +1,12 @@
-import { Archive, BellOff, Check, CheckCheck, EyeOff, Loader2, MessageCircle, PencilLine, Pin, Star, Trash2 } from "lucide-react";
+import { Archive, BellOff, Check, CheckCheck, EyeOff, ListFilter, Loader2, MessageCircle, PencilLine, Pin, Star, Trash2 } from "lucide-react";
 import { BellOffFilled, EyeOffFilled, HomeFilled, LocateFixedFilled, Trash2Filled } from "../../../components/icons/FilledIcons";
 import { RightNowIcon } from "../../../components/icons/RightNowIcon";
-import { Fragment, useEffect, useLayoutEffect, useRef, useState, type ReactElement, type ReactNode, type RefObject } from "react";
+import { Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type ReactElement, type ReactNode, type RefObject } from "react";
 import { createPortal } from "react-dom";
-import { useVirtualizer } from "@tanstack/react-virtual";
+import { ScrollToTopButton } from "../../../components/ui/ScrollToTopButton";
+import { measureElement, useVirtualizer } from "@tanstack/react-virtual";
 import { ChatSearchPanel } from "./ChatSearchPanel";
+import { DrawerEmptyState } from "./drawerUi";
 import { ChatInboxHeader, type ChatInboxHeaderProps } from "./ChatInboxHeader";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
@@ -39,6 +41,24 @@ import { FEED_HEADER_OFFSET, FEED_MASK_GRADIENT_STOP } from "../../../config/des
 import { haptic } from "../../../utils/haptics";
 import { menuTransitionStyle, usePresence } from "../../../hooks/usePresence";
 import { getNicknameRename, useSeenDisplayNames, type SeenDisplayName } from "../../../hooks/useNicknameNameChange";
+import {
+	getInboxFreshnessVersion,
+	getInboxScrollAnchors,
+	isInboxRightNowFresh,
+	setInboxScrollAnchors,
+	subscribeInboxFreshness,
+	type InboxScrollAnchor,
+} from "./inboxFreshness";
+
+// Quiet period after the last scroll event before the rows in view are
+// reported for revalidation — a fling only revalidates where it stops.
+const SCROLL_IDLE_MS = 400;
+
+// Measured row heights per layout, module-level so they survive remounts —
+// see the virtualizer's estimateSize below.
+type RowSizes = { byId: Map<string, number>; typical: number };
+const desktopRowSizes: RowSizes = { byId: new Map(), typical: 82 };
+const mobileRowSizes: RowSizes = { byId: new Map(), typical: 82 };
 
 /** Footer bar below the chat list's scroll area (not inside it) — reads as
  * part of the list (same border/background as a conversation row) rather
@@ -109,6 +129,8 @@ type ChatInboxPanelProps = ChatInboxHeaderProps & {
 	showHeader: boolean;
 	onRefreshInbox: () => Promise<void>;
 	onLoadMoreInbox: () => void;
+	// Ids of the rows in view once scrolling settles (and after the list changes).
+	onInboxScrollIdle?: (visibleConversationIds: string[]) => void;
 	onSelectConversation: (conversation: ConversationEntry) => void;
 	onOpenConversationById: (conversationId: string) => void;
 	onViewProfile: (profileId: number) => void;
@@ -133,6 +155,8 @@ type ChatConversationRowProps = {
 	isTyping: boolean;
 	isArchived: boolean;
 	isDesktop: boolean;
+	// False while the row's rightNow is only known from cache (see inboxFreshness.ts).
+	showRightNow: boolean;
 	onSelectConversation: (c: ConversationEntry) => void;
 	onViewProfile: (profileId: number) => void;
 	onOpenContextMenu: (conversation: ConversationEntry, isArchived: boolean, x: number, y: number) => void;
@@ -344,7 +368,7 @@ function ConversationContextMenu({
 		<div
 			ref={menuRef}
 			style={{ top: position.top, left: position.left, ...menuTransitionStyle(visible, "top left") }}
-			className="fixed z-[70] flex min-w-[190px] flex-col gap-1 rounded-lg border border-[var(--border)] bg-[var(--surface)] p-2 shadow-2xl"
+			className="fixed z-[70] flex min-w-[190px] flex-col gap-1 rounded-lg menu-surface p-2"
 		>
 			{actions.map((action) => (
 				<Fragment key={action.key}>
@@ -352,10 +376,10 @@ function ConversationContextMenu({
 					<button
 						type="button"
 						onClick={action.onSelect}
-						className={`flex w-full items-center gap-2 rounded-sm px-2 py-2 text-left text-sm transition ${
+						className={`flex w-full items-center gap-2 rounded-sm px-2 py-2 text-start text-sm transition ${
 							action.destructive
-								? "text-red-500 hover:bg-red-500/10"
-								: "text-[var(--text)] hover:bg-[var(--surface-2)]"
+								? "text-red-500 hover:bg-red-500/10 active:bg-red-500/15"
+								: "text-[var(--text)] hover-fill"
 						}`}
 					>
 						{action.icon}
@@ -379,6 +403,7 @@ function ChatConversationRow({
 	isTyping,
 	isArchived,
 	isDesktop,
+	showRightNow,
 	onSelectConversation,
 	onViewProfile,
 	onOpenContextMenu,
@@ -387,7 +412,7 @@ function ChatConversationRow({
 	onSwipeDeleteRequest,
 }: ChatConversationRowProps) {
 	const { t } = useTranslation();
-	const { showDebugInfo, chatRowSwipeActions } = usePreferences();
+	const { showDebugInfo, chatRowSwipeActions, showOnlineTimeLeft } = usePreferences();
 	const { ref, revealClass } = useRevealOnScroll();
 	useAvatarCache();
 
@@ -561,6 +586,7 @@ function ChatConversationRow({
 		otherParticipant?.onlineUntil,
 		nowTimestamp,
 		t,
+		showOnlineTimeLeft,
 	);
 	const isOtherParticipantOnline = otherParticipantOnlineMeta.isOnline;
 	const databaseUnread = otherProfileId ? chatContactIndexByProfileId[otherProfileId]?.unreadCount ?? 0 : 0;
@@ -570,7 +596,7 @@ function ChatConversationRow({
 	const readReceiptsHidden = isReadReceiptsHidden(conversation.data.conversationId);
 
 	return (
-		<div ref={ref} className={`relative overflow-hidden ${revealClass}`}>
+		<div ref={ref} className={`relative overflow-hidden ${isDesktop ? "px-2 py-0.5" : ""} ${revealClass}`}>
 			<div className="pointer-events-none absolute inset-0 flex items-center justify-between px-6">
 				<div
 					ref={pinIconRef}
@@ -595,13 +621,12 @@ function ChatConversationRow({
 				onTouchEnd={handleTouchEnd}
 				onTouchMove={handleTouchMove}
 				onTouchCancel={handleTouchCancel}
-				style={{
-					touchAction: "pan-y",
-					...(isSelected
-						? { borderLeft: "2px solid var(--accent)", paddingLeft: "14px" }
-						: { paddingLeft: "16px" }),
-				}}
-				className="group/reveal no-touch-callout relative flex cursor-pointer items-center gap-4 border-b border-[var(--surface-2)] py-3 pr-4 text-left transition"
+				style={{ touchAction: "pan-y" }}
+				className={`group/reveal no-touch-callout relative flex cursor-pointer items-center gap-4 text-start transition ${
+					isDesktop
+						? `rounded-xl px-3 py-2.5 ${isSelected ? "accent-tint-14" : "hover:bg-[color-mix(in_srgb,var(--surface-2)_55%,transparent)]"}`
+						: "border-b border-[var(--surface-2)] px-4 py-3"
+				}`}
 			>
 					<button
 						type="button"
@@ -613,7 +638,7 @@ function ChatConversationRow({
 						}}
 						className="relative shrink-0 disabled:cursor-default disabled:opacity-80"
 					>
-						<div className="h-15 w-15 rounded-full overflow-hidden bg-[var(--surface-2)] drop-shadow-sm">
+						<div className={`${isDesktop ? "h-13 w-13" : "h-15 w-15"} rounded-full overflow-hidden bg-[var(--surface-2)] drop-shadow-sm`}>
 							<ProfileImage
 								src={resolveAvatarSrc(
 									otherParticipant?.primaryMediaHash,
@@ -666,12 +691,12 @@ function ChatConversationRow({
 										<Star className="h-3.5 w-3.5 shrink-0 fill-current text-[var(--accent)]" />
 									</span>
 								)}
-								{conversation.data.rightNow === "HOSTING" && (
+								{showRightNow && conversation.data.rightNow === "HOSTING" && (
 									<span title={t("right_now.hosting")}>
 										<HomeFilled className="h-3.5 w-3.5 shrink-0 text-[var(--right-now)]" />
 									</span>
 								)}
-								{conversation.data.rightNow === "NOT_HOSTING" && (
+								{showRightNow && conversation.data.rightNow === "NOT_HOSTING" && (
 									<span title={t("right_now.not_hosting", { defaultValue: "Right Now" })}>
 										<RightNowIcon className="h-3.5 w-3.5 shrink-0 text-[var(--right-now)]" />
 									</span>
@@ -698,7 +723,7 @@ function ChatConversationRow({
 								{isTyping ? (
 									<span className="italic text-[var(--accent)]">{t("chat.typing")}</span>
 								) : (
-									getPreviewText(conversation, t)
+									getPreviewText(conversation, t, userId)
 								)}
 							</p>
 							{conversation.data.unreadCount > 0 ? (
@@ -746,14 +771,12 @@ export function ChatInboxPanel({
 	onSetFiltersDraft,
 	onRefreshInbox,
 	onLoadMoreInbox,
+	onInboxScrollIdle,
 	onSelectConversation,
 	onOpenConversationById,
 	onViewProfile,
 	onClearInboxFilters,
-	onToggleFavoritesOnly,
-	onToggleUnreadOnly,
-	onToggleRightNowOnly,
-	onToggleOnlineNowOnly,
+	onToggleQuickFilter,
 	archivedFilter,
 	hiddenFilter,
 	needsReplyOnly,
@@ -835,8 +858,10 @@ export function ChatInboxPanel({
 			requestDeleteConversation(conversation, isArchived);
 		},
 		...(() => {
-			const otherProfileId = getOtherParticipant(conversation, userId)?.profileId;
-			if (!showLocate || !otherProfileId) return {};
+			const otherParticipant = getOtherParticipant(conversation, userId);
+			const otherProfileId = otherParticipant?.profileId;
+			// Locate trilaterates from distances, so it's pointless without one.
+			if (!showLocate || !otherProfileId || otherParticipant.distanceMetres == null) return {};
 			return {
 				onLocate: () => {
 					close();
@@ -868,8 +893,18 @@ export function ChatInboxPanel({
 		setDeleteConfirmState({ conversation, isArchived });
 	};
 
-	const markUserScroll = () => {
+	// Element in state too, for the back-to-top pill's scroll listener. Stable
+	// callback: an inline one would hand the ref null and back on every render.
+	const [inboxListEl, setInboxListEl] = useState<HTMLDivElement | null>(null);
+	const setInboxListRef = useCallback((node: HTMLDivElement | null) => {
+		inboxListRef.current = node;
+		setInboxListEl(node);
+	}, [inboxListRef]);
+
+	const handleListScroll = () => {
 		lastScrollAtRef.current = Date.now();
+		captureScrollAnchors();
+		scheduleScrollIdleReport();
 	};
 
 	useEffect(() => {
@@ -889,14 +924,33 @@ export function ChatInboxPanel({
 	// Virtualized rows — the list can hold the user's entire local chat
 	// history (see inboxSync.ts's background sync), potentially thousands of
 	// conversations, so only what's actually in view (plus a small overscan
-	// buffer) is ever mounted. estimateSize is a rough guess at a row's
-	// resting height; measureElement (wired below, on each row's wrapper)
-	// corrects it once a row's real height is known, so variable-height rows
-	// (wrapping preview text, badges, etc.) still lay out correctly.
+	// buffer) is ever mounted. measureElement (wired below, on each row's
+	// wrapper) corrects estimateSize once a row's real height is known, so
+	// variable-height rows (wrapping preview text, badges, etc.) still lay
+	// out correctly. The estimate is each row's last measured height (or the
+	// last height measured at all), kept across remounts: after a scroll
+	// restore deep into the list, every row above has never been measured in
+	// this instance, and each estimate miss makes the virtualizer rewrite
+	// scrollTop on first measurement, shifting content while scrolling up.
+	const filteredConversationsRef = useRef(filteredConversations);
+	filteredConversationsRef.current = filteredConversations;
+	const rowSizes = isDesktop ? desktopRowSizes : mobileRowSizes;
 	const rowVirtualizer = useVirtualizer({
 		count: filteredConversations.length,
 		getScrollElement: () => inboxListRef.current,
-		estimateSize: () => 82,
+		estimateSize: (index) => {
+			const conversationId = filteredConversations[index]?.data.conversationId;
+			return (conversationId != null ? rowSizes.byId.get(conversationId) : undefined) ?? rowSizes.typical;
+		},
+		measureElement: (element, entry, instance) => {
+			const size = measureElement(element, entry, instance);
+			const conversationId = filteredConversationsRef.current[instance.indexFromElement(element)]?.data.conversationId;
+			if (conversationId != null && size > 0) {
+				rowSizes.byId.set(conversationId, size);
+				rowSizes.typical = size;
+			}
+			return size;
+		},
 		overscan: 8,
 		getItemKey: (index) => filteredConversations[index]?.data.conversationId ?? index,
 	});
@@ -922,6 +976,114 @@ export function ChatInboxPanel({
 		onLoadMoreInbox();
 	}, [lastVirtualItemIndex, filteredConversations.length, isLoadingMoreInbox, nextPage, onLoadMoreInbox]);
 
+	// Re-render when a live response lands, so rows whose rightNow it just
+	// confirmed show it (isInboxRightNowFresh reads module state).
+	useSyncExternalStore(subscribeInboxFreshness, getInboxFreshnessVersion);
+
+	const onInboxScrollIdleRef = useRef(onInboxScrollIdle);
+	onInboxScrollIdleRef.current = onInboxScrollIdle;
+	const scrollIdleTimerRef = useRef<number | null>(null);
+	const scheduleScrollIdleReport = useCallback(() => {
+		if (scrollIdleTimerRef.current != null) {
+			window.clearTimeout(scrollIdleTimerRef.current);
+		}
+		scrollIdleTimerRef.current = window.setTimeout(() => {
+			scrollIdleTimerRef.current = null;
+			// range is the rows actually in view, without overscan.
+			const range = rowVirtualizer.range;
+			if (!range || !inboxListRef.current) {
+				return;
+			}
+			const ids: string[] = [];
+			for (let index = range.startIndex; index <= range.endIndex; index += 1) {
+				const conversation = filteredConversationsRef.current[index];
+				if (conversation) {
+					ids.push(conversation.data.conversationId);
+				}
+			}
+			onInboxScrollIdleRef.current?.(ids);
+		}, SCROLL_IDLE_MS);
+	}, [inboxListRef, rowVirtualizer]);
+	useEffect(
+		() => () => {
+			if (scrollIdleTimerRef.current != null) {
+				window.clearTimeout(scrollIdleTimerRef.current);
+			}
+		},
+		[],
+	);
+	useEffect(() => {
+		if (!isLoadingInbox && !isSearchOpen) {
+			scheduleScrollIdleReport();
+		}
+	}, [filteredConversations.length, isLoadingInbox, isSearchOpen, scheduleScrollIdleReport]);
+
+	// Scroll anchoring. Every row in view is remembered by id with its offset
+	// from scrollTop; whenever the list changes (archived chats hydrating in,
+	// a poll adding chats above, chatDb merging in) or the list remounts
+	// (mobile unmounts the inbox while a thread is open; leaving /chat
+	// unmounts the whole page), scrollTop is moved so those rows sit where
+	// they were. Several rows instead of one, taking the position most of
+	// them agree on: the row that just got a message jumps to the top, and
+	// following it would yank the list there. Nothing is anchored at the very
+	// top, so new chats still appear there.
+	const scrollAnchorsRef = useRef(getInboxScrollAnchors(userId));
+	// The list renders empty/skeleton first — capturing then would clobber
+	// the saved anchors with "at top".
+	const isScrollAnchoringReadyRef = useRef(false);
+	const captureScrollAnchors = () => {
+		const el = inboxListRef.current;
+		const range = rowVirtualizer.range;
+		if (!el || !isScrollAnchoringReadyRef.current) {
+			return;
+		}
+		const anchors: InboxScrollAnchor[] = [];
+		if (el.scrollTop >= 1 && range) {
+			for (let index = range.startIndex; index <= range.endIndex; index += 1) {
+				const conversation = filteredConversations[index];
+				const item = rowVirtualizer.measurementsCache[index];
+				if (conversation && item) {
+					anchors.push({ conversationId: conversation.data.conversationId, offset: el.scrollTop - item.start });
+				}
+			}
+		}
+		scrollAnchorsRef.current = anchors;
+		if (userId != null) {
+			setInboxScrollAnchors(userId, anchors);
+		}
+	};
+	useLayoutEffect(() => {
+		const el = inboxListRef.current;
+		if (!el || isLoadingInbox || isSearchOpen || filteredConversations.length === 0) {
+			return;
+		}
+		isScrollAnchoringReadyRef.current = true;
+		const anchors = scrollAnchorsRef.current;
+		if (anchors.length === 0) {
+			return;
+		}
+		const indexById = new Map(
+			filteredConversations.map((conversation, index) => [conversation.data.conversationId, index] as const),
+		);
+		const votes = new Map<number, number>();
+		let target: number | null = null;
+		for (const anchor of anchors) {
+			const index = indexById.get(anchor.conversationId);
+			const start = index != null ? rowVirtualizer.measurementsCache[index]?.start : undefined;
+			if (start == null) continue;
+			const candidate = Math.round(start + anchor.offset);
+			const count = (votes.get(candidate) ?? 0) + 1;
+			votes.set(candidate, count);
+			// Ties go to the topmost row (anchors are in on-screen order).
+			if (target == null || count > (votes.get(target) ?? 0)) {
+				target = candidate;
+			}
+		}
+		if (target != null && Math.abs(el.scrollTop - target) >= 1) {
+			rowVirtualizer.scrollToOffset(target);
+		}
+	}, [filteredConversations, isLoadingInbox, isSearchOpen, rowVirtualizer]);
+
 	return (
 		<PullToRefreshContainer
 			className={`flex min-h-0 flex-col overflow-hidden ${
@@ -930,7 +1092,7 @@ export function ChatInboxPanel({
 			contentClassName="flex flex-1 flex-col min-h-0"
 			style={
 				!isDesktop
-					? { paddingTop: "calc(env(safe-area-inset-top, 0px) + clamp(14px, 2.2vw, 28px))" }
+					? { paddingTop: "calc(var(--safe-area-top) + clamp(14px, 2.2vw, 28px))" }
 					: undefined
 			}
 			onRefresh={onRefreshInbox}
@@ -953,10 +1115,7 @@ export function ChatInboxPanel({
 					onSetSearchQuery={onSetSearchQuery}
 					onSetIsFiltersOpen={onSetIsFiltersOpen}
 					onSetFiltersDraft={onSetFiltersDraft}
-					onToggleFavoritesOnly={onToggleFavoritesOnly}
-					onToggleUnreadOnly={onToggleUnreadOnly}
-					onToggleRightNowOnly={onToggleRightNowOnly}
-					onToggleOnlineNowOnly={onToggleOnlineNowOnly}
+					onToggleQuickFilter={onToggleQuickFilter}
 					onClearInboxFilters={onClearInboxFilters}
 					archivedFilter={archivedFilter}
 					hiddenFilter={hiddenFilter}
@@ -977,8 +1136,8 @@ export function ChatInboxPanel({
 					style={!isDesktop ? { marginTop: `-${FEED_HEADER_OFFSET}` } : undefined}
 				>
 					<div
-						ref={inboxListRef}
-						onScroll={markUserScroll}
+						ref={setInboxListRef}
+						onScroll={handleListScroll}
 						data-lenis-prevent
 						className="h-full overflow-y-auto"
 						style={!isDesktop ? {
@@ -987,12 +1146,12 @@ export function ChatInboxPanel({
 							WebkitMaskImage: `linear-gradient(to bottom, transparent, black ${FEED_MASK_GRADIENT_STOP})`,
 						} : undefined}
 					>
-						<div className={!isDesktop ? "pb-[calc(env(safe-area-inset-bottom,0px)+120px)]" : ""}>
+						<div className={!isDesktop ? "pb-[calc(var(--safe-area-bottom)+120px)]" : "py-1.5"}>
 							{isLoadingInbox ? (
 								<div className="flex flex-col">
 									{Array.from({ length: 12 }).map((_, i) => (
-										<div key={i} className="flex items-center gap-4 border-b border-[var(--surface-2)] py-3 px-4">
-											<div className="h-15 w-15 shrink-0 rounded-full overflow-hidden animate-pulse bg-[var(--surface-2)]" />
+										<div key={i} className={`flex items-center gap-4 ${isDesktop ? "mx-2 my-0.5 px-3 py-2.5" : "border-b border-[var(--surface-2)] px-4 py-3"}`}>
+											<div className={`${isDesktop ? "h-13 w-13" : "h-15 w-15"} shrink-0 rounded-full overflow-hidden animate-pulse bg-[var(--surface-2)]`} />
 											<div className="flex flex-1 flex-col gap-2">
 												<div className="flex items-center justify-between gap-3">
 													<div className="h-3 w-28 animate-pulse rounded-full bg-[var(--surface-2)]" />
@@ -1015,14 +1174,21 @@ export function ChatInboxPanel({
 									</button>
 								</div>
 							) : filteredConversations.length === 0 ? (
-								<div className="flex flex-col items-center justify-center gap-3 p-6 text-center text-[var(--text-muted)]">
-									<MessageCircle className="h-8 w-8" />
-									<p className="text-sm">
-										{hasActiveInboxFilters
-											? t("chat.no_conversations_match")
-											: t("chat.no_conversations")}
-									</p>
-								</div>
+								hasActiveInboxFilters ? (
+									<DrawerEmptyState
+										icon={<ListFilter />}
+										fanned={false}
+										title={t("chat.no_conversations_match")}
+										hint={t("chat.no_conversations_match_hint", { defaultValue: "Try changing or clearing your filters." })}
+									/>
+								) : (
+									<DrawerEmptyState
+										icon={<MessageCircle />}
+										fanned={false}
+										title={t("chat.no_conversations")}
+										hint={t("chat.no_conversations_hint", { defaultValue: "Chats you start or receive will show up here." })}
+									/>
+								)
 							) : (
 								<>
 									<div
@@ -1061,6 +1227,11 @@ export function ChatInboxPanel({
 														isTyping={typingConversationIds?.has(conversation.data.conversationId) ?? false}
 														isArchived={archivedConversationIds.has(conversation.data.conversationId)}
 														isDesktop={isDesktop}
+														showRightNow={isInboxRightNowFresh(
+															userId,
+															conversation.data.conversationId,
+															nowTimestamp,
+														)}
 														onSelectConversation={onSelectConversation}
 														onViewProfile={onViewProfile}
 														onOpenActionSheet={(c, isArchived, title) =>
@@ -1086,6 +1257,8 @@ export function ChatInboxPanel({
 							)}
 						</div>
 					</div>
+					{/* Desktop inbox is a narrow column: keep the pill centered there too. */}
+					<ScrollToTopButton target={inboxListEl} className="rail:left-1/2 rail:right-auto rail:-translate-x-1/2" />
 				</div>
 			)}
 

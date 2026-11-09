@@ -14,10 +14,13 @@ import { ProfileImage } from "../../../../components/ui/profile-image";
 import { usePreferences } from "../../../../contexts/PreferencesContext";
 import type { ChatContactIndexRecord } from "../../../../types/chat-contact-index";
 import { useRevealOnScroll } from "../../../../hooks/useRevealOnScroll";
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import { haptic } from "../../../../utils/haptics";
+import { TILE_HOVER_ZOOM_CLASS } from "../../../../hooks/useProfilePhotoPrivacy";
 import { TileFlameBurst } from "./TileFlameBurst";
+import { OfflineDot } from "./OfflineDot";
 import type { GridTapStatus } from "../hooks/useGridTapStatus";
+import { getUnreadBeyondLocalRead } from "../../../../utils/privacy";
 
 const LONG_PRESS_MS = 450;
 const LONG_PRESS_MOVE_TOLERANCE_PX = 10;
@@ -25,6 +28,17 @@ const LONG_PRESS_MOVE_TOLERANCE_PX = 10;
 // tap only opens the profile once the window has passed.
 const DOUBLE_TAP_MS = 250;
 const FLAME_BURST_MS = 1200;
+// A touch that lands while the grid is still scrolling (momentum after a
+// fling) just stops the scroll — holding that finger still must not count as
+// a long press on whatever tile ended up underneath.
+const SCROLL_SETTLE_MS = 120;
+
+// Last time anything scrolled. Scroll events don't bubble, so listen in the
+// capture phase to catch the grid's inner scroll container too.
+let lastScrollAt = 0;
+if (typeof window !== "undefined") {
+	window.addEventListener("scroll", () => { lastScrollAt = performance.now(); }, { capture: true, passive: true });
+}
 
 type BrowseCardTileProps = {
 	card: BrowseCard;
@@ -43,7 +57,10 @@ type BrowseCardTileProps = {
 	hidePopular?: boolean;
 };
 
-export function BrowseCardTile({
+// Memoized: the virtualizer re-renders BrowseGrid on every scroll event, and
+// without this every mounted tile (6 columns plus overscan on desktop) would
+// re-render with it although its props haven't changed.
+export const BrowseCardTile = memo(function BrowseCardTile({
 	card,
 	chatContactStatus,
 	localNickname,
@@ -57,7 +74,7 @@ export function BrowseCardTile({
 	hidePopular = false,
 }: BrowseCardTileProps) {
 	const { t } = useTranslation();
-	const { unitsPreset, showDebugInfo, doubleTapTapType, doubleTapAction } = usePreferences();
+	const { unitsPreset, showDebugInfo, doubleTapTapType, doubleTapAction, showEstimatedDistance, showLastOnline } = usePreferences();
 	const { ref, revealClass } = useRevealOnScroll();
 	const name = localNickname?.trim() || getDisplayName(card);
 	const nicknameRename = getNicknameRename(localNickname, card.displayName, seenDisplayName);
@@ -73,7 +90,9 @@ export function BrowseCardTile({
 	const isRightNow = card.rightNow === "HOSTING" || card.rightNow === "NOT_HOSTING";
 	const isBoosting = card.isBoosting === true;
 	const databaseUnread = chatContactStatus?.unreadCount ?? 0;
-	const apiUnread = card.unreadCount ?? 0;
+	// Adjusted at render, not when fetched: cached cards (kept for minutes)
+	// still carry the raw count from before the chat was read.
+	const apiUnread = getUnreadBeyondLocalRead(card.profileId, card.unreadCount ?? 0);
 	const unreadCount = Math.max(databaseUnread, apiUnread);
 	const hasChatted = Boolean(chatContactStatus?.hasChatted) || card.chatted === true || unreadCount > 0;
 	const isFavorite = card.favorite === true;
@@ -86,6 +105,8 @@ export function BrowseCardTile({
 	// doesn't open underneath the menu.
 	const pressRef = useRef<{ timer: ReturnType<typeof setTimeout>; x: number; y: number } | null>(null);
 	const longPressTriggeredRef = useRef(false);
+	// Defaults to "mouse" so keyboard-triggered context menus still work.
+	const lastPointerTypeRef = useRef<string>("mouse");
 	const canOpenMenu = Boolean(onOpenContextMenu) && !isDemoCard;
 
 	const cancelPress = () => {
@@ -97,14 +118,20 @@ export function BrowseCardTile({
 
 	const handlePointerDown = (event: React.PointerEvent) => {
 		longPressTriggeredRef.current = false;
+		lastPointerTypeRef.current = event.pointerType;
 		cancelPress();
 		if (!canOpenMenu || event.pointerType === "mouse") return;
+		const startedAt = performance.now();
+		if (startedAt - lastScrollAt < SCROLL_SETTLE_MS) return;
 		const { clientX: x, clientY: y } = event;
 		pressRef.current = {
 			x,
 			y,
 			timer: setTimeout(() => {
 				pressRef.current = null;
+				// The grid scrolled during the hold (the browser doesn't always
+				// send pointercancel/pointermove for it) — this was a scroll.
+				if (lastScrollAt >= startedAt) return;
 				longPressTriggeredRef.current = true;
 				haptic(15);
 				onOpenContextMenu?.(card, x, y);
@@ -124,12 +151,14 @@ export function BrowseCardTile({
 		event.preventDefault();
 		// Android WebViews also fire contextmenu on a touch long press — the
 		// timer above owns that case.
-		if (!canOpenMenu || pressRef.current || longPressTriggeredRef.current) return;
+		// Checking the pointer type (not just pressRef) matters: a press skipped
+		// because the grid was still scrolling has no pressRef either.
+		if (!canOpenMenu || lastPointerTypeRef.current !== "mouse" || pressRef.current || longPressTriggeredRef.current) return;
 		onOpenContextMenu?.(card, event.clientX, event.clientY);
 	};
 
 	const singleTapTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-	const [flameBurst, setFlameBurst] = useState<{ key: number; tapId: number } | null>(null);
+	const [flameBurst, setFlameBurst] = useState<{ key: number; tapId: number; theirTapId: number | null } | null>(null);
 
 	useEffect(() => {
 		if (flameBurst === null) return;
@@ -163,7 +192,8 @@ export function BrowseCardTile({
 			}
 			if (onDoubleTapProfile(card.profileId, doubleTapTapType)) {
 				haptic(30, [15, 10, 25]);
-				setFlameBurst({ key: Date.now(), tapId: doubleTapTapType });
+				// They already tapped us: this tap makes it mutual.
+				setFlameBurst({ key: Date.now(), tapId: doubleTapTapType, theirTapId: tapStatus?.received ?? null });
 			}
 			return;
 		}
@@ -176,7 +206,7 @@ export function BrowseCardTile({
 
 
 	return (
-		<div ref={ref} className={cn(!isDesktop && "bg-black rounded-[4px] overflow-hidden", revealClass)}>
+		<div ref={ref} className={cn(!isDesktop && "bg-black rounded-[6px] overflow-hidden", revealClass)}>
 			<button
 				type="button"
 				key={card.profileId}
@@ -188,13 +218,13 @@ export function BrowseCardTile({
 				onPointerLeave={cancelPress}
 				onContextMenu={handleContextMenu}
 				className={cn(
-					"no-touch-callout touch-manipulation surface-card-grid overflow-hidden text-left transition-transform w-full block relative",
+					"no-touch-callout touch-manipulation surface-card-grid overflow-hidden text-start transition-transform w-full block relative",
 					// Hovering unblurs the photo (see PRIVACY_HOVER_REVEAL_CLASS); demo cards stay blurred.
 					!isDemoCard && "group/reveal",
 					!isDemoCard && "active:scale-95",
 					isDesktop
 						? "rounded-xl shadow-sm"
-						: "rounded-[4px]",
+						: "rounded-[6px]",
 					isBoosting ? "p-[2.5px] z-20" : isRightNow ? "p-[2px]" : "p-0",
 					isDemoCard && "cursor-default"
 				)}
@@ -224,15 +254,16 @@ export function BrowseCardTile({
                     pre-iOS-15 WebKit. This triggered an endless pagination loop
                     that crashed the WebView renderer. thank you flo
 				*/}
-				<div className="relative w-full h-0 pb-[100%] bg-[var(--surface-2)] z-10 rounded-[inherit] overflow-hidden ring-1 ring-inset ring-white/10">
+				<div className={cn("relative w-full h-0 pb-[100%] bg-[var(--surface-2)] z-10 rounded-[inherit] overflow-hidden", isDesktop && "ring-1 ring-inset ring-white/10")}>
 					<div className="absolute inset-0">
 					<ProfileImage
 						src={card.primaryImageUrl}
 						alt={t("browse_page.profile_photo_alt", { name })}
 						privacyScope="grid"
+						placeholder="silhouette"
 						className={cn(
 							// Demo cards stay blurred, also while hovered.
-							isDemoCard && "blur-md scale-110 hover:blur-md hover:scale-110"
+							isDemoCard ? "blur-md scale-110 hover:blur-md hover:scale-110" : TILE_HOVER_ZOOM_CLASS
 						)}
 					/>
 
@@ -248,7 +279,7 @@ export function BrowseCardTile({
 								title={nicknameRename.realName ? t("chat.nicknames.real_name", { name: nicknameRename.realName }) : undefined}
 							>
 								{name}
-								{age && <span className="font-semibold text-white/90 ml-1"> {age}</span>}
+								{age && <span className="font-semibold text-white/90 ms-1"> {age}</span>}
 							</p>
 						</div>
 
@@ -304,15 +335,19 @@ export function BrowseCardTile({
 								)
 							) : null}
 							{!onlineStatus.isOnline && (
-								<span className="inline-flex items-center gap-1 rounded-full bg-black/55 px-2 py-0.5 text-[10px] font-bold text-white backdrop-blur-sm sm:text-[11px]">
-									{t(onlineStatus.labelKey, { count: onlineStatus.count })}
-								</span>
+								showLastOnline ? (
+									<span className="inline-flex items-center gap-1 rounded-full bg-black/55 px-2 py-0.5 text-[10px] font-bold text-white backdrop-blur-sm sm:text-[11px]">
+										{t(onlineStatus.labelKey, { count: onlineStatus.count })}
+									</span>
+								) : (
+									<OfflineDot title={t(onlineStatus.labelKey, { count: onlineStatus.count })} />
+								)
 							)}
 						</div>
 					</div>
 
 					{/* Bottom-right: Interaction cluster */}
-					<div className="absolute bottom-2 right-2 z-10 flex flex-col items-end gap-1">
+					<div className="absolute bottom-2 end-2 z-10 flex flex-col items-end gap-1">
 						{/* Tap status sits above the row so it doesn't crowd favorite + chat
 							next to the distance. Outlined flame = you tapped, filled = they
 							tapped you, filled with a white outline = both (mutual). */}
@@ -362,9 +397,9 @@ export function BrowseCardTile({
 
 					{/* Bottom-left: Distance */}
 					<div className="absolute inset-x-0 bottom-0 h-14 bg-gradient-to-t from-black/70 via-black/25 to-transparent pointer-events-none" />
-					<div className="absolute bottom-2 left-2 z-10 flex h-5 items-center text-white drop-shadow-[0_1px_2px_rgba(0,0,0,0.8)]">
+					<div className="absolute bottom-2 start-2 z-10 flex h-5 items-center text-white drop-shadow-[0_1px_2px_rgba(0,0,0,0.8)]">
 						{card.distanceMeters == null || !Number.isFinite(card.distanceMeters) ? (
-							card.estimatedDistanceMeters != null && Number.isFinite(card.estimatedDistanceMeters) ? (
+							showEstimatedDistance && card.estimatedDistanceMeters != null && Number.isFinite(card.estimatedDistanceMeters) ? (
 								<span className="inline-flex items-center gap-1 text-xs font-semibold">
 									<MapPinOffFilled className="h-3.5 w-3.5" />
 									{formatDistance(card.estimatedDistanceMeters, t, unitsPreset)}
@@ -380,10 +415,10 @@ export function BrowseCardTile({
 						)}
 					</div>
 
-					{flameBurst !== null && <TileFlameBurst key={flameBurst.key} tapId={flameBurst.tapId} />}
+					{flameBurst !== null && <TileFlameBurst key={flameBurst.key} tapId={flameBurst.tapId} theirTapId={flameBurst.theirTapId} />}
 					</div>
 				</div>
 			</button>
 		</div>
 	);
-}
+});

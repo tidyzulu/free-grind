@@ -162,16 +162,21 @@ export async function buildBinaryUpload(file: File): Promise<{
 	};
 }
 
-/** Whole seconds, or 0 when the browser can't read the duration. */
-export function getVideoDurationSeconds(file: File): Promise<number> {
-	return new Promise<number>((resolve) => {
+/**
+ * Milliseconds, as the upload `length` expects, or null when the webview
+ * can't read the duration. Streamed uploads read the length from the file
+ * itself and use this only when the file has none (src-tauri/src/upload/video.rs).
+ */
+export function getVideoDurationMs(file: File): Promise<number | null> {
+	return new Promise<number | null>((resolve) => {
 		const vid = document.createElement("video");
 		vid.preload = "metadata";
 		vid.onloadedmetadata = () => {
-			resolve(isFinite(vid.duration) ? Math.round(vid.duration) : 0);
+			const { duration } = vid;
+			resolve(Number.isFinite(duration) && duration > 0 ? Math.round(duration * 1000) : null);
 			URL.revokeObjectURL(vid.src);
 		};
-		vid.onerror = () => { resolve(0); URL.revokeObjectURL(vid.src); };
+		vid.onerror = () => { resolve(null); URL.revokeObjectURL(vid.src); };
 		vid.src = URL.createObjectURL(file);
 	});
 }
@@ -358,7 +363,13 @@ export function conversationNeedsReply(
 	return senderId != null && userId != null && Number(senderId) !== Number(userId);
 }
 
-export function getPreviewText(conversation: ConversationEntry, t: TranslateFn): string {
+/**
+ * Inbox preview line. Pass `userId` so a last message from the other person
+ * reads the same as its notification ("Sent you a picture", via
+ * getIncomingMessageLabel); our own last message keeps the neutral wording,
+ * since "Sent you…" would be wrong there.
+ */
+export function getPreviewText(conversation: ConversationEntry, t: TranslateFn, userId?: number | null): string {
 	const preview = conversation.data.preview;
 	if (!preview) {
 		return t("chat.no_messages_yet");
@@ -366,6 +377,13 @@ export function getPreviewText(conversation: ConversationEntry, t: TranslateFn):
 
 	if (preview.text?.trim()) {
 		return preview.text;
+	}
+
+	const isIncoming =
+		preview.senderId != null && userId != null && Number(preview.senderId) !== Number(userId);
+	if (isIncoming) {
+		const label = getIncomingMessageLabel(preview.type, t);
+		if (label) return label;
 	}
 
 	switch (preview.type) {
@@ -390,6 +408,8 @@ export function getPreviewText(conversation: ConversationEntry, t: TranslateFn):
 			return t("chat.preview.sent_video");
 		case "Location":
 			return t("chat.preview.sent_location");
+		case "RightNowRequest":
+			return t("chat.preview.right_now_request", { defaultValue: "Right Now request" });
 		case "VideoCall":
 			return t("chat.preview.video_call");
 		default:
@@ -426,6 +446,8 @@ export function getMessagePreviewLabel(message: Message, t: TranslateFn): string
 			return t("chat.preview.sent_video");
 		case "Location":
 			return t("chat.preview.sent_location");
+		case "RightNowRequest":
+			return t("chat.preview.right_now_request", { defaultValue: "Right Now request" });
 		case "VideoCall":
 			return getVideoCallStatusLabel(message, t);
 		default:
@@ -434,8 +456,7 @@ export function getMessagePreviewLabel(message: Message, t: TranslateFn): string
 }
 
 // Media types' notification wording (the 26.21 app's push texts, shared with
-// the native FCM pipeline via push_notifications.*); anything else uses the
-// regular inbox preview.
+// the native FCM pipeline via push_notifications.*).
 const NOTIFICATION_BODY_KEYS: Record<string, string> = {
 	Image: "push_notifications.chat_image_notification_body",
 	ExpiringImage: "push_notifications.chat_expiring_image_notification_body",
@@ -452,9 +473,30 @@ const NOTIFICATION_BODY_KEYS: Record<string, string> = {
 	AlbumContentReaction: "push_notifications.chat_album_content_reaction_notification_body",
 };
 
+// Types that keep their own label even when incoming: the native push has
+// no wording for them, and its generic "Sent you a message" would hide what
+// actually happened.
+const INCOMING_OWN_LABEL_TYPES = new Set(["VideoCall", "RightNowRequest"]);
+
+/**
+ * Wording for a text-less message *from the other person*, matching what the
+ * native Android notification shows for it (NotificationStrings /
+ * FreeGrindFirebaseMessagingService): the media text, or "Sent you a
+ * message" for anything without one. Null for types that keep their regular
+ * preview label (INCOMING_OWN_LABEL_TYPES). Shared by the in-app banner and
+ * the inbox preview so all three read the same.
+ */
+export function getIncomingMessageLabel(type: string | null | undefined, t: TranslateFn): string | null {
+	const key = type ? NOTIFICATION_BODY_KEYS[type] : undefined;
+	if (key) return t(key);
+	if (type && INCOMING_OWN_LABEL_TYPES.has(type)) return null;
+	return t("push_notifications.generic_message");
+}
+
 export function getNotificationBodyLabel(message: Message, t: TranslateFn): string {
-	const key = NOTIFICATION_BODY_KEYS[message.type];
-	return key ? t(key) : getMessagePreviewLabel(message, t);
+	const text = (message.body as Record<string, unknown> | null)?.text;
+	if (typeof text === "string" && text.trim()) return text;
+	return getIncomingMessageLabel(message.type, t) ?? getMessagePreviewLabel(message, t);
 }
 
 // Normalizes the various casings/spellings seen in real traffic for
@@ -757,7 +799,8 @@ export function getMessageImageUrl(message: UiMessage): string | null {
 	};
 
 	const normalizeUrlCandidate = (candidate: string): string | null => {
-		if (candidate.startsWith("http://") || candidate.startsWith("https://")) {
+		// blob: is an optimistic upload bubble's local preview (see sendMediaAttachment).
+		if (candidate.startsWith("http://") || candidate.startsWith("https://") || candidate.startsWith("blob:")) {
 			return candidate;
 		}
 
@@ -956,7 +999,8 @@ export function getMessageVideoUrl(message: UiMessage): string | null {
 			: null;
 
 	const normalizeUrl = (candidate: string): string | null => {
-		if (candidate.startsWith("http://") || candidate.startsWith("https://")) {
+		// blob: is an optimistic upload bubble's local preview (see sendMediaAttachment).
+		if (candidate.startsWith("http://") || candidate.startsWith("https://") || candidate.startsWith("blob:")) {
 			return candidate;
 		}
 		if (candidate.startsWith("/")) {
@@ -1104,7 +1148,8 @@ function isViewLimitedMessage(message: UiMessage): boolean {
  * non-expiring CDN content, not Grindr media subject to URL expiry.
  */
 export function getMediaCaptureTarget(message: UiMessage): MediaCaptureTarget | null {
-	if (message.type === "Giphy") {
+	// Optimistic bubbles point at a local blob: preview, nothing to capture yet.
+	if (message.type === "Giphy" || isLocalClientMessageId(message.messageId)) {
 		return null;
 	}
 
@@ -1291,6 +1336,8 @@ export function getParticipantOnlineMeta(
 	onlineUntil: number | null | undefined,
 	nowTimestamp: number,
 	t: TranslateFn,
+	/** Appearance "show online time left": false labels online profiles as plain "Online". */
+	showTimeLeft = true,
 ): { isOnline: boolean; isEndingSoon?: boolean; label: string } {
 	// lastOnline/onlineUntil of 0 is the server's "unknown/hidden" sentinel,
 	// not a real epoch timestamp — treat it the same as null/undefined,
@@ -1315,7 +1362,9 @@ export function getParticipantOnlineMeta(
 		return {
 			isOnline: true,
 			isEndingSoon: minsLeft <= ONLINE_ENDING_SOON_MINUTES,
-			label: t("browse_page.status_online_left", { count: minsLeft }),
+			label: showTimeLeft
+				? t("browse_page.status_online_left", { count: minsLeft })
+				: t("browse_page.status_online"),
 		};
 	}
 

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, type MutableRefObject } from "react";
 import { useTranslation } from "react-i18next";
-import type { RightNowFeedItem } from "../../../services/apiFunctions";
+import type { RightNowFeedEntry, RightNowFeedItem } from "../../../services/apiFunctions";
 import { usePreferences } from "../../../contexts/PreferencesContext";
 import { useMediaBlur, useProfilePhotoPrivacy, type ProfilePhotoPrivacy } from "../../../hooks/useProfilePhotoPrivacy";
 import { decodeGeohash } from "../../../utils/geohash";
@@ -8,11 +8,13 @@ import { getThumbImageUrl, validateMediaHash } from "../../../utils/media";
 import { MAP_STYLE_DARK, applyRightNowMapTheme, relaxRoadZoomThresholds } from "../gridpage/components/mapStyles";
 import { formatDistance } from "../gridpage/utils";
 import { proxyMediaUrl } from "../../../utils/mediaProxy";
+import { setCrashContext } from "../../../utils/crashContext";
 
 export type RightNowMapItem = RightNowFeedItem & { lat: number; lon: number };
 
-export function hasMapPosition(item: RightNowFeedItem): item is RightNowMapItem {
+export function hasMapPosition(item: RightNowFeedEntry): item is RightNowMapItem {
 	return (
+		item.kind === "post" &&
 		typeof item.lat === "number" && Number.isFinite(item.lat) &&
 		typeof item.lon === "number" && Number.isFinite(item.lon)
 	);
@@ -30,6 +32,8 @@ type Props = {
 	fitKey: string;
 	/** Height (px) covered by the page header at the top of the map. */
 	topInset: number;
+	/** Width (px) covered by the desktop nav rail at the left of the map. */
+	leftInset?: number;
 	/** Receives "frame all markers" so the page header can offer it as a pill. */
 	recenterRef?: MutableRefObject<(() => void) | null>;
 };
@@ -39,6 +43,11 @@ type Props = {
 const FIT_PADDING = { top: 56, bottom: 230, left: 48, right: 48 };
 const FIT_MAX_ZOOM = 15;
 const MARKER_SIZE = 48;
+const MAX_PIXEL_RATIO = 2;
+/** Tiles kept in memory; maplibre's default grows with the viewport size. */
+const MAX_TILE_CACHE_SIZE = 64;
+/** How often groups are recomputed while the map moves. */
+const RECLUSTER_THROTTLE_MS = 120;
 
 /** The poster's profile photo (ignoring any photo attached to the post). */
 export function getRightNowProfileImageUrl(item: RightNowFeedItem): string | null {
@@ -77,7 +86,13 @@ function isOnline(item: RightNowFeedItem): boolean {
 	return typeof item.onlineUntil === "number" && item.onlineUntil > Date.now();
 }
 
-const HOME_ICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="11" height="11" fill="white"><path d="M11.47 3.84a.75.75 0 0 1 1.06 0l8.69 8.69a.75.75 0 1 0 1.06-1.06l-8.69-8.69a2.25 2.25 0 0 0-3.18 0l-8.69 8.69a.75.75 0 0 0 1.06 1.06l8.69-8.69Z"/><path d="m12 5.43 8.16 8.16c.03.03.06.06.09.08v6.2c0 1.04-.84 1.88-1.88 1.88H15a.75.75 0 0 1-.75-.75v-4.5a.75.75 0 0 0-.75-.75h-3a.75.75 0 0 0-.75.75V21a.75.75 0 0 1-.75.75H5.63a1.88 1.88 0 0 1-1.88-1.88v-6.2l.09-.08L12 5.43Z"/></svg>`;
+// Same shape as HomeFilled (FilledIcons), which marks hosting everywhere else;
+// as a string because the badge is plain DOM. Each copy needs its own mask id.
+let homeIconCount = 0;
+function homeIconSvg(): string {
+	const id = `rn-home-${++homeIconCount}`;
+	return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="11" height="11" fill="white" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><mask id="${id}" maskUnits="userSpaceOnUse" x="-2" y="-2" width="28" height="28"><rect x="-2" y="-2" width="28" height="28" fill="white" stroke="none"/><rect x="10" y="13" width="4" height="10" rx="1" fill="black" stroke="none"/></mask><path mask="url(#${id})" d="M3 10a2 2 0 0 1 .709-1.528l7-6a2 2 0 0 1 2.582 0l7 6A2 2 0 0 1 21 10v10.25a.75.75 0 0 1-.75.75H3.75a.75.75 0 0 1-.75-.75z"/></svg>`;
+}
 const USER_ICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M12 12a5 5 0 1 0 0-10 5 5 0 0 0 0 10Zm0 2c-4.42 0-8 2.24-8 5v1a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-1c0-2.76-3.58-5-8-5Z"/></svg>`;
 
 // Session progress ring around the avatar (SVG, so it can count down).
@@ -181,7 +196,7 @@ function buildMarkerElement(
 	if (item.hosting) {
 		const badge = document.createElement("div");
 		badge.style.cssText = "position:absolute;top:-6px;right:-6px;width:19px;height:19px;border-radius:9999px;background:var(--right-now);border:2px solid var(--bg);display:flex;align-items:center;justify-content:center;";
-		badge.innerHTML = HOME_ICON_SVG;
+		badge.innerHTML = homeIconSvg();
 		inner.appendChild(badge);
 	}
 
@@ -219,49 +234,41 @@ function formatClusterCount(count: number): string {
 	return count > CLUSTER_COUNT_MAX ? `${CLUSTER_COUNT_MAX}+` : String(count);
 }
 
-// A group of nearby posts, drawn like a profile marker: the newest member's
-// photo (dimmed) inside the usual ring, the member count in the middle and two
-// offset circles behind it hinting at the stack.
+/** Faces shown side by side in a cluster pill. */
+const CLUSTER_FACES_MAX = 3;
+
+// A group of nearby posts, drawn as an avatar group so it can't be mistaken
+// for a single profile: a pill with the newest members' faces overlapping
+// and the member count next to them.
 function buildClusterElement(members: RightNowFeedItem[], photoFilter: MarkerPhotoFilter, onClick: () => void): HTMLDivElement {
 	const el = document.createElement("div");
 	el.className = "rn-cluster";
-	el.style.cssText = `width:${MARKER_SIZE}px;height:${MARKER_SIZE}px;`;
 	const pop = document.createElement("div");
 	pop.className = "rn-marker-pop";
 	const inner = document.createElement("div");
-	inner.className = "rn-marker-inner";
+	inner.className = "rn-marker-inner rn-cluster-pill";
 
-	for (let i = 0; i < 2; i++) {
-		const stack = document.createElement("div");
-		stack.className = "rn-cluster-stack";
-		inner.appendChild(stack);
+	for (const member of members.slice(0, CLUSTER_FACES_MAX)) {
+		const face = document.createElement("div");
+		face.className = "rn-cluster-face";
+		const photo = getMarkerPhoto(member, photoFilter);
+		if (photo) {
+			const img = document.createElement("img");
+			img.src = proxyMediaUrl(photo.url);
+			img.alt = "";
+			img.draggable = false;
+			if (photo.blur) img.style.filter = "blur(4px)";
+			face.appendChild(img);
+		} else {
+			face.innerHTML = USER_ICON_SVG;
+		}
+		inner.appendChild(face);
 	}
 
-	const face = document.createElement("div");
-	face.className = "rn-cluster-face";
-	const photo = members.map((member) => getMarkerPhoto(member, photoFilter)).find((p) => p != null);
-	if (photo) {
-		const img = document.createElement("img");
-		img.src = proxyMediaUrl(photo.url);
-		img.alt = "";
-		img.draggable = false;
-		if (photo.blur) img.style.filter = "blur(6px) brightness(0.5) saturate(1.2)";
-		face.appendChild(img);
-	}
 	const count = document.createElement("span");
 	count.className = "rn-cluster-count";
 	count.textContent = formatClusterCount(members.length);
-	face.appendChild(count);
-	inner.appendChild(face);
-
-	const center = RING_SIZE / 2;
-	const ring = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-	ring.setAttribute("class", "rn-ring");
-	ring.setAttribute("viewBox", `0 0 ${RING_SIZE} ${RING_SIZE}`);
-	// Thinner than a profile's countdown ring — it's just an outline here.
-	const clusterStroke = 1.75;
-	ring.innerHTML = `<circle cx="${center}" cy="${center}" r="${RING_SIZE / 2 - clusterStroke / 2}" fill="none" stroke="var(--right-now)" stroke-width="${clusterStroke}"/>`;
-	inner.appendChild(ring);
+	inner.appendChild(count);
 
 	pop.appendChild(inner);
 	el.appendChild(pop);
@@ -313,7 +320,7 @@ function markerSignature(item: RightNowMapItem, label: string, photoFilter: Mark
 	return [item.lat, item.lon, photo?.url ?? "", photo?.blur ?? false, item.hosting, isOnline(item), label].join("|");
 }
 
-export function RightNowMap({ items, selectedKey, onSelectKey, fitKey, topInset, recenterRef }: Props) {
+export function RightNowMap({ items, selectedKey, onSelectKey, fitKey, topInset, leftInset = 0, recenterRef }: Props) {
 	const { t } = useTranslation();
 	const { geohash, unitsPreset } = usePreferences();
 	const { rightNow: blurRightNowMedia } = useMediaBlur();
@@ -343,6 +350,8 @@ export function RightNowMap({ items, selectedKey, onSelectKey, fitKey, topInset,
 	itemsRef.current = items;
 	const topInsetRef = useRef(topInset);
 	topInsetRef.current = topInset;
+	const leftInsetRef = useRef(leftInset);
+	leftInsetRef.current = leftInset;
 	const onSelectKeyRef = useRef(onSelectKey);
 	onSelectKeyRef.current = onSelectKey;
 	// fitKey the map was last framed for; null until the first markers arrive.
@@ -371,7 +380,7 @@ export function RightNowMap({ items, selectedKey, onSelectKey, fitKey, topInset,
 			map.easeTo({
 				center: [current[0].lon, current[0].lat],
 				zoom: 14,
-				padding: { ...FIT_PADDING, top: FIT_PADDING.top + topInsetRef.current },
+				padding: { ...FIT_PADDING, top: FIT_PADDING.top + topInsetRef.current, left: FIT_PADDING.left + leftInsetRef.current },
 				duration,
 			});
 			return;
@@ -379,7 +388,7 @@ export function RightNowMap({ items, selectedKey, onSelectKey, fitKey, topInset,
 		const bounds = new maplibregl.LngLatBounds();
 		for (const item of current) bounds.extend([item.lon, item.lat]);
 		map.fitBounds(bounds, {
-			padding: { ...FIT_PADDING, top: FIT_PADDING.top + topInsetRef.current },
+			padding: { ...FIT_PADDING, top: FIT_PADDING.top + topInsetRef.current, left: FIT_PADDING.left + leftInsetRef.current },
 			maxZoom: FIT_MAX_ZOOM,
 			duration,
 		});
@@ -428,6 +437,7 @@ export function RightNowMap({ items, selectedKey, onSelectKey, fitKey, topInset,
 				markers.delete(key);
 			}
 		}
+		setCrashContext("rightNowMapMarkers", markers.size);
 	}, []);
 
 	const applySelection = useCallback((key: string | null) => {
@@ -512,7 +522,7 @@ export function RightNowMap({ items, selectedKey, onSelectKey, fitKey, topInset,
 				const bounds = new maplibregl.LngLatBounds();
 				for (const item of group.items) bounds.extend([item.lon, item.lat]);
 				map.fitBounds(bounds, {
-					padding: { ...FIT_PADDING, top: FIT_PADDING.top + topInsetRef.current },
+					padding: { ...FIT_PADDING, top: FIT_PADDING.top + topInsetRef.current, left: FIT_PADDING.left + leftInsetRef.current },
 					// Never stop short of the level where clustering ends.
 					maxZoom: Math.max(CLUSTER_MAX_ZOOM, map.getZoom() + 2),
 					duration: 400,
@@ -623,6 +633,11 @@ export function RightNowMap({ items, selectedKey, onSelectKey, fitKey, topInset,
 					center: startCenter ?? [10, 50],
 					zoom: startCenter ? 12 : 3,
 					attributionControl: false,
+					// The map runs full screen; at the native ratio (3+ on many Android
+					// phones) its WebGL buffers plus the heatmap's offscreen framebuffer
+					// can push the WebView out of GPU memory and take the app down.
+					pixelRatio: Math.min(window.devicePixelRatio || 1, MAX_PIXEL_RATIO),
+					maxTileCacheSize: MAX_TILE_CACHE_SIZE,
 				});
 				map.on("style.load", () => {
 					relaxRoadZoomThresholds(map);
@@ -631,16 +646,16 @@ export function RightNowMap({ items, selectedKey, onSelectKey, fitKey, topInset,
 					// setStyle drops custom sources/layers, so re-add the hotspots.
 					syncHotspots();
 				});
-				// Regroup while the map moves (once per frame), not only when it
-				// stops — otherwise tapping a group shows nothing until the whole
-				// zoom animation has finished, which feels like a hang.
-				let reclusterFrame = 0;
+				// Regroup while the map moves, not only when it stops — otherwise
+				// tapping a group shows nothing until the whole zoom animation has
+				// finished, which feels like a hang. Throttled rather than once per
+				// frame: every regroup can build fresh cluster elements and photos.
+				let lastRecluster = 0;
 				map.on("move", () => {
-					if (reclusterFrame) return;
-					reclusterFrame = requestAnimationFrame(() => {
-						reclusterFrame = 0;
-						recluster();
-					});
+					const now = performance.now();
+					if (now - lastRecluster < RECLUSTER_THROTTLE_MS) return;
+					lastRecluster = now;
+					recluster();
 				});
 				map.on("moveend", recluster);
 				map.on("click", () => onSelectKeyRef.current(null));
@@ -650,6 +665,7 @@ export function RightNowMap({ items, selectedKey, onSelectKey, fitKey, topInset,
 				map.on("zoom", updateZoomClass);
 				map.once("load", updateZoomClass);
 				mapRef.current = map;
+				setCrashContext("rightNowMap", `open, pixelRatio ${map.getPixelRatio()}`);
 
 				// Radar first, so the post markers stack above it.
 				syncRadar();
@@ -684,6 +700,8 @@ export function RightNowMap({ items, selectedKey, onSelectKey, fitKey, topInset,
 			clustersRef.current.clear();
 			mapRef.current?.remove();
 			mapRef.current = null;
+			setCrashContext("rightNowMap", null);
+			setCrashContext("rightNowMapMarkers", null);
 		};
 		// Map is created once; theme/items updates are applied to the live instance below.
 		// eslint-disable-next-line react-hooks/exhaustive-deps

@@ -21,6 +21,7 @@ jobs:
   # app over OTA (ota-branches.yml), so a new APK would add nothing.
   check:
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     outputs:
       should_release: ${{ steps.decide.outputs.should_release }}
     steps:
@@ -65,6 +66,7 @@ jobs:
     needs: check
     if: needs.check.outputs.should_release == 'true'
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     outputs:
       release_id: ${{ steps.create-release.outputs.release_id }}
       tag_name: ${{ steps.vars.outputs.tag_name }}
@@ -122,6 +124,7 @@ jobs:
     # a second deploy of the same commit would just race it.
     if: github.ref_name == 'main'
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     permissions:
       contents: write
     steps:
@@ -199,11 +202,15 @@ jobs:
   reproducible-build:
     needs: create-release
     strategy:
-      fail-fast: true
+      # One builder failing (e.g. snapshot.debian.org down) shouldn't cancel
+      # the others: `verify` still needs all of them, and `gh run rerun
+      # --failed` then only repeats the ones that broke.
+      fail-fast: false
       matrix:
         artifact: [linux, android, windows, frontend]
         builder: [1, 2]
     runs-on: ubuntu-24.04
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -236,6 +243,7 @@ jobs:
   verify:
     needs: [reproducible-build, build-ios-1, build-ios-2, build-macos-1, build-macos-2]
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -318,6 +326,7 @@ jobs:
   publish-verified:
     needs: [create-release, verify]
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

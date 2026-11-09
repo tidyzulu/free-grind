@@ -1,0 +1,152 @@
+import { useEffect, useMemo, useRef } from "react";
+import { createPortal } from "react-dom";
+import { useTranslation } from "react-i18next";
+import { Check, RefreshCw, Save } from "lucide-react";
+import { SHEET_FOOTER_ICON_BUTTON_CLASS, sheetButtonClass } from "../../../components/ui/bottom-sheet";
+import { ProfileEditorFormSections } from "./ProfileEditorFormSections";
+import { ProfilePhotoFlows } from "./ProfilePhotoFlows";
+import { MAX_PROFILE_PHOTOS } from "./profileEditorUtils";
+import { useProfileEditor, type ProfileEditorState } from "./useProfileEditor";
+
+/** What the host's carousel needs to edit the photos in place: the saved
+ * order, each photo's review state and the actions (all saved right away). */
+export type OwnPhotoControls = {
+	hashes: string[];
+	moderationByHash: ProfileEditorState["photos"]["moderationByHash"];
+	maxPhotos: number;
+	isBusy: boolean;
+	isUploading: boolean;
+	remove: (hash: string) => Promise<void>;
+	reorder: (hashes: string[]) => Promise<void>;
+	/** Opens the picture drawer (upload, pick from the pool, delete). */
+	openManager: () => void;
+};
+
+/** Edit mode of your own profile view: the editor's sections in place of the
+ * profile details, with reset/save (or done) pinned to the bottom of the
+ * scroll area. A successful save ends edit mode like "Done" does. */
+export function OwnProfileEditPanel({
+	onDone,
+	onDirtyChange,
+	onPhotoHashesChange,
+	onPhotoControlsChange,
+}: {
+	onDone: () => void;
+	/** Reports unsaved changes, so the host can confirm before leaving edit mode. */
+	onDirtyChange?: (dirty: boolean) => void;
+	/** Reports the saved photo order, so the host's carousel shows it once editing ends. */
+	onPhotoHashesChange?: (hashes: string[]) => void;
+	/** The photos are edited in the host's carousel; null once edit mode ends. */
+	onPhotoControlsChange?: (controls: OwnPhotoControls | null) => void;
+}) {
+	const { t } = useTranslation();
+	const editor = useProfileEditor();
+	const isProfileLoaded = editor.profile != null;
+	// Photo slots are a draft like the rest: the carousel shows the draft
+	// while editing, the profile view the saved order (so leaving without
+	// saving shows the old photos again).
+	const photoHashes = editor.photos.hashes;
+	const savedPhotoHashes = editor.photos.savedHashes;
+
+	useEffect(() => {
+		if (isProfileLoaded) onPhotoHashesChange?.(savedPhotoHashes);
+	}, [isProfileLoaded, savedPhotoHashes, onPhotoHashesChange]);
+
+	// The actions go through a ref, so the reported object only changes with
+	// what the carousel shows — a new one every render would loop with the host.
+	const photosRef = useRef(editor.photos);
+	photosRef.current = editor.photos;
+	const { moderationByHash, isSaving: isSavingPhotos, isUploading: isUploadingPhoto } = editor.photos;
+	// Slot edits only touch the draft, so an upload doesn't block them — a
+	// save or a pool delete (which writes the saved slots) does.
+	const isSavingProfile = editor.isSaving;
+	const photoControls = useMemo<OwnPhotoControls>(() => ({
+		hashes: photoHashes,
+		moderationByHash,
+		maxPhotos: MAX_PROFILE_PHOTOS,
+		isBusy: isSavingPhotos || isSavingProfile,
+		isUploading: isUploadingPhoto,
+		remove: (hash) => photosRef.current.handleRemove(hash),
+		reorder: (hashes) => photosRef.current.handleReorder(hashes),
+		openManager: () => photosRef.current.setIsDrawerOpen(true),
+	}), [photoHashes, moderationByHash, isSavingPhotos, isSavingProfile, isUploadingPhoto]);
+	useEffect(() => {
+		if (isProfileLoaded) onPhotoControlsChange?.(photoControls);
+	}, [isProfileLoaded, photoControls, onPhotoControlsChange]);
+	useEffect(() => () => onPhotoControlsChange?.(null), [onPhotoControlsChange]);
+
+	useEffect(() => {
+		onDirtyChange?.(editor.hasChanges);
+	}, [editor.hasChanges, onDirtyChange]);
+	useEffect(() => () => onDirtyChange?.(false), [onDirtyChange]);
+
+	const handleSave = async () => {
+		// The draft order is what gets saved. Reported here, before onDone ends
+		// edit mode: the effect above would only run after this panel is gone.
+		const savedOrder = editor.photos.hashes;
+		const saved = await editor.handleSaveProfile();
+		if (saved) {
+			onPhotoHashesChange?.(savedOrder);
+			onDone();
+		}
+		return saved;
+	};
+
+	if (editor.isLoadingProfile && !editor.profile) {
+		return <p className="px-1 text-sm font-medium text-[var(--text-muted)]">{t("profile_editor.loading")}</p>;
+	}
+	if (editor.profileError && !editor.profile) {
+		return (
+			<div className="px-1">
+				<p className="text-sm font-semibold">{t("profile_editor.error_load")}</p>
+				<p className="mt-2 text-sm text-[var(--text-muted)]">{editor.profileError}</p>
+			</div>
+		);
+	}
+
+	return (
+		<>
+			<ProfileEditorFormSections editor={editor} />
+			{/* Pinned to the bottom of the profile's scroll area, edge to edge (out of
+			    the host's p-4 / sm:p-5), over the same dark fade as the profile view's
+			    message bar. Laid out like a bottom sheet's footer: a full-width
+			    primary button, reset as the small round button beside it. */}
+			<div
+				className="pointer-events-none sticky bottom-0 z-10 -mx-4 -mt-6 flex gap-2.5 px-4 pb-[max(1rem,var(--safe-area-bottom))] pt-12 sm:-mx-5 [&>*]:pointer-events-auto"
+				style={{ background: "linear-gradient(to top, rgba(0,0,0,0.80) 0%, rgba(0,0,0,0.7) 45%, transparent 100%)" }}
+			>
+				{editor.hasChanges ? (
+					<>
+						<button
+							type="button"
+							onClick={editor.handleResetDraft}
+							disabled={editor.isSaving}
+							aria-label={t("profile_editor.actions.reset")}
+							title={t("profile_editor.actions.reset")}
+							className={SHEET_FOOTER_ICON_BUTTON_CLASS}
+						>
+							<RefreshCw className="h-[18px] w-[18px]" />
+						</button>
+						<button
+							type="button"
+							onClick={() => void handleSave()}
+							disabled={!editor.canSave}
+							className={sheetButtonClass()}
+						>
+							<Save className="h-4 w-4" />
+							{editor.isSaving ? t("profile_editor.actions.saving") : t("profile_editor.actions.save")}
+						</button>
+					</>
+				) : (
+					<button type="button" onClick={onDone} className={sheetButtonClass()}>
+						<Check className="h-4 w-4" />
+						{t("common.done")}
+					</button>
+				)}
+			</div>
+			{/* Into the body like the editor's other sheets: inside the profile
+			    dialog they would be laid out (and clipped) in its box. */}
+			{createPortal(<ProfilePhotoFlows photos={editor.photos} />, document.body)}
+		</>
+	);
+}

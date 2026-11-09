@@ -1,12 +1,14 @@
-import { Loader2, Search, Star, X } from "lucide-react";
+import { Loader2, Search, X } from "lucide-react";
 import { SlidersHorizontal as PhosphorSlidersHorizontal } from "@phosphor-icons/react";
-import { RightNowIcon } from "../../../components/icons/RightNowIcon";
-import { ImagesFilled, MailFilled, PillFilled, VideosFilled } from "../../../components/icons/FilledIcons";
+import { ImagesFilled, PillFilled, VideosFilled } from "../../../components/icons/FilledIcons";
 import { type CSSProperties, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "react-router-dom";
 import { PageHeaderBackground } from "../../../components/ui/PageHeaderBackground";
 import { FilterPill } from "../../../components/ui/FilterPill";
+import { sanitizeQuickFilters, useInboxQuickFilterDefs } from "../../../components/quick-filters/quickFilterDefs";
+import { INBOX_QUICK_FILTER_KEYS, type InboxQuickFilterKey } from "../../../config/quick-filters";
+import { usePreferences } from "../../../contexts/PreferencesContext";
 import { buildChatFiltersDraft, type ChatFiltersDraft } from "./chatUtils";
 import { cn } from "../../../utils/cn";
 import type { InboxFilters } from "../../../types/messages";
@@ -36,10 +38,7 @@ export type ChatInboxHeaderProps = {
 	onSetSearchQuery: (v: string) => void;
 	onSetIsFiltersOpen: (v: boolean) => void;
 	onSetFiltersDraft: (v: ChatFiltersDraft) => void;
-	onToggleFavoritesOnly: () => void;
-	onToggleUnreadOnly: () => void;
-	onToggleRightNowOnly: () => void;
-	onToggleOnlineNowOnly: () => void;
+	onToggleQuickFilter: (key: InboxQuickFilterKey) => void;
 	onClearInboxFilters: () => void;
 };
 
@@ -92,13 +91,14 @@ export function ChatInboxHeader({
 	onSetSearchQuery,
 	onSetIsFiltersOpen,
 	onSetFiltersDraft,
-	onToggleFavoritesOnly,
-	onToggleUnreadOnly,
-	onToggleRightNowOnly,
-	onToggleOnlineNowOnly,
+	onToggleQuickFilter,
 	onClearInboxFilters,
 }: ChatInboxHeaderProps) {
 	const { t } = useTranslation();
+	const { inboxQuickFilters } = usePreferences();
+	const quickFilterDefs = useInboxQuickFilterDefs();
+	const isQuickFilterActive = (key: InboxQuickFilterKey) =>
+		key === "needsReplyOnly" ? needsReplyOnly : Boolean(inboxFilters[key]);
 	const navigate = useNavigate();
 	const [showVideoGallery] = useState(isVideoGalleryEnabled);
 	const [showSexualHealth] = useState(isSexualHealthEnabled);
@@ -107,7 +107,7 @@ export function ChatInboxHeader({
 		<header className="relative z-20 shrink-0 pointer-events-none">
 				<PageHeaderBackground color="var(--accent)" />
 
-				<div className={`pointer-events-auto flex flex-col gap-3 mx-auto w-full px-[var(--app-px)] ${isDesktop ? "max-w-6xl" : ""}`}>
+				<div className={`pointer-events-auto flex flex-col gap-3 mx-auto w-full px-[var(--app-px)]`}>
 
 					{/* Row 1: title + icon buttons */}
 					<div className="flex items-center justify-between gap-2">
@@ -115,7 +115,7 @@ export function ChatInboxHeader({
 							<h1 className="app-title relative w-fit">
 								{t("nav.inbox")}
 								<span
-									className="absolute -top-0.5 -right-2.5 h-2 w-2 rounded-full transition-colors duration-500"
+									className="absolute -top-0.5 -end-2.5 h-2 w-2 rounded-full transition-colors duration-500"
 									style={{
 										backgroundColor:
 											realtimeStatusMeta.symbol === "✓"
@@ -174,10 +174,13 @@ export function ChatInboxHeader({
 						</div>
 					</div>
 
-					{/* Row 2: filter pills */}
+					{/* Row 2: filter pills. The scroller clips the pills' shadow-2xl; pb-16/-mb-12
+					    (and pt-1/-mt-1 above) give it room without changing layout, so the pills
+					    sit exactly where Right Now's / Interest's do. pointer-events stay on the
+					    row so the extra strip doesn't swallow taps on the list below. */}
 					{!isSearchOpen && (
-						<div className="-mx-[var(--app-px)] overflow-x-auto pb-4 pt-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
-							<div className="flex min-w-max items-center gap-2 px-[var(--app-px)]">
+						<div className="pointer-events-none -mx-[var(--app-px)] -mt-1 -mb-12 overflow-x-auto pb-16 pt-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+							<div className="pointer-events-auto flex min-w-max items-center gap-2 px-[var(--app-px)]">
 								<button
 									type="button"
 									onClick={() => {
@@ -200,37 +203,25 @@ export function ChatInboxHeader({
 										<PhosphorSlidersHorizontal weight="fill" className="h-3.5 w-3.5" />
 									</span>
 									{hasActiveInboxFilters && activeFilterCount > 0 && (
-										<span className="ml-0.5 flex h-4 min-w-[16px] items-center justify-center rounded-full bg-[var(--accent-contrast)] px-1 text-[9px] font-bold text-[var(--accent)]">
+										<span className="ms-0.5 flex h-4 min-w-[16px] items-center justify-center rounded-full bg-[var(--accent-contrast)] px-1 text-[9px] font-bold text-[var(--accent)]">
 											{activeFilterCount}
 										</span>
 									)}
 								</button>
 
-								<FilterPill
-									icon={<MailFilled className="h-3.5 w-3.5" />}
-									label={t("chat_filters.options.unread")}
-									active={Boolean(inboxFilters.unreadOnly)}
-									onClick={onToggleUnreadOnly}
-								/>
-								<FilterPill
-									icon={<Star className="h-3.5 w-3.5 fill-current" />}
-									label={t("browse_filters.options.favorites")}
-									active={Boolean(inboxFilters.favoritesOnly)}
-									onClick={onToggleFavoritesOnly}
-								/>
-								<FilterPill
-									icon={<span className="h-2.5 w-2.5 shrink-0 rounded-full bg-green-500 shadow-sm" />}
-									label={t("browse_filters.options.online")}
-									active={Boolean(inboxFilters.onlineNowOnly)}
-									onClick={onToggleOnlineNowOnly}
-								/>
-								<FilterPill
-									icon={<RightNowIcon className="h-3.5 w-3.5" />}
-									label={t("browse_filters.options.right_now")}
-									active={Boolean(inboxFilters.rightNowOnly)}
-									onClick={onToggleRightNowOnly}
-									color="right-now"
-								/>
+								{sanitizeQuickFilters(inboxQuickFilters, INBOX_QUICK_FILTER_KEYS).map((key) => {
+									const def = quickFilterDefs[key];
+									return (
+										<FilterPill
+											key={key}
+											icon={def.renderIcon("h-3.5 w-3.5")}
+											label={def.label}
+											active={isQuickFilterActive(key)}
+											onClick={() => onToggleQuickFilter(key)}
+											color={def.color}
+										/>
+									);
+								})}
 
 								{hasActiveInboxFilters && (
 									<button
@@ -246,26 +237,37 @@ export function ChatInboxHeader({
 						</div>
 					)}
 
-					{/* Row 2: search input */}
+					{/* Row 2: search input. Same box as the pill row it replaces (a 38px pill,
+					    16px net below), so opening search doesn't shift the list. */}
 					{isSearchOpen && (
 						<div className="flex flex-col gap-2 pb-4">
 							<div
-								className="glass-pill relative flex h-10 items-center"
+								className="glass-pill relative flex h-[38px] items-center"
 								style={{ "--pill-color": "var(--accent)" } as CSSProperties}
 							>
-								<Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--text-muted)]" />
+								<Search className="pointer-events-none absolute start-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--text-muted)]" />
 								<input
 									autoFocus
 									value={searchQuery}
 									onChange={(e) => onSetSearchQuery(e.target.value)}
 									placeholder={t("chat_search.placeholder")}
-									className="h-full w-full bg-transparent pl-9 pr-8 text-sm text-[var(--text)] outline-none placeholder:text-[var(--text-muted)]"
+									className="h-full w-full bg-transparent ps-9 pe-8 text-sm text-[var(--text)] outline-none placeholder:text-[var(--text-muted)]"
+									onKeyDown={(e) => {
+										// Escape cancels the search, like the header's search toggle;
+										// kept from reaching window-level Escape handlers.
+										if (e.key === "Escape") {
+											e.preventDefault();
+											e.stopPropagation();
+											onSetIsSearchOpen(false);
+											onSetSearchQuery("");
+										}
+									}}
 								/>
 								{searchQuery && (
 									<button
 										type="button"
 										onClick={() => onSetSearchQuery("")}
-										className="absolute right-3 top-1/2 -translate-y-1/2 rounded-full p-0.5 text-[var(--text-muted)] hover:text-[var(--text)]"
+										className="absolute end-3 top-1/2 -translate-y-1/2 rounded-full p-0.5 text-[var(--text-muted)] hover:text-[var(--text)]"
 									>
 										<X className="h-3.5 w-3.5" />
 									</button>

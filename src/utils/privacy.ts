@@ -34,6 +34,127 @@ export async function loadPrivacyCache(): Promise<void> {
     } catch {
         privacyCache = DEFAULT_PRIVACY_SETTINGS;
     }
+    try {
+        localReadMarkers = (await getSetting<Record<string, string>>(LOCAL_READ_MARKERS_KEY)) ?? {};
+    } catch {
+        localReadMarkers = {};
+    }
+    try {
+        readServerUnreadBaselines = (await getSetting<Record<string, number>>(READ_SERVER_UNREAD_BASELINES_KEY)) ?? {};
+    } catch {
+        readServerUnreadBaselines = {};
+    }
+    lastServerUnreadByConversation.clear();
+}
+
+// --- LOCAL READ MARKERS ---
+// With read receipts hidden (or incognito), markRead never reaches the server,
+// so every /v4/inbox response keeps reporting the chat as unread. Remember the
+// message we read up to locally instead, and treat the conversation as read
+// for as long as the server's preview still points at that same message — a
+// newer message changes the preview id and the server's count shows again.
+
+const LOCAL_READ_MARKERS_KEY = "localReadMarkers";
+// Oldest markers are dropped past this — a marker only matters until the
+// conversation's next message, so long-idle ones are cheap to lose.
+const MAX_LOCAL_READ_MARKERS = 1000;
+
+let localReadMarkers: Record<string, string> = {};
+
+// Moves `key` to the end (newest) and drops the oldest entries past the cap.
+function withBoundedEntry<T>(record: Record<string, T>, key: string, value: T): Record<string, T> {
+    const { [key]: _previous, ...rest } = record;
+    const next: Record<string, T> = { ...rest, [key]: value };
+    const keys = Object.keys(next);
+    for (let i = 0; i < keys.length - MAX_LOCAL_READ_MARKERS; i += 1) {
+        delete next[keys[i]];
+    }
+    return next;
+}
+
+export function setLocalReadMarker(conversationId: string, messageId: string): void {
+    // The server's count as of the last inbox fetch is everything we've just
+    // read (see readServerUnreadBaselines below).
+    const lastSeen = lastServerUnreadByConversation.get(conversationId);
+    if (lastSeen && lastSeen.unreadCount > 0) {
+        setReadServerUnreadBaseline(lastSeen.profileId, lastSeen.unreadCount);
+    }
+
+    if (localReadMarkers[conversationId] === messageId) {
+        return;
+    }
+    localReadMarkers = withBoundedEntry(localReadMarkers, conversationId, messageId);
+    void setSetting(LOCAL_READ_MARKERS_KEY, localReadMarkers);
+}
+
+/** True when the conversation was read locally up to `latestMessageId` (the server's current preview). */
+export function isReadLocallyUpTo(conversationId: string, latestMessageId: string | null | undefined): boolean {
+    return latestMessageId != null && localReadMarkers[conversationId] === latestMessageId;
+}
+
+// The grid's per-profile unread count comes straight from the browse API with
+// no message id to check a marker against. With read receipts hidden the
+// server's count only ever grows, so remember (per profile) how much of it we
+// already read locally and only show what's beyond that.
+
+const READ_SERVER_UNREAD_BASELINES_KEY = "readServerUnreadBaselines";
+
+let readServerUnreadBaselines: Record<string, number> = {};
+// Raw server count from the latest inbox fetch, before any local-read override.
+const lastServerUnreadByConversation = new Map<string, { profileId: string; unreadCount: number }>();
+
+function setReadServerUnreadBaseline(profileId: string, unreadCount: number | null): void {
+    if (unreadCount == null) {
+        if (!(profileId in readServerUnreadBaselines)) {
+            return;
+        }
+        const { [profileId]: _removed, ...rest } = readServerUnreadBaselines;
+        readServerUnreadBaselines = rest;
+    } else {
+        if (readServerUnreadBaselines[profileId] === unreadCount) {
+            return;
+        }
+        readServerUnreadBaselines = withBoundedEntry(readServerUnreadBaselines, profileId, unreadCount);
+    }
+    void setSetting(READ_SERVER_UNREAD_BASELINES_KEY, readServerUnreadBaselines);
+}
+
+/** Records an inbox entry's raw server unread count, and whether we've read it locally. */
+export function noteServerUnreadCount(
+    conversationId: string,
+    profileId: string | null,
+    unreadCount: number,
+    readLocally: boolean,
+): void {
+    if (!profileId) {
+        return;
+    }
+    lastServerUnreadByConversation.set(conversationId, { profileId, unreadCount });
+    if (unreadCount === 0) {
+        // Server reset (e.g. read elsewhere with receipts on) — a stale
+        // baseline would otherwise hide the next real messages.
+        setReadServerUnreadBaseline(profileId, null);
+    } else if (readLocally) {
+        setReadServerUnreadBaseline(profileId, unreadCount);
+    }
+}
+
+/**
+ * Called when a chat is read locally: `knownUnreadCount` is our best local
+ * estimate of the server's count (e.g. the contact index's value before it's
+ * cleared), for when no inbox fetch has reported the raw count yet.
+ */
+export function markServerUnreadReadLocally(profileId: string, knownUnreadCount: number): void {
+    const current = readServerUnreadBaselines[profileId] ?? 0;
+    if (knownUnreadCount > current) {
+        setReadServerUnreadBaseline(profileId, knownUnreadCount);
+    }
+}
+
+/** The part of the server's unread count for `profileId` that wasn't already read locally. */
+export function getUnreadBeyondLocalRead(profileId: string, serverUnreadCount: number): number {
+    const baseline = readServerUnreadBaselines[profileId] ?? 0;
+    return Math.max(0, serverUnreadCount - baseline);
 }
 
 // localStorage writes don't trigger re-renders in other components, so anything

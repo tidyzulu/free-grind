@@ -2,14 +2,15 @@ import { Check, Loader2, Trash2 } from "lucide-react";
 import { ImagesFilled } from "../../../components/icons/FilledIcons";
 import {
 	DRAWER_PRIMARY_BUTTON_CLASS,
-	DrawerActionButton,
-	DrawerActionBar,
+	DrawerAddButton,
+	DrawerAddTile,
 	DrawerBody,
 	DrawerEmptyState,
 	DrawerFooter,
 	DrawerGrid,
 	DrawerHeader,
 	DrawerMediaPreview,
+	DRAWER_TILE_LOADING,
 	DrawerMediaTile,
 	useDrawerMediaPreview,
 } from "../chat/drawerUi";
@@ -20,7 +21,7 @@ import { BottomSheet, SHEET_ICON_BUTTON_CLASS } from "../../../components/ui/bot
 import { SheetSection, SheetTextInput } from "../../../components/ui/sheet-section";
 import * as chatDb from "../../../services/chatDb";
 import type { StoredDrawerCollection } from "../../../services/chatDb";
-import { getCachedMediaUri, getDrawerMediaKey } from "../../../services/mediaStore";
+import { getDrawerMediaKey, getDrawerMediaSrc } from "../../../services/mediaStore";
 import { appLog } from "../../../utils/logger";
 import type { DrawerMedia } from "../chat/ChatDrawerPanel";
 import { useDrawerMediaDelete } from "../chat/useDrawerMediaDelete";
@@ -58,6 +59,9 @@ export function DrawerCollectionEditorSheet({
 	const { t } = useTranslation();
 	const { preview: drawerPreview, bind: bindPreview, consumeClick: consumePreviewClick } = useDrawerMediaPreview();
 	const [name, setName] = useState(collection?.name ?? "");
+	// Typed in (and maybe emptied again): only then, or once media is picked,
+	// does a missing name show as an error, not on a fresh, untouched sheet.
+	const [nameTouched, setNameTouched] = useState(false);
 	// Insertion order of the Set is the send order. Not filtered against the
 	// drawer here — it may still be loading; missing ids are pruned on save.
 	const [selectedIds, setSelectedIds] = useState<Set<number>>(() => new Set(collection?.mediaIds ?? []));
@@ -82,6 +86,10 @@ export function DrawerCollectionEditorSheet({
 	}, []);
 	const upload = useDrawerUploadQueue({ onReloadMedia, onUploaded: appendUploaded });
 	const isBusy = upload.isUploading || isSaving;
+	const nameMissing = !name.trim();
+	const showNameError = nameMissing && (nameTouched || orderedSelection.length > 0);
+	// The save button only comes up once there's something to save: a name and media.
+	const canSave = !nameMissing && orderedSelection.length > 0;
 
 	// Deleting removes the media from the drawer itself, so every collection
 	// using it loses it too (removed from them by useDrawerMediaDelete).
@@ -133,7 +141,9 @@ export function DrawerCollectionEditorSheet({
 			expandable={!upload.step}
 			isDesktop={isDesktop}
 			bg="bg-[color-mix(in_srgb,var(--surface)_92%,black_8%)]"
-			panelClassName="px-4"
+			// Like the chat drawer: a min height on desktop, so the panel doesn't
+			// shrink from the loading skeleton down to the empty state.
+			panelClassName={isDesktop ? "min-h-[55dvh] px-4" : "px-4"}
 		>
 			<DrawerHeader
 				title={upload.stepTitle ?? (collection ? t("settings_albums.collections_edit") : t("settings_albums.collections_new"))}
@@ -159,52 +169,73 @@ export function DrawerCollectionEditorSheet({
 			<SheetSection title={t("settings_albums.name_label", { defaultValue: "Name" })} className="mb-4">
 				<SheetTextInput
 					value={name}
-					onChange={setName}
+					onChange={(value) => {
+						setName(value);
+						setNameTouched(true);
+					}}
 					placeholder={t("settings_albums.collections_name_placeholder")}
 					maxLength={100}
 					disabled={isBusy}
+					invalid={showNameError}
 				/>
-				<p className="mt-2 px-1 text-xs text-[var(--text-muted)]">{t("settings_albums.collections_editor_hint")}</p>
+				{showNameError ? (
+					<p className="mt-2 px-1 text-xs font-medium text-red-400" role="alert">
+						{t("settings_albums.collections_name_required", { defaultValue: "Give the collection a name to save it." })}
+					</p>
+				) : (
+					<p className="mt-2 px-1 text-xs text-[var(--text-muted)]">{t("settings_albums.collections_editor_hint")}</p>
+				)}
 			</SheetSection>
 
 			<DrawerBody
+				skeletonKey="collection-editor"
 				isDesktop={isDesktop}
 				className="max-h-[50vh]"
-				isLoading={isLoading && media.length === 0}
+				isLoading={isLoading && media.length === 0 && !upload.isUploading}
 				error={media.length === 0 ? error : null}
 				onRetry={() => void onReloadMedia()}
-				empty={media.length === 0 ? (
+				empty={media.length === 0 && !upload.isUploading ? (
 					<DrawerEmptyState
+						className="my-auto"
 						icon={<ImagesFilled className="h-5 w-5" />}
 						title={t("chat_drawer.empty", { defaultValue: "Your drawer is empty." })}
 						hint={t("chat_drawer.empty_hint", { defaultValue: "Take a photo or video, or upload one from your device." })}
 					>
-						<div className="grid w-full max-w-sm grid-cols-3 gap-2">
-							{upload.actions.map((action) => (
-								<DrawerActionButton key={action.key} icon={action.icon} label={action.label} onClick={action.onClick} disabled={isBusy} />
-							))}
-						</div>
+						<DrawerAddButton
+							label={t("chat_drawer.add_media", { defaultValue: "Add media" })}
+							actions={upload.actions}
+							isDesktop={isDesktop}
+							disabled={isBusy}
+						/>
 					</DrawerEmptyState>
 				) : undefined}
 			>
 				<DrawerGrid isDesktop={isDesktop}>
-					{/* Add actions as the grid's first row, like the chat drawer. */}
-					<DrawerActionBar actions={upload.actions} disabled={isBusy} />
+					{/* The add tile first, like the chat drawer. */}
+					<DrawerAddTile
+						label={t("chat_drawer.add_media", { defaultValue: "Add media" })}
+						actions={upload.actions}
+						isDesktop={isDesktop}
+						disabled={isBusy}
+					/>
+					{upload.uploadTiles}
 					{media.map((item) => {
 						const isVideo = item.contentType.startsWith("video/");
 						const position = orderedSelection.indexOf(item.id) + 1;
-						const mediaSrc = getCachedMediaUri(getDrawerMediaKey(item.id)) ?? item.url;
+						const mediaSrc = getDrawerMediaSrc(item);
 						return (
 							<DrawerMediaTile
 								key={item.id}
-								src={mediaSrc}
+								src={mediaSrc ?? item.url}
 								isVideo={isVideo}
+								posterKey={getDrawerMediaKey(item.id)}
+								placeholder={mediaSrc == null ? DRAWER_TILE_LOADING : undefined}
 								takenOnGrindr={item.takenOnGrindr}
 								alt={t("chat_drawer.media_alt")}
 								selected={position > 0}
 								selectedContent={<span className="text-lg font-bold text-white drop-shadow">{position}</span>}
 								onSelect={isBusy ? undefined : () => toggleSelection(item.id)}
-								previewProps={bindPreview({ src: mediaSrc, isVideo })}
+								previewProps={bindPreview({ src: mediaSrc ?? item.url, isVideo })}
 								consumePreviewClick={consumePreviewClick}
 								busy={deletion.deletingId === item.id}
 								// Hidden on selected tiles, so it can't be hit while setting the order.
@@ -217,17 +248,19 @@ export function DrawerCollectionEditorSheet({
 				</DrawerGrid>
 			</DrawerBody>
 
-			<DrawerFooter>
-				<button
-					type="button"
-					onClick={() => void handleSave()}
-					disabled={isBusy || !name.trim() || orderedSelection.length === 0}
-					className={DRAWER_PRIMARY_BUTTON_CLASS}
-				>
-					{isSaving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
-					<span>{t("settings_albums.collections_save", { count: orderedSelection.length })}</span>
-				</button>
-			</DrawerFooter>
+			{canSave || isSaving ? (
+				<DrawerFooter>
+					<button
+						type="button"
+						onClick={() => void handleSave()}
+						disabled={isBusy}
+						className={DRAWER_PRIMARY_BUTTON_CLASS}
+					>
+						{isSaving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
+						<span>{t("settings_albums.collections_save", { count: orderedSelection.length })}</span>
+					</button>
+				</DrawerFooter>
+			) : null}
 			</>
 			)}
 			<DrawerMediaPreview media={drawerPreview} />

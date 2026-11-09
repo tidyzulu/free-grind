@@ -1,3 +1,4 @@
+import { stagingRanges } from "./videoEdit";
 import { invoke } from "@tauri-apps/api/core";
 import z from "zod";
 import {
@@ -22,6 +23,7 @@ import {
 	type ShareAlbumPayload,
 } from "../types/chat";
 import { albumsResponseSchema, type Album } from "../types/albums";
+import { notifyOwnAlbumsChanged, rememberOwnAlbumList } from "./ownAlbumsChanged";
 import { createProfileMethods } from "./api/profileMethods";
 import type {
 	AlbumDetailsResponse,
@@ -31,16 +33,23 @@ import type {
 	SearchProfilesParams,
 	SearchProfilesResponse,
 	SharedConversationImage,
-	UploadAlbumContentParams,
-	UploadAlbumContentResponse,
 	UploadChatMediaParams,
 	UploadChatMediaResponse,
+	UploadChatVideoParams,
 } from "../types/chat-service";
 
 import { runAutomationRulesForSender } from "../utils/automationRules";
-import { getIncognitoMode, isReadReceiptsHidden } from "../utils/privacy";
+import {
+	getIncognitoMode,
+	isReadLocallyUpTo,
+	isReadReceiptsHidden,
+	noteServerUnreadCount,
+	setLocalReadMarker,
+} from "../utils/privacy";
 import { ApiFunctionError, assertSuccess, mediaUploadErrorToApiFunctionError, parseJsonSafe } from "./apiHelpers";
 import { sendViaRealtime } from "./chatRealtime";
+import { MAX_CHAT_MEDIA_BYTES, uploadStagedVideo } from "./stagedVideoUpload";
+import { assertUploadFits, stagedEdit, uploadProgressReporter } from "./videoReencode";
 import { isPaywallError, withEntitlementBypass } from "./entitlementBypass";
 
 export { ApiFunctionError as ChatApiError };
@@ -50,6 +59,13 @@ export { ApiFunctionError as ChatApiError };
 // (chatDb-backed) pagination — archived conversations, and the "server
 // exhausted" fallthrough for live ones — can match it instead of drifting.
 export const MESSAGE_PAGE_LIMIT = 20;
+
+const uploadChatMediaResponseSchema = z.object({
+	mediaId: z.coerce.number().int(),
+	mediaHash: z.string().nullable().optional().default(null),
+	url: z.string().nullable().optional().default(null),
+	expiresAt: z.coerce.number().nullable().optional().default(null),
+});
 
 function sortConversations(entries: ConversationEntry[]): ConversationEntry[] {
 	return [...entries].sort((a, b) => {
@@ -271,6 +287,20 @@ export function createChatService(
 					}
 				}
 
+				// Read here with read receipts hidden — the server was never told
+				// (see markRead), so its unread count is stale for us.
+				const readLocally = isReadLocallyUpTo(entry.data.conversationId, entry.data.preview?.messageId);
+				noteServerUnreadCount(
+					entry.data.conversationId,
+					previewProfileId != null ? String(previewProfileId) : null,
+					entry.data.unreadCount,
+					readLocally,
+				);
+				if (entry.data.unreadCount > 0 && readLocally) {
+					safeEntries.push({ ...entry, data: { ...entry.data, unreadCount: 0 } });
+					continue;
+				}
+
 				safeEntries.push(entry);
 			}
 			// ---------------------------------
@@ -425,7 +455,10 @@ export function createChatService(
 		async markRead(conversationId: string, messageId: string): Promise<void> {
  		// --- READ RECEIPTS CHECK ---
  		if (isReadReceiptsHidden(conversationId) || getIncognitoMode()) {
- 			return; // Silently do nothing. They will never know you read it!
+ 			// Silently do nothing server-side. They will never know you read it!
+ 			// Only remembered locally, so the inbox doesn't keep showing it unread.
+ 			setLocalReadMarker(conversationId, messageId);
+ 			return;
  		}
  		// ---------------------------
 
@@ -510,6 +543,7 @@ export function createChatService(
 			const response = await fetchRest("/v1/albums");
 			await assertSuccess(response, t("chat.errors.load_albums"));
 			const parsed = albumsResponseSchema.parse(await parseJsonSafe(response));
+			rememberOwnAlbumList(parsed.albums);
 			return parsed.albums;
 		},
 
@@ -519,11 +553,13 @@ export function createChatService(
 				body: { albumName },
 			});
 			await assertSuccess(response, t("chat.errors.create_album_failed"));
-			return z
+			const created = z
 				.object({
 					albumId: z.coerce.number().int(),
 				})
 				.parse(await parseJsonSafe(response));
+			notifyOwnAlbumsChanged();
+			return created;
 		},
 
 		async getAlbum(albumId: number | string): Promise<AlbumDetailsResponse> {
@@ -624,44 +660,47 @@ export function createChatService(
 					body: Array.from(params.multipart.body),
 					contentType: params.multipart.contentType,
 					takenOnGrindr: params.options.takenOnGrindr,
-					length: params.options.durationSeconds ?? null,
+					length: params.options.length ?? null,
 					looping: params.options.looping,
 				});
 			} catch (error) {
 				throw mediaUploadErrorToApiFunctionError(error, t("chat.errors.upload_media_failed"), t);
 			}
 
-			const parsed = z
-				.object({
-					mediaId: z.coerce.number().int(),
-					mediaHash: z.string().nullable().optional().default(null),
-					url: z.string().nullable().optional().default(null),
-					expiresAt: z.coerce.number().nullable().optional().default(null),
-				})
-				.parse(response);
-
-			return {
-				mediaId: parsed.mediaId,
-				mediaHash: parsed.mediaHash,
-				url: parsed.url,
-				expiresAt: parsed.expiresAt,
-			};
+			return uploadChatMediaResponseSchema.parse(response);
 		},
 
-		async uploadAlbumContent(
-			params: UploadAlbumContentParams,
-		): Promise<UploadAlbumContentResponse> {
-			const response = await fetchRest(`/v1/albums/${params.albumId}/content`, {
-				method: "POST",
-				rawBody: params.multipart.body,
-				contentType: params.multipart.contentType,
-			});
-			await assertSuccess(response, t("chat.errors.upload_media_failed"));
-			return z
-				.object({
-					contentId: z.coerce.number().int(),
-				})
-				.parse(await parseJsonSafe(response));
+		/**
+		 * Streams a video from disk (see stagedVideoUpload) to the unsigned
+		 * chat endpoint, cut and turned portrait as `edit` says (see
+		 * videoEdit); null when this binary can't, see uploadChatMedia.
+		 */
+		async uploadChatVideo(params: UploadChatVideoParams): Promise<UploadChatMediaResponse | null> {
+			await assertUploadFits(params.file, params.edit, MAX_CHAT_MEDIA_BYTES, t("chat.attachments.too_large"));
+			const report = uploadProgressReporter(params.edit, params.onProgress);
+			const upload = async (stagedId: string) => {
+				const edit = await stagedEdit(stagedId, params.file, params.edit, {
+					onLandscapeKept: params.onLandscapeKept,
+					notSendableMessage: t("chat.errors.video_not_sendable"),
+					onConverting: (fraction) => report("converting", fraction),
+				});
+				return invoke("upload_staged_chat_video", {
+					stagedId,
+					looping: params.looping,
+					lengthMs: params.lengthMs ?? null,
+					edit,
+					onProgress: report.channel(),
+				});
+			};
+			const response = await uploadStagedVideo(
+				params.file,
+				upload,
+				t("chat.errors.upload_media_failed"),
+				t,
+				(fraction) => report("preparing", fraction),
+				await stagingRanges(params.file, params.edit),
+			);
+			return response === null ? null : uploadChatMediaResponseSchema.parse(response);
 		},
 
 		async shareAlbum(payload: ShareAlbumPayload) {

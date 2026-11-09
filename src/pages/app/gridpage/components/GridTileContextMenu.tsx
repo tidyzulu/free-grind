@@ -1,8 +1,8 @@
 import { Fragment, useEffect, useLayoutEffect, useRef, useState, type ReactElement, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
-import { Ban, EyeOff, MessageCircle, PencilLine, Star, StarOff } from "lucide-react";
-import { SheetActionList } from "../../../../components/ui/action-sheet";
+import { Ban, EyeOff, MessageCircle, Pencil, PencilLine, Star, StarOff } from "lucide-react";
+import { SheetActionList, afterSheetClose } from "../../../../components/ui/action-sheet";
 import { menuTransitionStyle } from "../../../../hooks/usePresence";
 import { LocateFixedFilled } from "../../../../components/icons/FilledIcons";
 import type { NicknameRename } from "../../../../hooks/useNicknameNameChange";
@@ -27,6 +27,8 @@ type GridTileContextMenuProps = {
 	/** Only passed while the optional Locate feature is enabled. */
 	onLocate?: () => void;
 	locateLabel?: string;
+	/** Your own tile: then this is the only action (no message, favorite, hide, block…). */
+	onEditProfile?: () => void;
 };
 
 type TileAction = {
@@ -58,10 +60,18 @@ export function GridTileContextMenu({
 	onBlock,
 	onLocate,
 	locateLabel,
+	onEditProfile,
 }: GridTileContextMenuProps) {
 	const { t } = useTranslation();
 
-	const actions: TileAction[] = [
+	const actions: TileAction[] = onEditProfile ? [
+		{
+			key: "edit-profile",
+			icon: <Pencil className={isDesktop ? "h-4 w-4" : "h-3.5 w-3.5"} />,
+			label: t("profile_editor.edit_profile", { defaultValue: "Edit profile" }),
+			onClick: onEditProfile,
+		},
+	] : [
 		{
 			key: "message",
 			icon: <MessageCircle className={isDesktop ? "h-4 w-4" : "h-3.5 w-3.5"} />,
@@ -122,7 +132,9 @@ export function GridTileContextMenu({
 					label: action.label,
 					description: action.description,
 					tone: action.danger ? "danger" : "default",
-					onSelect: action.onClick,
+					// The closing sheet pops its history entry, which would undo a
+					// navigation (Message) run right away — run actions after it.
+					onSelect: () => afterSheetClose(action.onClick),
 				}))}
 			/>
 		);
@@ -185,7 +197,7 @@ function DesktopTileMenu({
 			ref={menuRef}
 			style={{ top: position.top, left: position.left, ...menuTransitionStyle(visible, "top left") }}
 			onContextMenu={(e) => e.preventDefault()}
-			className="no-touch-callout fixed z-[70] flex min-w-[190px] flex-col gap-1 rounded-lg border border-[var(--border)] bg-[var(--surface)] p-2 shadow-2xl"
+			className="no-touch-callout fixed z-[70] flex min-w-[190px] flex-col gap-1 rounded-lg menu-surface p-2"
 		>
 			{actions.map((action) => (
 				<Fragment key={action.key}>
@@ -196,10 +208,10 @@ function DesktopTileMenu({
 							onClose();
 							action.onClick();
 						}}
-						className={`flex w-full items-center gap-2 rounded-sm px-2 py-2 text-left text-sm transition ${
+						className={`flex w-full items-center gap-2 rounded-sm px-2 py-2 text-start text-sm transition ${
 							action.danger
-								? "text-red-500 hover:bg-red-500/10"
-								: "text-[var(--text)] hover:bg-[var(--surface-2)]"
+								? "text-red-500 hover:bg-red-500/10 active:bg-red-500/15"
+								: "text-[var(--text)] hover-fill"
 						}`}
 					>
 						{action.icon}

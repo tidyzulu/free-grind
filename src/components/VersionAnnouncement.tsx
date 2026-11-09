@@ -1,5 +1,5 @@
 import { ChevronRight, FlaskConical } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 import semver from "semver";
@@ -8,27 +8,51 @@ import { useHorizontalSwipe } from "../hooks/useHorizontalSwipe";
 import logo from "../images/freegrind-logo.webp";
 import { fullscreenCardClass, fullscreenIconTileClass, fullscreenPrimaryButtonClass, fullscreenSecondaryButtonClass } from "./FullscreenPrompt";
 
+// Long announcements only show a sliding window of dots; the outermost ones
+// shrink to hint that more pages follow (like iOS/Instagram page controls).
+const MAX_VISIBLE_DOTS = 10;
+
 function Dots({ total, current }: { total: number; current: number }) {
 	if (total <= 1) {
 		return null;
 	}
 
+	const visible = Math.min(total, MAX_VISIBLE_DOTS);
+	const start = Math.max(0, Math.min(current - Math.floor(visible / 2), total - visible));
+	const end = start + visible - 1;
+
+	const dotScale = (i: number) => {
+		if (i === current) return 1;
+		const moreBefore = start > 0;
+		const moreAfter = end < total - 1;
+		if ((moreBefore && i === start) || (moreAfter && i === end)) return 0.5;
+		if ((moreBefore && i === start + 1) || (moreAfter && i === end - 1)) return 0.75;
+		return 1;
+	};
+
 	return (
 		<div
 			className="flex justify-center pb-3 pt-5"
-			style={{ paddingTop: "max(36px, env(safe-area-inset-top))" }}
+			style={{ paddingTop: "max(36px, var(--safe-area-top))" }}
 		>
-			<div className="flex items-center justify-center gap-2">
-				{Array.from({ length: total }).map((_, i) => (
-					<div
-						key={i}
-						className="h-1.5 rounded-full transition-all duration-300"
-						style={{
-							width: i === current ? "24px" : "6px",
-							background: i <= current ? "var(--accent)" : "color-mix(in srgb, var(--text) 15%, transparent)",
-						}}
-					/>
-				))}
+			<div className="flex items-center justify-center">
+				{Array.from({ length: total }).map((_, i) => {
+					const inWindow = i >= start && i <= end;
+					const scale = dotScale(i);
+					return (
+						<div
+							key={i}
+							className="h-1.5 rounded-full transition-all duration-300"
+							style={{
+								width: !inWindow ? 0 : i === current ? "24px" : "6px",
+								margin: inWindow ? "0 4px" : 0,
+								opacity: inWindow ? (scale < 1 ? 0.4 + scale * 0.6 : 1) : 0,
+								transform: `scale(${scale})`,
+								background: i <= current ? "var(--accent)" : "color-mix(in srgb, var(--text) 15%, transparent)",
+							}}
+						/>
+					);
+				})}
 			</div>
 		</div>
 	);
@@ -102,6 +126,21 @@ export function VersionAnnouncement({
 		onPrev: step > -1 ? () => goTo(step - 1) : undefined,
 	});
 
+	// The arrow keys page like a swipe (and likewise never close).
+	useEffect(() => {
+		const onKey = (event: KeyboardEvent) => {
+			if (event.key === "ArrowRight" && step < items.length - 1) {
+				setDirection(1);
+				setStep(step + 1);
+			} else if (event.key === "ArrowLeft" && step > -1) {
+				setDirection(-1);
+				setStep(step - 1);
+			}
+		};
+		window.addEventListener("keydown", onKey);
+		return () => window.removeEventListener("keydown", onKey);
+	}, [step, items.length]);
+
 	const isFinalPage = isIntro ? items.length === 0 : isLastItem;
 	const Icon = item?.icon;
 	const pageClass = direction > 0 ? "animate-step-in-next" : "animate-step-in-prev";
@@ -116,8 +155,8 @@ export function VersionAnnouncement({
 						key="intro"
 						className={`flex flex-1 flex-col items-center justify-center px-8 text-center ${pageClass}`}
 						style={{
-							paddingTop: "max(48px, env(safe-area-inset-top))",
-							paddingBottom: "max(48px, calc(env(safe-area-inset-bottom) + 80px))",
+							paddingTop: "max(48px, var(--safe-area-top))",
+							paddingBottom: "max(48px, calc(var(--safe-area-bottom) + 80px))",
 						}}
 					>
 						<img src={logo} alt="" className="mb-6 h-16 w-16 rounded-2xl object-cover" />
@@ -137,7 +176,7 @@ export function VersionAnnouncement({
 							)}
 						</p>
 						{prereleaseLabel && (
-							<div className={`${fullscreenCardClass} mt-8 w-full max-w-sm overflow-hidden text-left`}>
+							<div className={`${fullscreenCardClass} mt-8 w-full max-w-sm overflow-hidden text-start`}>
 								<div className="flex items-start gap-3 px-4 py-3.5">
 									<div className="shrink-0 rounded-2xl ink-tint-8 p-2.5 text-[var(--accent)]">
 										<FlaskConical className="h-5 w-5" />
@@ -174,7 +213,7 @@ export function VersionAnnouncement({
 
 				<div
 					className="flex h-44 shrink-0 flex-col justify-end gap-2 px-6"
-					style={{ paddingBottom: "max(28px, calc(env(safe-area-inset-bottom) + 12px))" }}
+					style={{ paddingBottom: "max(28px, calc(var(--safe-area-bottom) + 12px))" }}
 				>
 					<button
 						type="button"

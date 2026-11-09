@@ -54,8 +54,8 @@ function HistoryRow({
 			ref={ref}
 			onClick={item.kind === "encounter" ? () => onEditEncounter(item.encounter) : undefined}
 			className={cn(
-				"flex items-center gap-4 border-b border-[var(--surface-2)] py-3 pl-4 pr-4 transition-colors",
-				item.kind === "encounter" && "cursor-pointer hover:bg-[var(--surface-2)]/50",
+				"flex items-center gap-4 border-b border-[var(--surface-2)] py-3 ps-4 pe-4 rail:ps-[var(--app-px)] rail:pe-[var(--app-px)] transition-colors",
+				item.kind === "encounter" && "cursor-pointer hover-fill/50",
 				revealClass,
 			)}
 		>

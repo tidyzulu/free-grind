@@ -6,18 +6,26 @@
 //! instead of crossing the JS<->WebView IPC bridge as multi-hundred-MB text.
 //!
 //! Archive layout (version 2):
-//!   tables/<name>.jsonl   - one JSON object per row, ORDER BY the table's primary key
+//!   tables/<name>.jsonl   - one JSON object per row, ORDER BY the table's primary key (saved phrases: their list order)
 //!                           (only present for tables whose category was selected)
 //!   media/<n>.bin         - raw bytes for each blob column, referenced from its
 //!                           row as { "$mediaRef": "media/<n>.bin" } instead of
 //!                           inlining base64 text
+//!   remote/<category>.json - data that lives on the server rather than in sqlite
+//!                           (favorites with their notes), fetched by the frontend and
+//!                           handed in as JSON; import queues it in restored_* tables
 //!   manifest.json        - { version, exportedAt, ownerUserId, categories, rowCounts }
 //!                           (written last so it can carry per-table row counts;
 //!                           readers look it up by name, so entry order doesn't matter)
 //!
+//! A backup can be restored into any profile: when `ownerUserId` differs from
+//! the profile being restored into, import rewrites every reference to the old
+//! profile id (conversation ids, sender ids, ids inside JSON columns) to the
+//! new one - see `ProfileRemap`.
+//!
 //! `categories` lets the caller include/exclude whole groups of tables
-//! (chat messages, media/albums, saved phrases, saved locations, settings,
-//! sexual health - see `BACKUP_CATEGORY_IDS` in `src/services/backupRestore.ts`)
+//! (chat messages, media/albums, own albums, saved phrases, saved locations, settings,
+//! sexual health, favorites - see `BACKUP_CATEGORY_IDS` in `src/services/backupRestore.ts`)
 //! instead of always doing a full all-or-nothing export/import.
 //!
 //! Blob columns (data_base64 etc.) are stored as base64 TEXT in the sqlite
@@ -33,7 +41,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
@@ -50,6 +58,8 @@ use crate::error::AppError;
 const BACKUP_VERSION: i64 = 2;
 const EXPORT_PROGRESS_EVENT: &str = "backup-export-progress";
 const IMPORT_PROGRESS_EVENT: &str = "backup-import-progress";
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+const COPY_PROGRESS_EVENT: &str = "backup-copy-progress";
 /// Time-based rather than row-based: one media row can be several MB, so a
 /// fixed row interval left the UI without any update for minutes.
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(150);
@@ -70,6 +80,41 @@ struct TableSpec {
     category: &'static str,
     columns: &'static [&'static str],
     blob_columns: &'static [&'static str],
+    /// Splits a table across categories: only rows matching `where_sql`, stored
+    /// in their own archive entry `tables/<name>.<suffix>.jsonl`. A table split
+    /// this way is listed once per part.
+    filter: Option<RowFilter>,
+}
+
+#[derive(Clone, Copy)]
+struct RowFilter {
+    suffix: &'static str,
+    where_sql: &'static str,
+    /// Archives from before the split hold the whole table in the plain
+    /// `tables/<name>.jsonl`; exactly one part reads that instead.
+    reads_unsplit: bool,
+}
+
+impl TableSpec {
+    /// Names this part in the archive and the manifest's row counts.
+    fn entry_key(&self) -> String {
+        match self.filter {
+            Some(filter) => format!("{}.{}", self.name, filter.suffix),
+            None => self.name.to_string(),
+        }
+    }
+
+    fn entry_name(&self) -> String {
+        format!("tables/{}.jsonl", self.entry_key())
+    }
+
+    /// Row order in the archive, which import keeps. Saved phrases are a list
+    /// the user ordered (by created_at, older entries all sharing one value,
+    /// so their insertion order breaks the tie): by primary key they'd come
+    /// back alphabetical.
+    fn export_order(&self) -> &'static str {
+        if self.name == "saved_phrases" { "created_at, rowid" } else { self.primary_key }
+    }
 }
 
 /// Mirrors `FULL_EXPORT_TABLES` in `src/services/chatDb.ts` exactly, including
@@ -100,6 +145,7 @@ const EXPORT_TABLES: &[TableSpec] = &[
             "updated_at",
         ],
         blob_columns: &[],
+        filter: None,
     },
     TableSpec {
         name: "conversation_meta",
@@ -107,6 +153,7 @@ const EXPORT_TABLES: &[TableSpec] = &[
         category: "chat_messages",
         columns: &["conversation_id", "last_read_timestamp"],
         blob_columns: &[],
+        filter: None,
     },
     TableSpec {
         name: "messages",
@@ -129,6 +176,7 @@ const EXPORT_TABLES: &[TableSpec] = &[
             "updated_at",
         ],
         blob_columns: &[],
+        filter: None,
     },
     TableSpec {
         name: "media_files",
@@ -147,6 +195,26 @@ const EXPORT_TABLES: &[TableSpec] = &[
             "fetched_at",
         ],
         blob_columns: &["data_base64"],
+        filter: Some(RowFilter { suffix: "chat", where_sql: "media_key NOT LIKE 'drawer:%'", reads_unsplit: true }),
+    },
+    TableSpec {
+        name: "media_files",
+        primary_key: "media_key",
+        category: "drawer_media",
+        columns: &[
+            "media_key",
+            "conversation_id",
+            "message_id",
+            "kind",
+            "mime_type",
+            "data_base64",
+            "view_once",
+            "size_bytes",
+            "fetch_status",
+            "fetched_at",
+        ],
+        blob_columns: &["data_base64"],
+        filter: Some(RowFilter { suffix: "drawer", where_sql: "media_key LIKE 'drawer:%'", reads_unsplit: false }),
     },
     TableSpec {
         name: "albums",
@@ -164,6 +232,7 @@ const EXPORT_TABLES: &[TableSpec] = &[
             "updated_at",
         ],
         blob_columns: &["preview_cover_base64"],
+        filter: None,
     },
     TableSpec {
         name: "album_media",
@@ -180,6 +249,7 @@ const EXPORT_TABLES: &[TableSpec] = &[
             "fetched_at",
         ],
         blob_columns: &["data_base64", "thumb_data_base64"],
+        filter: None,
     },
     TableSpec {
         name: "avatars",
@@ -187,13 +257,15 @@ const EXPORT_TABLES: &[TableSpec] = &[
         category: "media_albums",
         columns: &["media_hash", "data_base64", "mime_type", "fetched_at"],
         blob_columns: &["data_base64"],
+        filter: None,
     },
     TableSpec {
         name: "drawer_collections",
         primary_key: "id",
-        category: "media_albums",
+        category: "drawer_media",
         columns: &["id", "name", "media_ids_json", "created_at", "updated_at"],
         blob_columns: &[],
+        filter: None,
     },
     TableSpec {
         name: "settings",
@@ -201,6 +273,7 @@ const EXPORT_TABLES: &[TableSpec] = &[
         category: "settings",
         columns: &["key", "value"],
         blob_columns: &[],
+        filter: None,
     },
     TableSpec {
         name: "saved_phrases",
@@ -208,6 +281,7 @@ const EXPORT_TABLES: &[TableSpec] = &[
         category: "saved_phrases",
         columns: &["phrase", "created_at"],
         blob_columns: &[],
+        filter: None,
     },
     TableSpec {
         name: "saved_locations",
@@ -215,6 +289,7 @@ const EXPORT_TABLES: &[TableSpec] = &[
         category: "saved_locations",
         columns: &["id", "name", "geohash", "lat", "lon", "created_at"],
         blob_columns: &[],
+        filter: None,
     },
     TableSpec {
         name: "sexual_health_prep_doses",
@@ -222,6 +297,7 @@ const EXPORT_TABLES: &[TableSpec] = &[
         category: "sexual_health",
         columns: &["id", "taken_at", "scheme", "dose_role", "note", "created_at"],
         blob_columns: &[],
+        filter: None,
     },
     TableSpec {
         name: "sexual_health_encounters",
@@ -238,6 +314,7 @@ const EXPORT_TABLES: &[TableSpec] = &[
             "created_at",
         ],
         blob_columns: &[],
+        filter: None,
     },
     TableSpec {
         name: "sexual_health_appointments",
@@ -254,6 +331,7 @@ const EXPORT_TABLES: &[TableSpec] = &[
             "created_at",
         ],
         blob_columns: &[],
+        filter: None,
     },
     TableSpec {
         name: "sexual_health_sti_tests",
@@ -261,7 +339,63 @@ const EXPORT_TABLES: &[TableSpec] = &[
         category: "sexual_health",
         columns: &["id", "tested_at", "test_type", "result", "note", "created_at"],
         blob_columns: &[],
+        filter: None,
     },
+    TableSpec {
+        name: "own_profile_details",
+        primary_key: "key",
+        category: "profile_details",
+        columns: &["key", "data_json"],
+        blob_columns: &[],
+        filter: None,
+    },
+    TableSpec {
+        name: "own_profile_photos",
+        primary_key: "media_hash",
+        category: "profile_photos",
+        columns: &["media_hash", "position", "mime_type", "data_base64"],
+        blob_columns: &["data_base64"],
+        filter: None,
+    },
+    TableSpec {
+        name: "own_blocked_profiles",
+        primary_key: "profile_id",
+        category: "blocked_profiles",
+        columns: &["profile_id"],
+        blob_columns: &[],
+        filter: None,
+    },
+    TableSpec {
+        name: "own_albums",
+        primary_key: "album_id",
+        category: "own_albums",
+        columns: &["album_id", "position", "album_name"],
+        blob_columns: &[],
+        filter: None,
+    },
+    TableSpec {
+        name: "own_album_media",
+        primary_key: "content_id",
+        category: "own_albums",
+        columns: &["content_id", "album_id", "position", "content_type", "data_base64"],
+        blob_columns: &["data_base64"],
+        filter: None,
+    },
+];
+
+/// Data that only lives on the server (own profile details, photos, block
+/// list, albums), recorded locally so a backup has it. Import always writes it to the
+/// second table, where the app picks it up to apply/upload/block/recreate again
+/// (src/services/ownProfileDetails.ts, ownProfilePhotos.ts, ownBlocklist.ts, ownAlbums.ts).
+/// Also when restoring into the same profile: the own record is only a mirror
+/// of the server, rewritten on every start, so a restore landing there was
+/// silently lost.
+const RESTORED_INTO: &[(&str, &str)] = &[
+    ("own_profile_details", "restored_profile_details"),
+    ("own_profile_photos", "restored_profile_photos"),
+    ("own_blocked_profiles", "restored_blocked_profiles"),
+    ("own_albums", "restored_own_albums"),
+    ("own_album_media", "restored_own_album_media"),
 ];
 
 #[derive(Clone, Serialize)]
@@ -330,8 +464,16 @@ pub struct BackupInspection {
 const ALL_CATEGORY_IDS: &[&str] =
     &["chat_messages", "media_albums", "saved_phrases", "saved_locations", "settings", "sexual_health"];
 
+/// Categories backed by a `remote/<category>.json` entry instead of sqlite
+/// tables. Whitelisted so a caller-supplied key can't name an arbitrary entry.
+const REMOTE_CATEGORY_IDS: &[&str] = &["favorites"];
+
+fn remote_entry_name(category: &str) -> String {
+    format!("remote/{category}.json")
+}
+
 enum ManifestCheck {
-    Valid { categories: Vec<String>, exported_at: i64, row_counts: HashMap<String, u64> },
+    Valid { owner_user_id: i64, categories: Vec<String>, exported_at: i64, row_counts: HashMap<String, u64> },
     Invalid(&'static str),
 }
 
@@ -343,8 +485,8 @@ fn open_archive(path: &str) -> Result<Archive, AppError> {
 }
 
 /// Shared by `inspect_backup_file` and `import_backup_from_file` so the
-/// version/owner validation rules can't drift between the two.
-fn read_and_validate_manifest(archive: &mut Archive, owner_user_id: i64) -> Result<ManifestCheck, AppError> {
+/// validation rules can't drift between the two.
+fn read_and_validate_manifest(archive: &mut Archive) -> Result<ManifestCheck, AppError> {
     let manifest: Value = {
         let mut manifest_file = match archive.by_name("manifest.json") {
             Ok(file) => file,
@@ -362,10 +504,10 @@ fn read_and_validate_manifest(archive: &mut Archive, owner_user_id: i64) -> Resu
     if version != Some(BACKUP_VERSION) {
         return Ok(ManifestCheck::Invalid("invalid_format"));
     }
-    let manifest_owner = manifest.get("ownerUserId").and_then(Value::as_i64);
-    if manifest_owner != Some(owner_user_id) {
-        return Ok(ManifestCheck::Invalid("wrong_owner"));
-    }
+    // Needed to remap a backup restored into a different profile.
+    let Some(owner_user_id) = manifest.get("ownerUserId").and_then(Value::as_i64) else {
+        return Ok(ManifestCheck::Invalid("invalid_format"));
+    };
 
     let exported_at = manifest.get("exportedAt").and_then(Value::as_i64).unwrap_or(0);
     let categories = manifest
@@ -379,7 +521,177 @@ fn read_and_validate_manifest(archive: &mut Archive, owner_user_id: i64) -> Resu
         .map(|obj| obj.iter().filter_map(|(k, v)| v.as_u64().map(|n| (k.clone(), n))).collect())
         .unwrap_or_default();
 
-    Ok(ManifestCheck::Valid { categories, exported_at, row_counts })
+    Ok(ManifestCheck::Valid { owner_user_id, categories, exported_at, row_counts })
+}
+
+/// Tables whose rows only make sense inside their conversation: a row from the
+/// chat between the backup's profile and the one it's restored into would land
+/// in a conversation with oneself, so it's dropped instead.
+const SELF_CONVERSATION_SKIP_TABLES: &[&str] = &["conversations", "conversation_meta", "messages", "media_files"];
+
+/// Columns a restore never overwrites on a row the db already has. A
+/// conversation's archive state is the app's current view of whether the
+/// server still produces it (see src/services/conversationArchive.ts); the
+/// backup's copy is older at best, and from another profile's relationship at
+/// worst - writing it over a live conversation would archive it, with nothing
+/// to bring it back while the server keeps listing it as unchanged.
+const KEEP_ON_CONFLICT: &[(&str, &[&str])] = &[("conversations", &["archived", "archived_reason", "archived_at"])];
+
+/// `ArchivedReason` in src/types/chat-db.ts: archived on a block or a deleted
+/// conversation, cleared through `block_state` (not exported) when it reappears.
+const ARCHIVED_REASON_BLOCK: &str = "ws_delete";
+/// Archived because the server no longer produces it; cleared as soon as it reappears.
+const ARCHIVED_REASON_NOT_FOUND: &str = "not_found";
+
+/// `SystemMessageType` in src/services/chatDb.ts: marks where a conversation
+/// restored from another profile's backup ends and this profile's chat goes on.
+const RESTORED_MARKER_TYPE: &str = "SystemRestored";
+
+/// `getDrawerMediaKey` in src/services/mediaStore.ts.
+const DRAWER_MEDIA_KEY_PREFIX: &str = "drawer:";
+/// `RESTORED_DRAWER_KEY_PREFIX` in src/services/restoredDrawerMedia.ts.
+const RESTORED_DRAWER_MEDIA_KEY_PREFIX: &str = "restored-drawer:";
+
+/// Rewrites references to the profile a backup was exported from so they point
+/// at the profile it's restored into. Matches only whole values - a number, an
+/// exact id string, a `<id>:<id>` conversation id (kept in the server's
+/// ascending order), or the conversation id inside a local system message id -
+/// so ids embedded in other text like media CDN URLs are left alone.
+struct ProfileRemap {
+    from: i64,
+    to: i64,
+    from_str: String,
+    to_str: String,
+}
+
+impl ProfileRemap {
+    fn new(from: i64, to: i64) -> Option<Self> {
+        (from != to).then(|| Self { from, to, from_str: from.to_string(), to_str: to.to_string() })
+    }
+
+    fn parse_conversation_id(s: &str) -> Option<(i64, i64)> {
+        let (a, b) = s.split_once(':')?;
+        let is_id = |part: &str| !part.is_empty() && part.bytes().all(|c| c.is_ascii_digit());
+        if !is_id(a) || !is_id(b) {
+            return None;
+        }
+        Some((a.parse().ok()?, b.parse().ok()?))
+    }
+
+    fn remap_string(&self, s: &str) -> Option<String> {
+        if s == self.from_str {
+            return Some(self.to_str.clone());
+        }
+        // `local-system:<type>:<conversation id>:<timestamp>`, see insertSystemMessage in chatDb.ts.
+        if let Some(rest) = s.strip_prefix("local-system:") {
+            let (kind, rest) = rest.split_once(':')?;
+            let (conversation_id, timestamp) = rest.rsplit_once(':')?;
+            let conversation_id = self.remap_conversation_id(conversation_id)?;
+            return Some(format!("local-system:{kind}:{conversation_id}:{timestamp}"));
+        }
+        self.remap_conversation_id(s)
+    }
+
+    fn remap_conversation_id(&self, s: &str) -> Option<String> {
+        let (a, b) = Self::parse_conversation_id(s)?;
+        if a != self.from && b != self.from {
+            return None;
+        }
+        let other = if a == self.from { b } else { a };
+        Some(format!("{}:{}", other.min(self.to), other.max(self.to)))
+    }
+
+    /// Returns whether anything changed.
+    fn remap_value(&self, value: &mut Value) -> bool {
+        match value {
+            Value::Number(n) if n.as_i64() == Some(self.from) => {
+                *value = json!(self.to);
+                true
+            }
+            Value::String(s) => match self.remap_string(s) {
+                Some(remapped) => {
+                    *s = remapped;
+                    true
+                }
+                None => false,
+            },
+            Value::Array(items) => items.iter_mut().fold(false, |changed, item| self.remap_value(item) | changed),
+            Value::Object(obj) => {
+                let mut changed = false;
+                for (key, mut item) in std::mem::take(obj) {
+                    changed |= self.remap_value(&mut item);
+                    let key = match self.remap_string(&key) {
+                        Some(remapped) => {
+                            changed = true;
+                            remapped
+                        }
+                        None => key,
+                    };
+                    obj.insert(key, item);
+                }
+                changed
+            }
+            _ => false,
+        }
+    }
+
+    fn is_self_conversation(&self, value: Option<&Value>) -> bool {
+        value
+            .and_then(Value::as_str)
+            .and_then(Self::parse_conversation_id)
+            .is_some_and(|(a, b)| a == self.to && b == self.to)
+    }
+
+    /// Returns false if the row should be skipped.
+    fn remap_row(&self, table: &TableSpec, row_map: &mut Map<String, Value>) -> bool {
+        for col in table.columns.iter().copied().filter(|c| !table.blob_columns.contains(c)) {
+            let Some(value) = row_map.get_mut(col) else {
+                continue;
+            };
+            // JSON columns are stored as text: rewrite inside them, and only
+            // re-serialize when something changed.
+            if let Value::String(text) = value {
+                if text.starts_with('{') || text.starts_with('[') {
+                    if let Ok(mut parsed) = serde_json::from_str::<Value>(text) {
+                        if self.remap_value(&mut parsed) {
+                            *text = parsed.to_string();
+                        }
+                        continue;
+                    }
+                }
+            }
+            self.remap_value(value);
+        }
+
+        // A block archived the conversation between the backup's profile and the
+        // other person; the profile restored into isn't part of it. Archived
+        // as "no longer available" instead, it comes back as soon as the server
+        // lists the conversation for this profile - e.g. once either side writes.
+        if table.name == "conversations"
+            && row_map.get("archived_reason").and_then(Value::as_str) == Some(ARCHIVED_REASON_BLOCK)
+        {
+            row_map.insert("archived_reason".into(), Value::String(ARCHIVED_REASON_NOT_FOUND.into()));
+        }
+
+        if self.is_self_conversation(row_map.get("conversation_id")) {
+            if SELF_CONVERSATION_SKIP_TABLES.contains(&table.name) {
+                return false;
+            }
+            row_map.insert("conversation_id".into(), Value::Null);
+        }
+
+        // The old profile's drawer isn't on this profile's server drawer, so the
+        // app would purge its cached files as stale; parked under their own
+        // prefix they wait to be re-uploaded (src/services/restoredDrawerMedia.ts).
+        if table.name == "media_files" {
+            if let Some(Value::String(key)) = row_map.get_mut("media_key") {
+                if let Some(media_id) = key.strip_prefix(DRAWER_MEDIA_KEY_PREFIX) {
+                    *key = format!("{RESTORED_DRAWER_MEDIA_KEY_PREFIX}{media_id}");
+                }
+            }
+        }
+        true
+    }
 }
 
 fn resolve_db_path(app: &AppHandle, db_file_name: &str) -> Result<PathBuf, AppError> {
@@ -400,10 +712,114 @@ async fn run_blocking<T: Send + 'static>(
 
 /// Profile dbs that haven't been opened since a table was added lack it until
 /// the app's migrations run again; skip it instead of failing the whole backup.
+/// Temp tables count too: the own-profile fallback (see apply_own_profile_fallback) lives there.
 fn table_exists(conn: &Connection, name: &str) -> Result<bool, AppError> {
     Ok(conn
-        .prepare_cached("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1")?
+        .prepare_cached(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1
+             UNION ALL SELECT 1 FROM sqlite_temp_master WHERE type = 'table' AND name = ?1",
+        )?
         .exists([name])?)
+}
+
+/// Whether `name` has no rows to back up: missing (a db from before the table
+/// existed, not opened since) or empty.
+fn table_is_empty(conn: &Connection, name: &str) -> Result<bool, AppError> {
+    if !table_exists(conn, name)? {
+        return Ok(true);
+    }
+    Ok(!conn.prepare(&format!("SELECT 1 FROM {name} LIMIT 1"))?.exists([])?)
+}
+
+/// What the own-profile fallback could fill in, see `read_own_profile_fallback_source`.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OwnProfileFallbackSource {
+    needs_details: bool,
+    needs_photos: bool,
+    /// The profile's last snapshot (profile_snapshots, a /v7/profiles response), if any.
+    snapshot: Option<String>,
+}
+
+/// Profile data recorded before the own_profile_* tables existed (or never
+/// recorded, e.g. banned before the first sync) can still come from the last
+/// snapshot of the own profile, taken whenever it was opened like any other.
+/// Only offered for what those tables lack; the frontend turns the snapshot
+/// into `remote_entries[OWN_PROFILE_FALLBACK_KEY]` (it can download the photos).
+#[tauri::command]
+pub async fn read_own_profile_fallback_source(
+    app: AppHandle,
+    db_file_name: String,
+    owner_user_id: i64,
+) -> Result<OwnProfileFallbackSource, AppError> {
+    run_blocking(move || {
+        let conn = Connection::open_with_flags(resolve_db_path(&app, &db_file_name)?, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        conn.busy_timeout(Duration::from_secs(30))?;
+        let needs_details = table_is_empty(&conn, "own_profile_details")?;
+        let needs_photos = table_is_empty(&conn, "own_profile_photos")?;
+        let snapshot = if (needs_details || needs_photos) && table_exists(&conn, "profile_snapshots")? {
+            conn.query_row(
+                "SELECT data FROM profile_snapshots WHERE profile_id = ?1",
+                [owner_user_id.to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .ok()
+        } else {
+            None
+        };
+        Ok(OwnProfileFallbackSource { needs_details, needs_photos, snapshot })
+    })
+    .await
+}
+
+/// `remote_entries` key of the own-profile fallback: `{ details?: {...},
+/// photos?: [{ mediaHash, mimeType, dataBase64 }] }`. Not a category of its own,
+/// so it's never written to the archive as is.
+const OWN_PROFILE_FALLBACK_KEY: &str = "ownProfileFallback";
+
+/// Fills profile_details / profile_photos from the fallback where the db has
+/// nothing: temp tables of the same name shadow the (missing or empty) real
+/// ones for this read-only connection, so the export reads them like any
+/// other table and import needs no special case.
+fn apply_own_profile_fallback(conn: &Connection, categories: &[String], fallback: Option<&Value>) -> Result<(), AppError> {
+    let Some(fallback) = fallback else { return Ok(()) };
+    let wants = |category: &str| categories.iter().any(|c| c == category);
+
+    if let Some(details) = fallback.get("details").filter(|d| d.is_object()) {
+        if wants("profile_details") && table_is_empty(conn, "own_profile_details")? {
+            conn.execute_batch("CREATE TEMP TABLE own_profile_details (key TEXT PRIMARY KEY, data_json TEXT)")?;
+            conn.execute(
+                "INSERT INTO temp.own_profile_details (key, data_json) VALUES ('profile', ?1)",
+                [details.to_string()],
+            )?;
+        }
+    }
+
+    let photos = fallback.get("photos").and_then(Value::as_array).filter(|p| !p.is_empty());
+    if let Some(photos) = photos {
+        if wants("profile_photos") && table_is_empty(conn, "own_profile_photos")? {
+            conn.execute_batch(
+                "CREATE TEMP TABLE own_profile_photos (
+                    media_hash TEXT PRIMARY KEY, position INTEGER NOT NULL, mime_type TEXT, data_base64 TEXT
+                )",
+            )?;
+            let mut insert = conn.prepare(
+                "INSERT OR IGNORE INTO temp.own_profile_photos (media_hash, position, mime_type, data_base64)
+                 VALUES (?1, ?2, ?3, ?4)",
+            )?;
+            for (position, photo) in photos.iter().enumerate() {
+                let (Some(hash), Some(data)) = (
+                    photo.get("mediaHash").and_then(Value::as_str),
+                    photo.get("dataBase64").and_then(Value::as_str),
+                ) else {
+                    continue;
+                };
+                let mime_type = photo.get("mimeType").and_then(Value::as_str);
+                insert.execute(rusqlite::params![hash, position as i64, mime_type, data])?;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn selected_tables(categories: &[String]) -> Vec<&'static TableSpec> {
@@ -447,23 +863,27 @@ fn json_to_rusqlite(value: &Value) -> Result<rusqlite::types::Value, AppError> {
     })
 }
 
-fn build_upsert_sql(table: &TableSpec) -> String {
+/// `target` is the table rows are written to - `table.name` unless redirected by `RESTORED_INTO`.
+fn build_upsert_sql(table: &TableSpec, target: &str) -> String {
     let cols_csv = table.columns.join(", ");
     let placeholders = (1..=table.columns.len())
         .map(|i| format!("?{i}"))
         .collect::<Vec<_>>()
         .join(", ");
+    let keep = KEEP_ON_CONFLICT.iter().find(|(name, _)| *name == table.name).map_or(&[][..], |(_, cols)| *cols);
     let update_set = table
         .columns
         .iter()
         .copied()
-        .filter(|&c| c != table.primary_key)
+        .filter(|&c| c != table.primary_key && !keep.contains(&c))
         .map(|c| format!("{c} = excluded.{c}"))
         .collect::<Vec<_>>()
         .join(", ");
+    // A key-only table (e.g. own_blocked_profiles) has nothing to update.
+    let on_conflict = if update_set.is_empty() { "DO NOTHING".to_string() } else { format!("DO UPDATE SET {update_set}") };
     format!(
-        "INSERT INTO {} ({cols_csv}) VALUES ({placeholders}) ON CONFLICT({}) DO UPDATE SET {update_set}",
-        table.name, table.primary_key
+        "INSERT INTO {target} ({cols_csv}) VALUES ({placeholders}) ON CONFLICT({}) {on_conflict}",
+        table.primary_key
     )
 }
 
@@ -483,6 +903,7 @@ pub async fn export_backup_to_file(
     owner_user_id: i64,
     dest_path: String,
     categories: Vec<String>,
+    remote_entries: Option<Map<String, Value>>,
 ) -> Result<(), AppError> {
     run_blocking(move || {
         let dest = PathBuf::from(dest_path);
@@ -493,7 +914,8 @@ pub async fn export_backup_to_file(
             }
             let db_path = resolve_db_path(&app, &db_file_name)?;
             let mut progress = ProgressEmitter::new(Some(&app), EXPORT_PROGRESS_EVENT);
-            write_export_archive(&db_path, owner_user_id, &partial, &categories, &mut progress)?;
+            let remote_entries = remote_entries.unwrap_or_default();
+            write_export_archive(&db_path, owner_user_id, &partial, &categories, &remote_entries, &mut progress)?;
             std::fs::rename(&partial, &dest)?;
             Ok(())
         })();
@@ -510,10 +932,12 @@ fn write_export_archive(
     owner_user_id: i64,
     out_path: &Path,
     categories: &[String],
+    remote_entries: &Map<String, Value>,
     progress: &mut ProgressEmitter,
 ) -> Result<(), AppError> {
     let conn = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     conn.busy_timeout(Duration::from_secs(30))?;
+    apply_own_profile_fallback(&conn, categories, remote_entries.get(OWN_PROFILE_FALLBACK_KEY))?;
 
     let tables = selected_tables(categories);
     let table_count = tables.len();
@@ -534,13 +958,16 @@ fn write_export_archive(
         if !table_exists(&conn, table.name)? {
             continue;
         }
+        let where_clause = table.filter.map(|f| format!(" WHERE {}", f.where_sql)).unwrap_or_default();
         let rows_total = conn
-            .query_row(&format!("SELECT COUNT(*) FROM {}", table.name), [], |r| r.get::<_, i64>(0))
+            .query_row(&format!("SELECT COUNT(*) FROM {}{where_clause}", table.name), [], |r| r.get::<_, i64>(0))
             .map_err(|e| AppError::Backup(format!("failed to count {}: {e}", table.name)))?
             as u64;
-        progress.emit(BackupProgress { table: table.name, table_index, table_count, rows_done: 0, rows_total: Some(rows_total) });
+        // The entry key, not the table name: media_files is two parts (chat / drawer).
+        let progress_key = table.entry_key();
+        progress.emit(BackupProgress { table: &progress_key, table_index, table_count, rows_done: 0, rows_total: Some(rows_total) });
 
-        let entry_name = format!("tables/{}.jsonl", table.name);
+        let entry_name = table.entry_name();
         // A zip writer only has one open entry at a time: starting a media/<n>.bin
         // entry closes the current one, so a table with blob columns can't
         // stream its jsonl while it also writes media. Its rows (blob refs
@@ -552,10 +979,10 @@ fn write_export_archive(
         }
 
         let select_sql = format!(
-            "SELECT {} FROM {} ORDER BY {}",
+            "SELECT {} FROM {}{where_clause} ORDER BY {}",
             table.columns.join(", "),
             table.name,
-            table.primary_key
+            table.export_order()
         );
         let mut stmt = conn
             .prepare(&select_sql)
@@ -620,7 +1047,7 @@ fn write_export_archive(
             }
 
             rows_done += 1;
-            progress.maybe_emit(BackupProgress { table: table.name, table_index, table_count, rows_done, rows_total: Some(rows_total) });
+            progress.maybe_emit(BackupProgress { table: &progress_key, table_index, table_count, rows_done, rows_total: Some(rows_total) });
         }
 
         if has_blobs {
@@ -628,8 +1055,26 @@ fn write_export_archive(
             zip.write_all(&buffered_jsonl)?;
         }
 
-        row_counts.insert(table.name.to_string(), json!(rows_done));
-        progress.emit(BackupProgress { table: table.name, table_index, table_count, rows_done, rows_total: Some(rows_total) });
+        row_counts.insert(table.entry_key(), json!(rows_done));
+        progress.emit(BackupProgress { table: &progress_key, table_index, table_count, rows_done, rows_total: Some(rows_total) });
+    }
+
+    // A banned profile has no session left to ask the server, so its favorites
+    // come from the favorite flag the inbox sync stored on its conversations.
+    let mut remote_entries = remote_entries.clone();
+    if categories.iter().any(|c| c == "favorites") && !remote_entries.contains_key("favorites") {
+        remote_entries.insert("favorites".into(), Value::Array(local_favorite_profiles(&conn)?));
+    }
+
+    for (category, value) in &remote_entries {
+        if !REMOTE_CATEGORY_IDS.contains(&category.as_str()) || !categories.contains(category) {
+            continue;
+        }
+        zip.start_file(remote_entry_name(category).as_str(), text_options)?;
+        zip.write_all(value.to_string().as_bytes())?;
+        if let Some(rows) = value.as_array() {
+            row_counts.insert(category.clone(), json!(rows.len()));
+        }
     }
 
     zip.start_file("manifest.json", text_options)?;
@@ -651,8 +1096,58 @@ fn write_export_archive(
     Ok(())
 }
 
+/// Favorites, like the block list, are set again slowly in the background
+/// (src/services/restoredFavorites.ts) instead of all at once right after the
+/// import, so they're queued in restored_favorite_profiles with their note.
+/// Expects an open transaction.
+fn queue_restored_favorites(conn: &Connection, entries: Option<&Value>, owner_user_id: i64) -> Result<u64, AppError> {
+    let Some(entries) = entries.and_then(Value::as_array) else {
+        return Ok(0);
+    };
+    // Normally created by the app's migrations (chatDb.ts); a db that hasn't run them yet still takes the queue.
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS restored_favorite_profiles (profile_id TEXT PRIMARY KEY, notes TEXT, phone_number TEXT)",
+    )?;
+    let own_id = owner_user_id.to_string();
+    let mut queued = 0;
+    for entry in entries {
+        let profile_id = match entry.get("profileId") {
+            Some(Value::String(id)) => id.clone(),
+            Some(Value::Number(id)) => id.to_string(),
+            _ => continue,
+        };
+        // A profile can't favorite itself.
+        if profile_id.is_empty() || !profile_id.bytes().all(|b| b.is_ascii_digit()) || profile_id == own_id {
+            continue;
+        }
+        let text = |key: &str| entry.get(key).and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_string);
+        queued += conn
+            .prepare_cached(
+                "INSERT INTO restored_favorite_profiles (profile_id, notes, phone_number) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(profile_id) DO UPDATE SET notes = excluded.notes, phone_number = excluded.phone_number",
+            )?
+            .execute(rusqlite::params![profile_id, text("notes"), text("phoneNumber")])? as u64;
+    }
+    Ok(queued)
+}
+
+/// Same shape as the frontend's `FavoriteProfile` entries.
+fn local_favorite_profiles(conn: &Connection) -> Result<Vec<Value>, AppError> {
+    if !table_exists(conn, "conversations")? {
+        return Ok(Vec::new());
+    }
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT other_profile_id, name FROM conversations
+         WHERE favorite = 1 AND other_profile_id IS NOT NULL AND other_profile_id != ''",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(json!({ "profileId": row.get::<_, String>(0)?, "displayName": row.get::<_, Option<String>>(1)? }))
+    })?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}
+
 #[tauri::command]
-pub async fn inspect_backup_file(src_path: String, owner_user_id: i64) -> Result<BackupInspection, AppError> {
+pub async fn inspect_backup_file(src_path: String) -> Result<BackupInspection, AppError> {
     run_blocking(move || {
         let file = File::open(&src_path)?;
         let mut archive = match ZipArchive::new(BufReader::with_capacity(COPY_BUFFER_SIZE, file)) {
@@ -663,7 +1158,7 @@ pub async fn inspect_backup_file(src_path: String, owner_user_id: i64) -> Result
             }
         };
 
-        Ok(match read_and_validate_manifest(&mut archive, owner_user_id)? {
+        Ok(match read_and_validate_manifest(&mut archive)? {
             ManifestCheck::Invalid(error) => BackupInspection { ok: false, categories: None, exported_at: None, error: Some(error) },
             ManifestCheck::Valid { categories, exported_at, .. } => {
                 BackupInspection { ok: true, categories: Some(categories), exported_at: Some(exported_at), error: None }
@@ -671,6 +1166,102 @@ pub async fn inspect_backup_file(src_path: String, owner_user_id: i64) -> Result
         })
     })
     .await
+}
+
+/// A valid backup found in the app's default export folder by `list_local_backups`.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalBackup {
+    path: String,
+    file_name: String,
+    size_bytes: u64,
+    /// File mtime in ms, as a fallback for sorting when `exported_at` is missing.
+    modified_at: i64,
+    exported_at: i64,
+    owner_user_id: i64,
+    categories: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    conversation_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message_count: Option<u64>,
+}
+
+/// The folder `exportBackup` (src/services/backupRestore.ts) writes to by
+/// default: Downloads/FreeGrind on desktop and Android, Documents/FreeGrind on iOS.
+async fn local_backup_dir(app: &AppHandle) -> Option<PathBuf> {
+    #[cfg(target_os = "android")]
+    {
+        use tauri_plugin_android_fs::{AndroidFsExt, PublicGeneralPurposeDir};
+        // Path access only sees files this app created (until a reinstall),
+        // which is exactly what an export to Downloads/FreeGrind produces.
+        #[allow(deprecated)]
+        let download = app
+            .android_fs_async()
+            .public_storage()
+            .resolve_path(None, PublicGeneralPurposeDir::Download)
+            .await
+            .ok()?;
+        Some(download.join("FreeGrind"))
+    }
+    #[cfg(target_os = "ios")]
+    {
+        Some(app.path().document_dir().ok()?.join("FreeGrind"))
+    }
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        Some(app.path().download_dir().ok()?.join("FreeGrind"))
+    }
+}
+
+fn read_local_backup(path: &Path) -> Option<LocalBackup> {
+    let metadata = std::fs::metadata(path).ok()?;
+    let mut archive = open_archive(path.to_str()?).ok()?;
+    let ManifestCheck::Valid { owner_user_id, categories, exported_at, row_counts } = read_and_validate_manifest(&mut archive).ok()? else {
+        return None;
+    };
+    let modified_at = metadata
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_millis() as i64);
+    Some(LocalBackup {
+        path: path.to_string_lossy().into_owned(),
+        file_name: path.file_name()?.to_string_lossy().into_owned(),
+        size_bytes: metadata.len(),
+        modified_at,
+        exported_at,
+        owner_user_id,
+        categories,
+        conversation_count: row_counts.get("conversations").copied(),
+        message_count: row_counts.get("messages").copied(),
+    })
+}
+
+fn scan_backup_dir(dir: &Path) -> Vec<LocalBackup> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut backups: Vec<LocalBackup> = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.is_file() && path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("zip")))
+        // Unreadable or non-backup zips are just left out of the list.
+        .filter_map(|path| read_local_backup(&path))
+        .collect();
+    backups.sort_by_key(|b| std::cmp::Reverse(if b.exported_at > 0 { b.exported_at } else { b.modified_at }));
+    backups
+}
+
+/// Lists the backups in the default export folder (see `local_backup_dir`),
+/// newest first, so restore can offer them without going through a file
+/// picker. Only the manifest of each archive is read. Never fails: a missing
+/// or inaccessible folder just yields an empty list.
+#[tauri::command]
+pub async fn list_local_backups(app: AppHandle) -> Result<Vec<LocalBackup>, AppError> {
+    let Some(dir) = local_backup_dir(&app).await else {
+        return Ok(Vec::new());
+    };
+    run_blocking(move || Ok(scan_backup_dir(&dir))).await
 }
 
 #[tauri::command]
@@ -698,12 +1289,28 @@ fn import_archive(
 ) -> Result<ImportOutcome, AppError> {
     let mut archive = open_archive(src_path)?;
 
-    let row_counts = match read_and_validate_manifest(&mut archive, owner_user_id)? {
+    let (remap, row_counts) = match read_and_validate_manifest(&mut archive)? {
         ManifestCheck::Invalid(error) => {
             return Ok(ImportOutcome { ok: false, rows_imported: None, error: Some(error) });
         }
-        ManifestCheck::Valid { row_counts, .. } => row_counts,
+        ManifestCheck::Valid { owner_user_id: backup_owner, row_counts, .. } => {
+            (ProfileRemap::new(backup_owner, owner_user_id), row_counts)
+        }
     };
+
+    let mut remote_entries = Map::new();
+    for category in REMOTE_CATEGORY_IDS.iter().copied().filter(|c| categories.iter().any(|s| s == c)) {
+        let mut entry = match archive.by_name(&remote_entry_name(category)) {
+            Ok(entry) => entry,
+            Err(ZipError::FileNotFound) => continue,
+            Err(e) => return Err(e.into()),
+        };
+        let mut text = String::new();
+        entry.read_to_string(&mut text)?;
+        let value: Value = serde_json::from_str(&text)
+            .map_err(|e| AppError::Backup(format!("corrupt {category} entry: {e}")))?;
+        remote_entries.insert(category.to_string(), value);
+    }
 
     // A second handle on the same file: a table's jsonl entry streams from
     // `archive` while the media it references is read from this one,
@@ -714,7 +1321,10 @@ fn import_archive(
     conn.busy_timeout(Duration::from_secs(30))?;
     conn.execute_batch("BEGIN IMMEDIATE")?;
 
-    let result = import_tables(&conn, &mut archive, &mut media_archive, categories, &row_counts, progress);
+    let restored_favorites = remote_entries.remove("favorites");
+    let result =
+        import_tables(&conn, &mut archive, &mut media_archive, categories, &row_counts, remap.as_ref(), progress)
+            .and_then(|rows| Ok(rows + queue_restored_favorites(&conn, restored_favorites.as_ref(), owner_user_id)?));
     match result {
         Ok(rows_imported) => {
             conn.execute_batch("COMMIT")?;
@@ -734,6 +1344,7 @@ fn import_tables(
     media_archive: &mut Archive,
     categories: &[String],
     row_counts: &HashMap<String, u64>,
+    remap: Option<&ProfileRemap>,
     progress: &mut ProgressEmitter,
 ) -> Result<u64, AppError> {
     let tables = selected_tables(categories);
@@ -741,22 +1352,35 @@ fn import_tables(
     let mut total_rows_imported: u64 = 0;
     let mut slice_started = Instant::now();
     let mut slice_bytes: usize = 0;
+    // Conversations a restore into another profile brought in that the db
+    // didn't have yet - see insert_restored_markers.
+    let mut new_conversations: Vec<String> = Vec::new();
 
     for (table_index, table) in tables.into_iter().enumerate() {
-        let rows_total = row_counts.get(table.name).copied();
-        progress.emit(BackupProgress { table: table.name, table_index, table_count, rows_done: 0, rows_total });
+        let rows_total = row_counts.get(&table.entry_key()).copied();
+        // The entry key, not the table name: media_files is two parts (chat / drawer).
+        let progress_key = table.entry_key();
+        progress.emit(BackupProgress { table: &progress_key, table_index, table_count, rows_done: 0, rows_total });
 
-        if !table_exists(conn, table.name)? {
+        let target = RESTORED_INTO
+            .iter()
+            .find(|(own, _)| *own == table.name)
+            .map_or(table.name, |(_, restored)| *restored);
+        if !table_exists(conn, target)? {
             continue;
         }
-        let entry_name = format!("tables/{}.jsonl", table.name);
+        let mut entry_name = table.entry_name();
+        if archive.index_for_name(&entry_name).is_none() && table.filter.is_some_and(|f| f.reads_unsplit) {
+            entry_name = format!("tables/{}.jsonl", table.name);
+        }
         let entry = match archive.by_name(&entry_name) {
             Ok(entry) => entry,
             Err(ZipError::FileNotFound) => continue,
             Err(e) => return Err(e.into()),
         };
 
-        let upsert_sql = build_upsert_sql(table);
+        let upsert_sql = build_upsert_sql(table, target);
+        let tracks_new_conversations = remap.is_some() && target == "conversations";
         let mut rows_done: u64 = 0;
 
         for line in BufReader::with_capacity(COPY_BUFFER_SIZE, entry).lines() {
@@ -772,6 +1396,9 @@ fn import_tables(
 
             let pk_present = row_map.get(table.primary_key).map(|v| !v.is_null()).unwrap_or(false);
             if !pk_present {
+                continue;
+            }
+            if remap.is_some_and(|remap| !remap.remap_row(table, &mut row_map)) {
                 continue;
             }
 
@@ -807,13 +1434,21 @@ fn import_tables(
                 .map(|c| json_to_rusqlite(row_map.get(c).unwrap_or(&Value::Null)))
                 .collect::<Result<Vec<_>, AppError>>()?;
 
+            if tracks_new_conversations {
+                if let Some(id) = row_map.get("conversation_id").and_then(Value::as_str) {
+                    if !conn.prepare_cached("SELECT 1 FROM conversations WHERE conversation_id = ?1")?.exists([id])? {
+                        new_conversations.push(id.to_string());
+                    }
+                }
+            }
+
             conn.prepare_cached(&upsert_sql)?
                 .execute(rusqlite::params_from_iter(params.iter()))?;
             slice_bytes += line.len();
 
             rows_done += 1;
             total_rows_imported += 1;
-            progress.maybe_emit(BackupProgress { table: table.name, table_index, table_count, rows_done, rows_total });
+            progress.maybe_emit(BackupProgress { table: &progress_key, table_index, table_count, rows_done, rows_total });
 
             if slice_started.elapsed() >= IMPORT_SLICE_MAX_DURATION || slice_bytes >= IMPORT_SLICE_MAX_BYTES {
                 conn.execute_batch("COMMIT")?;
@@ -826,16 +1461,72 @@ fn import_tables(
             }
         }
 
-        progress.emit(BackupProgress { table: table.name, table_index, table_count, rows_done, rows_total });
+        progress.emit(BackupProgress { table: &progress_key, table_index, table_count, rows_done, rows_total });
     }
 
+    insert_restored_markers(conn, &new_conversations)?;
     Ok(total_rows_imported)
 }
 
+/// Ends each conversation restored from another profile's backup with a local
+/// system message (see insertSystemMessage in src/services/chatDb.ts), so the
+/// thread shows where the old profile's history stops and this profile's
+/// chat with the same person picks up. Only for conversations the db didn't
+/// have: an existing one already interleaves both histories by time, so there's
+/// no single point to mark. Skipped for a conversation without messages.
+fn insert_restored_markers(conn: &Connection, conversation_ids: &[String]) -> Result<(), AppError> {
+    if conversation_ids.is_empty() || !table_exists(conn, "messages")? {
+        return Ok(());
+    }
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64);
+    let mut stmt = conn.prepare_cached(
+        "INSERT OR IGNORE INTO messages (
+            message_id, conversation_id, sender_id, timestamp, type, chat1_type, body_json, unsent,
+            local_history, reply_to_message_id, reply_preview_json, reactions_json, created_at, updated_at
+         )
+         SELECT ?1, ?2, 0, ?3, ?4, NULL, NULL, 0, 0, NULL, NULL, '[]', ?3, ?3
+         WHERE EXISTS (SELECT 1 FROM messages WHERE conversation_id = ?2)",
+    )?;
+    for conversation_id in conversation_ids {
+        let message_id = format!("local-system:{RESTORED_MARKER_TYPE}:{conversation_id}:{now}");
+        stmt.execute(rusqlite::params![message_id, conversation_id, now, RESTORED_MARKER_TYPE])?;
+    }
+    Ok(())
+}
+
+/// Payload of `backup-copy-progress`: bytes of a picked backup copied so far
+/// by `copy_android_uri_to_file`. `bytes_total` is missing when the content
+/// provider doesn't report a size.
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
-fn copy_to_file(src: impl Read, mut dest: File) -> Result<(), AppError> {
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CopyProgress {
+    bytes_done: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bytes_total: Option<u64>,
+}
+
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+fn copy_to_file(src: impl Read, mut dest: File, mut on_progress: impl FnMut(u64)) -> Result<(), AppError> {
     let mut reader = BufReader::with_capacity(COPY_BUFFER_SIZE, src);
-    std::io::copy(&mut reader, &mut dest)?;
+    let mut buffer = vec![0u8; COPY_BUFFER_SIZE];
+    let mut done = 0u64;
+    let mut last_emit: Option<Instant> = None;
+    loop {
+        let n = match reader.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e.into()),
+        };
+        dest.write_all(&buffer[..n])?;
+        done += n as u64;
+        if last_emit.is_none_or(|t| t.elapsed() >= PROGRESS_INTERVAL) {
+            on_progress(done);
+            last_emit = Some(Instant::now());
+        }
+    }
+    on_progress(done);
     dest.flush()?;
     // Some content providers hand out pipes/sockets, which can't be fsync'd.
     let _ = dest.sync_all();
@@ -857,7 +1548,7 @@ pub async fn copy_file_to_android_uri(app: AppHandle, src_path: String, dest_uri
             .open_file_writable(&uri)
             .await
             .map_err(|e| AppError::Backup(format!("failed to open destination: {e}")))?;
-        run_blocking(move || copy_to_file(File::open(&src_path)?, dest)).await
+        run_blocking(move || copy_to_file(File::open(&src_path)?, dest, |_| {})).await
     }
     #[cfg(not(target_os = "android"))]
     {
@@ -875,12 +1566,18 @@ pub async fn copy_android_uri_to_file(app: AppHandle, src_uri: Value, dest_path:
         use tauri_plugin_android_fs::{AndroidFsExt, FileUri};
         let uri: FileUri = serde_json::from_value(src_uri)
             .map_err(|e| AppError::Backup(format!("invalid source uri: {e}")))?;
-        let src = app
-            .android_fs_async()
+        let fs = app.android_fs_async();
+        let bytes_total = fs.get_len(&uri).await.ok().filter(|&len| len > 0);
+        let src = fs
             .open_file_readable(&uri)
             .await
             .map_err(|e| AppError::Backup(format!("failed to open picked file: {e}")))?;
-        run_blocking(move || copy_to_file(src, File::create(&dest_path)?)).await
+        run_blocking(move || {
+            copy_to_file(src, File::create(&dest_path)?, |bytes_done| {
+                let _ = app.emit(COPY_PROGRESS_EVENT, CopyProgress { bytes_done, bytes_total });
+            })
+        })
+        .await
     }
     #[cfg(not(target_os = "android"))]
     {
@@ -894,8 +1591,23 @@ mod tests {
     use super::*;
     use rusqlite::types::Value as SqlValue;
 
-    fn create_schema(conn: &Connection) {
+    /// One spec per sqlite table: a split table's other parts name the same one.
+    fn tables() -> impl Iterator<Item = &'static TableSpec> {
+        EXPORT_TABLES.iter().filter(|t| t.filter.is_none_or(|f| f.reads_unsplit))
+    }
+
+    fn all_categories() -> Vec<String> {
+        let mut categories: Vec<String> = Vec::new();
         for table in EXPORT_TABLES {
+            if !categories.iter().any(|c| c == table.category) {
+                categories.push(table.category.to_string());
+            }
+        }
+        categories
+    }
+
+    fn create_schema(conn: &Connection) {
+        for table in tables() {
             let cols = table
                 .columns
                 .iter()
@@ -906,9 +1618,27 @@ mod tests {
         }
     }
 
+    /// Same columns as the own table; the app's restored_profile_photos also has uploaded_hash.
+    fn create_restored_schema(conn: &Connection) {
+        for (own, restored) in RESTORED_INTO {
+            let table = tables().find(|t| t.name == *own).unwrap();
+            let cols = table
+                .columns
+                .iter()
+                .map(|&c| if c == table.primary_key { format!("{c} PRIMARY KEY") } else { c.to_string() })
+                .collect::<Vec<_>>()
+                .join(", ");
+            conn.execute_batch(&format!("CREATE TABLE {restored} ({cols})")).unwrap();
+        }
+    }
+
     fn dump(conn: &Connection, table: &TableSpec) -> Vec<Vec<SqlValue>> {
+        dump_from(conn, table, table.name)
+    }
+
+    fn dump_from(conn: &Connection, table: &TableSpec, source: &str) -> Vec<Vec<SqlValue>> {
         let mut stmt = conn
-            .prepare(&format!("SELECT {} FROM {} ORDER BY {}", table.columns.join(", "), table.name, table.primary_key))
+            .prepare(&format!("SELECT {} FROM {source} ORDER BY {}", table.columns.join(", "), table.primary_key))
             .unwrap();
         stmt.query_map([], |row| (0..table.columns.len()).map(|i| row.get::<_, SqlValue>(i)).collect())
             .unwrap()
@@ -928,14 +1658,16 @@ mod tests {
 
         let src = Connection::open(&src_db).unwrap();
         create_schema(&src);
-        for table in EXPORT_TABLES {
+        for table in tables() {
             for i in 0..3usize {
                 let values: Vec<SqlValue> = table
                     .columns
                     .iter()
                     .map(|&c| {
                         if c == table.primary_key {
-                            SqlValue::Text(format!("{}-{i}", table.name))
+                            // One drawer row, so both parts of the split media_files table round-trip.
+                            let prefix = if table.name == "media_files" && i == 2 { "drawer:" } else { "" };
+                            SqlValue::Text(format!("{prefix}{}-{i}", table.name))
                         } else if table.blob_columns.contains(&c) {
                             match i {
                                 0 => SqlValue::Text(BASE64.encode((0..5000).map(|b| (b * 7 + i) as u8).collect::<Vec<_>>())),
@@ -958,23 +1690,204 @@ mod tests {
             }
         }
 
-        let categories: Vec<String> = ALL_CATEGORY_IDS.iter().map(|s| s.to_string()).collect();
-        write_export_archive(&src_db, 42, &archive, &categories, &mut ProgressEmitter::new(None, "")).unwrap();
+        let mut categories = all_categories();
+        categories.push("favorites".into());
+        let favorites = json!([
+            { "profileId": "123", "displayName": "a", "notes": "hi", "phoneNumber": "" },
+            { "profileId": 124 },
+            // The importing profile itself: skipped.
+            { "profileId": "42" },
+        ]);
+        let mut remote_entries = Map::new();
+        remote_entries.insert("favorites".into(), favorites);
+        // Not whitelisted: must not end up in the archive.
+        remote_entries.insert("../evil".into(), json!([]));
+        write_export_archive(&src_db, 42, &archive, &categories, &remote_entries, &mut ProgressEmitter::new(None, "")).unwrap();
 
-        create_schema(&Connection::open(&dst_db).unwrap());
-        let wrong_owner =
-            import_archive(&dst_db, 7, archive.to_str().unwrap(), &categories, &mut ProgressEmitter::new(None, "")).unwrap();
-        assert_eq!(wrong_owner.error, Some("wrong_owner"));
-
+        {
+            let dst = Connection::open(&dst_db).unwrap();
+            create_schema(&dst);
+            create_restored_schema(&dst);
+        }
         let outcome =
             import_archive(&dst_db, 42, archive.to_str().unwrap(), &categories, &mut ProgressEmitter::new(None, "")).unwrap();
         assert!(outcome.ok);
-        assert_eq!(outcome.rows_imported, Some(EXPORT_TABLES.len() as u64 * 3));
+        assert_eq!(outcome.rows_imported, Some(tables().count() as u64 * 3 + 2));
 
         let dst = Connection::open(&dst_db).unwrap();
-        for table in EXPORT_TABLES {
-            assert_eq!(dump(&src, table), dump(&dst, table), "table {} differs after round trip", table.name);
+        for table in tables() {
+            // Server-side data waits in restored_* even for the same profile; the own record stays untouched.
+            let target = RESTORED_INTO.iter().find(|(own, _)| *own == table.name).map_or(table.name, |(_, r)| *r);
+            assert_eq!(dump(&src, table), dump_from(&dst, table, target), "table {} differs after round trip", table.name);
+            if target != table.name {
+                assert!(dump(&dst, table).is_empty(), "own table {} was written to", table.name);
+            }
         }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A backup restored into a different profile points everything at the new id.
+    #[test]
+    fn import_into_other_profile_remaps_owner_id() {
+        let dir = std::env::temp_dir().join(format!("fg-backup-remap-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let src_db = dir.join("src.sqlite3");
+        let dst_db = dir.join("dst.sqlite3");
+        let archive = dir.join("backup.zip");
+        // Old 500, new 300: other profile 400 sorts between them, so the id order flips.
+        let src = Connection::open(&src_db).unwrap();
+        create_schema(&src);
+        src.execute_batch(
+            r#"
+            INSERT INTO conversations (conversation_id, other_profile_id, participants_json, preview_json)
+                VALUES ('400:500', '400', '[{"profileId":400}]', '{"conversationId":{"value":"400:500"},"senderId":500}'),
+                       ('300:500', '300', '[{"profileId":300}]', NULL);
+            INSERT INTO messages (message_id, conversation_id, sender_id, body_json, reactions_json)
+                VALUES ('m1', '400:500', 500, '{"url":"https://cdn.example/500/abc"}', '[{"profileId":500,"reactionType":1}]'),
+                       ('m2', '300:500', 500, '{"text":"hi"}', NULL),
+                       ('local-system:SystemBlocked:400:500:1700000000000', '400:500', 0, NULL, NULL);
+            INSERT INTO albums (album_id, owner_profile_id, conversation_id) VALUES ('a1', 500, '300:500');
+            INSERT INTO media_files (media_key, kind) VALUES ('drawer:77', 'image');
+            INSERT INTO settings (key, value) VALUES ('localReadMarkers', '{"400:500":"m1"}');
+            INSERT INTO own_profile_photos (media_hash, position) VALUES ('abc', 0);
+            INSERT INTO own_blocked_profiles (profile_id) VALUES ('400');
+            "#,
+        )
+        .unwrap();
+        let categories = all_categories();
+        write_export_archive(&src_db, 500, &archive, &categories, &Map::new(), &mut ProgressEmitter::new(None, "")).unwrap();
+
+        let dst = Connection::open(&dst_db).unwrap();
+        create_schema(&dst);
+        dst.execute_batch(
+            "CREATE TABLE restored_profile_photos (media_hash PRIMARY KEY, position, mime_type, data_base64, uploaded_hash);
+             CREATE TABLE restored_blocked_profiles (profile_id PRIMARY KEY);
+             INSERT INTO own_blocked_profiles (profile_id) VALUES ('999');",
+        )
+        .unwrap();
+        drop(dst);
+        let outcome =
+            import_archive(&dst_db, 300, archive.to_str().unwrap(), &categories, &mut ProgressEmitter::new(None, "")).unwrap();
+        assert!(outcome.ok);
+
+        let dst = Connection::open(&dst_db).unwrap();
+        let text = |sql: &str| dst.query_row(sql, [], |r| r.get::<_, Option<String>>(0)).unwrap();
+        assert_eq!(text("SELECT group_concat(conversation_id) FROM conversations").as_deref(), Some("300:400"));
+        assert_eq!(
+            text("SELECT preview_json FROM conversations").as_deref(),
+            Some(r#"{"conversationId":{"value":"300:400"},"senderId":300}"#)
+        );
+        assert_eq!(
+            text(
+                "SELECT group_concat(message_id) FROM (SELECT message_id FROM messages WHERE type IS NOT 'SystemRestored' ORDER BY message_id)"
+            )
+            .as_deref(),
+            Some("local-system:SystemBlocked:300:400:1700000000000,m1")
+        );
+        assert_eq!(
+            dst.query_row("SELECT sender_id FROM messages WHERE message_id = 'm1'", [], |r| r.get::<_, i64>(0)).unwrap(),
+            300
+        );
+        assert_eq!(
+            text("SELECT body_json FROM messages WHERE message_id = 'm1'").as_deref(),
+            Some(r#"{"url":"https://cdn.example/500/abc"}"#)
+        );
+        assert_eq!(
+            text("SELECT reactions_json FROM messages WHERE message_id = 'm1'").as_deref(),
+            Some(r#"[{"profileId":300,"reactionType":1}]"#)
+        );
+        assert_eq!(
+            dst.query_row("SELECT owner_profile_id FROM albums", [], |r| r.get::<_, i64>(0)).unwrap(),
+            300
+        );
+        assert_eq!(text("SELECT conversation_id FROM albums"), None);
+        assert_eq!(
+            text("SELECT value FROM settings WHERE key = 'localReadMarkers'").as_deref(),
+            Some(r#"{"300:400":"m1"}"#)
+        );
+        // The new profile's own record stays untouched; the old one waits in restored_*.
+        assert_eq!(text("SELECT group_concat(media_hash) FROM restored_profile_photos").as_deref(), Some("abc"));
+        assert_eq!(text("SELECT group_concat(media_hash) FROM own_profile_photos"), None);
+        assert_eq!(text("SELECT group_concat(profile_id) FROM restored_blocked_profiles").as_deref(), Some("400"));
+        assert_eq!(text("SELECT group_concat(profile_id) FROM own_blocked_profiles").as_deref(), Some("999"));
+        assert_eq!(text("SELECT group_concat(media_key) FROM media_files").as_deref(), Some("restored-drawer:77"));
+        assert_eq!(
+            text(
+                "SELECT group_concat(conversation_id) FROM messages
+                 WHERE type = 'SystemRestored' AND sender_id = 0 AND message_id LIKE 'local-system:SystemRestored:300:400:%'"
+            )
+            .as_deref(),
+            Some("300:400")
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The old profile's block archive doesn't hold for the new one, and a
+    /// conversation the db already has keeps its own archive state.
+    #[test]
+    fn import_into_other_profile_resets_block_archive() {
+        let dir = std::env::temp_dir().join(format!("fg-backup-archive-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let src_db = dir.join("src.sqlite3");
+        let dst_db = dir.join("dst.sqlite3");
+        let archive = dir.join("backup.zip");
+        let src = Connection::open(&src_db).unwrap();
+        create_schema(&src);
+        src.execute_batch(
+            "INSERT INTO conversations (conversation_id, other_profile_id, name, archived, archived_reason, archived_at)
+                VALUES ('400:500', '400', 'old', 1, 'ws_delete', 1700000000000),
+                       ('500:600', '600', 'old', 1, 'ws_delete', 1700000000000),
+                       ('500:700', '700', 'old', 1, 'not_found', 1700000000000),
+                       ('500:800', '800', 'old', 0, NULL, NULL);
+             INSERT INTO messages (message_id, conversation_id, sender_id, timestamp)
+                VALUES ('m1', '400:500', 400, 1700000000000),
+                       ('m2', '500:600', 600, 1700000000000),
+                       ('m3', '500:700', 700, 1700000000000);",
+        )
+        .unwrap();
+        let categories = all_categories();
+        write_export_archive(&src_db, 500, &archive, &categories, &Map::new(), &mut ProgressEmitter::new(None, "")).unwrap();
+
+        let dst = Connection::open(&dst_db).unwrap();
+        create_schema(&dst);
+        dst.execute_batch(
+            "INSERT INTO conversations (conversation_id, other_profile_id, name, archived, archived_reason, archived_at)
+                VALUES ('300:600', '600', 'live', 0, NULL, NULL);",
+        )
+        .unwrap();
+        drop(dst);
+        let outcome =
+            import_archive(&dst_db, 300, archive.to_str().unwrap(), &categories, &mut ProgressEmitter::new(None, "")).unwrap();
+        assert!(outcome.ok);
+
+        let dst = Connection::open(&dst_db).unwrap();
+        let row = |id: &str| {
+            dst.query_row(
+                "SELECT name, archived, archived_reason FROM conversations WHERE conversation_id = ?1",
+                [id],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, Option<String>>(2)?)),
+            )
+            .unwrap()
+        };
+        assert_eq!(row("300:400"), ("old".into(), 1, Some("not_found".into())));
+        // Other columns still come from the backup; the archive state stays the db's.
+        assert_eq!(row("300:600"), ("old".into(), 0, None));
+        assert_eq!(row("300:700"), ("old".into(), 1, Some("not_found".into())));
+        // A marker ends each conversation the db didn't have, after its history -
+        // not one it already had (300:600), nor one without messages (300:800).
+        let marked: String = dst
+            .query_row(
+                "SELECT group_concat(conversation_id) FROM (
+                    SELECT conversation_id FROM messages
+                    WHERE type = 'SystemRestored' AND timestamp > 1700000000000 ORDER BY conversation_id
+                 )",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(marked, "300:400,300:700");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1005,9 +1918,9 @@ mod tests {
         }
         drop(dst);
 
-        let categories: Vec<String> = ALL_CATEGORY_IDS.iter().map(|s| s.to_string()).collect();
+        let categories = all_categories();
         let started = Instant::now();
-        write_export_archive(&src_db, 42, &archive, &categories, &mut ProgressEmitter::new(None, "")).unwrap();
+        write_export_archive(&src_db, 42, &archive, &categories, &Map::new(), &mut ProgressEmitter::new(None, "")).unwrap();
         println!(
             "export: {:?}, {} MB",
             started.elapsed(),

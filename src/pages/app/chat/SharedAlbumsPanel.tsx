@@ -11,7 +11,7 @@ import { EmptyState, ErrorState, LoadingState } from "../../../components/ui/sta
 import type { ConversationEntry } from "../../../types/chat";
 import { albumViewerFolderKey, type AlbumViewer, type SharedAlbumItem } from "../../../types/shared-albums";
 import { getThumbImageUrl, validateMediaHash } from "../../../utils/media";
-import { formatDistance, getOnlineStatusMeta } from "../gridpage/utils";
+import { formatDistance, getOnlineStatusLabelArgs, getOnlineStatusMeta } from "../gridpage/utils";
 import { useAvatarCache } from "../../../hooks/useAvatarCache";
 import { resolveAvatarSrc } from "../../../services/avatarStore";
 import { PhotoViewer, type PhotoViewerMedia, type PhotoViewerMenuAction } from "../../../components/PhotoViewer";
@@ -44,7 +44,7 @@ export function SharedAlbumsPanel({ isDesktop }: Props) {
 	useAvatarCache();
 	const navigate = useNavigate();
 	const { userId } = useAuth();
-	const { mobileGridColumns, unitsPreset, showAlbumSensitiveContentWarning } = usePreferences();
+	const { mobileGridColumns, unitsPreset, showAlbumSensitiveContentWarning, showOnlineTimeLeft } = usePreferences();
 	const apiFunctions = useApiFunctions();
 
 	const [isLoading, setIsLoading] = useState(true);
@@ -72,7 +72,7 @@ export function SharedAlbumsPanel({ isDesktop }: Props) {
 				cachedStoredAlbums.map(async (stored): Promise<SharedAlbumItem | null> => {
 					const profileId = stored.ownerProfileId ? Number(stored.ownerProfileId) : null;
 					if (profileId == null) return null;
-					let profileName = t("shared_albums.name_fallback");
+					let profileName = t("common.unknown_display_name");
 					let profileMediaHash: string | null = null;
 					if (stored.conversationId) {
 						const conv = await getConversation(stored.conversationId).catch(() => null);
@@ -126,7 +126,7 @@ export function SharedAlbumsPanel({ isDesktop }: Props) {
 					const cp = getCounterparty(entry, userId);
 					if (!cp) continue;
 					profileMap.set(cp.profileId, {
-						profileName: entry.data.name?.trim() || t("shared_albums.name_fallback"),
+						profileName: entry.data.name?.trim() || t("common.unknown_display_name"),
 						conversationId: entry.data.conversationId ?? null,
 						profileMediaHash: cp.mediaHash,
 					});
@@ -152,7 +152,7 @@ export function SharedAlbumsPanel({ isDesktop }: Props) {
 				});
 				return {
 					profileId: sa.ownerProfileId,
-					profileName: meta?.profileName || sa.profile.name?.trim() || t("shared_albums.name_fallback"),
+					profileName: meta?.profileName || sa.profile.name?.trim() || t("common.unknown_display_name"),
 					profileMediaHash:
 						meta?.profileMediaHash && validateMediaHash(meta.profileMediaHash)
 							? meta.profileMediaHash
@@ -183,7 +183,7 @@ export function SharedAlbumsPanel({ isDesktop }: Props) {
 				cachedOnlyItems.map(async (stored): Promise<SharedAlbumItem | null> => {
 					const profileId = stored.ownerProfileId ? Number(stored.ownerProfileId) : null;
 					if (profileId == null) return null;
-					let profileName = t("shared_albums.name_fallback");
+					let profileName = t("common.unknown_display_name");
 					let profileMediaHash: string | null = null;
 					if (stored.conversationId) {
 						const conv = await getConversation(stored.conversationId).catch(() => null);
@@ -272,7 +272,7 @@ export function SharedAlbumsPanel({ isDesktop }: Props) {
 					}),
 				);
 
-				const nameFallback = t("shared_albums.name_fallback");
+				const nameFallback = t("common.unknown_display_name");
 				const applyDetails = (item: SharedAlbumItem): SharedAlbumItem => {
 					const details = detailsById.get(item.profileId);
 					if (!details) return item;
@@ -487,8 +487,9 @@ export function SharedAlbumsPanel({ isDesktop }: Props) {
 	const albumHeader = useMemo(() => {
 		if (!viewer) return undefined;
 		const statusMeta = getOnlineStatusMeta(null, viewer.onlineUntil);
+		const onlineLabel = getOnlineStatusLabelArgs(statusMeta, showOnlineTimeLeft);
 		const statusLabel = statusMeta.isOnline
-			? t(statusMeta.labelKey, { count: statusMeta.count })
+			? t(onlineLabel.key, { count: onlineLabel.count })
 			: statusMeta.labelKey === "browse_page.status_offline"
 				? t(statusMeta.labelKey)
 				: t(statusMeta.labelKey, { count: statusMeta.count });
@@ -504,7 +505,7 @@ export function SharedAlbumsPanel({ isDesktop }: Props) {
 			isOnlineEndingSoon: statusMeta.isEndingSoon,
 			onClick: () => handleViewProfile(viewer.profileId),
 		};
-	}, [viewer, t, unitsPreset, handleViewProfile]);
+	}, [viewer, t, unitsPreset, showOnlineTimeLeft, handleViewProfile]);
 
 	const px = isDesktop ? "px-4" : "px-[var(--app-px)]";
 
@@ -529,7 +530,7 @@ export function SharedAlbumsPanel({ isDesktop }: Props) {
 					type="button"
 					onClick={handleRefresh}
 					disabled={isRefreshing || isLoading}
-					className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-[var(--text-muted)] transition hover:bg-[var(--surface-2)] hover:text-[var(--text)] disabled:opacity-50"
+					className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-[var(--text-muted)] transition hover-fill hover:text-[var(--text)] disabled:opacity-50"
 				>
 					<RefreshCw className={`h-4 w-4 ${isRefreshing ? "animate-spin" : ""}`} />
 				</button>
@@ -578,7 +579,7 @@ export function SharedAlbumsPanel({ isDesktop }: Props) {
 									key={`${item.profileId}:${item.album.albumId}`}
 									type="button"
 									onClick={() => void openViewer(item)}
-									className="native-card relative overflow-hidden rounded-2xl text-left transition-transform hover:-translate-y-0.5"
+									className="native-card relative overflow-hidden rounded-2xl text-start transition-transform hover:-translate-y-0.5"
 								>
 									<div className="relative aspect-[4/6] w-full bg-[var(--surface-2)]">
 										{previewUrl ? (
@@ -596,7 +597,7 @@ export function SharedAlbumsPanel({ isDesktop }: Props) {
 											</div>
 										)}
 										{item.localOnly && (
-											<div className="absolute left-2 top-2 rounded-full bg-black/50 px-2 py-0.5 text-[9px] font-semibold text-white/80 backdrop-blur-sm">
+											<div className="absolute start-2 top-2 rounded-full bg-black/50 px-2 py-0.5 text-[9px] font-semibold text-white/80 backdrop-blur-sm">
 												{t("shared_albums.cached_label", { defaultValue: "cached" })}
 											</div>
 										)}

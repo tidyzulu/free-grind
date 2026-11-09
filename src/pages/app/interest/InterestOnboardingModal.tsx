@@ -2,6 +2,17 @@ import { History, Eye, Sparkles } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { FullscreenPrompt, fullscreenPrimaryButtonClass, fullscreenCardClass } from "../../../components/FullscreenPrompt";
 
+export const INTEREST_ONBOARDING_SEEN_KEY = "fg-interest-onboarding-seen";
+
+/** Clears the seen flag so the Views tab shows the intro again on its next mount (dev tool). */
+export function resetInterestOnboarding(): void {
+	try {
+		window.localStorage.removeItem(INTEREST_ONBOARDING_SEEN_KEY);
+	} catch {
+		// ignore storage errors
+	}
+}
+
 export function InterestOnboardingModal({ onConfirm }: { onConfirm: () => void }) {
 	const { t } = useTranslation();
 
@@ -20,7 +31,7 @@ export function InterestOnboardingModal({ onConfirm }: { onConfirm: () => void }
 				</button>
 			}
 		>
-			<div className={`${fullscreenCardClass} overflow-hidden text-left`}>
+			<div className={`${fullscreenCardClass} overflow-hidden text-start`}>
 				<div className="flex items-start gap-3 px-4 py-3.5">
 					<div className="shrink-0 rounded-2xl ink-tint-8 p-2.5 text-[var(--accent)]">
 						<Sparkles className="h-5 w-5" />

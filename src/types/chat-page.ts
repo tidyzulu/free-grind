@@ -1,10 +1,21 @@
 import type { Message } from "./messages";
+import type { UploadPhase } from "../services/stagedVideoUpload";
 
 export type UiMessage = Message & {
 	clientState?: "pending" | "failed";
 	_localOnly?: boolean;
 	/** Content kept locally despite the server wiping it via unsend. */
 	localHistory?: boolean;
+	/** While a video uploads: a still of the part being sent (see editPoster). */
+	localPoster?: string;
+};
+
+/** Upload progress (0–100) of one optimistic local-upload: message. */
+export type LocalUploadProgress = {
+	messageId: string;
+	progress: number;
+	/** What a video upload is doing just now (see UploadProgress). */
+	phase?: UploadPhase;
 };
 
 export type AlbumListItem = {

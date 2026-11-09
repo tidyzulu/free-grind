@@ -3,11 +3,11 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { usePreferences } from "../../../contexts/PreferencesContext";
 import { useDesktopBreakpoint } from "../../../hooks/useDesktopBreakpoint";
 import { cn } from "../../../utils/cn";
-import { mobileGridTemplate } from "../gridpage/components/BrowseGrid";
+import { DESKTOP_GRID_TEMPLATE, mobileGridTemplate } from "../gridpage/components/BrowseGrid";
 import { useGridRowMetrics } from "../gridpage/hooks/useGridRowMetrics";
 import type { BrowseCard } from "../GridPage.types";
 import { InterestViewTile } from "./InterestComponents";
-import type { InterestItem } from "./interestUtils";
+import type { InterestItem, InterestTab } from "./interestUtils";
 
 export function useViewsGridLayout() {
 	const { mobileViewsGridColumns: mobileGridColumns } = usePreferences();
@@ -15,8 +15,8 @@ export function useViewsGridLayout() {
 	return {
 		isDesktop,
 		mobileGridColumns,
-		gridTemplateColumns: isDesktop ? "repeat(6, minmax(0, 1fr))" : mobileGridTemplate(mobileGridColumns),
-		gridClassName: cn("grid w-full", isDesktop ? "gap-2 px-[var(--app-px)]" : "gap-px"),
+		gridTemplateColumns: isDesktop ? DESKTOP_GRID_TEMPLATE : mobileGridTemplate(mobileGridColumns),
+		gridClassName: cn("grid w-full", isDesktop ? "gap-2 px-[var(--app-px)]" : "gap-[3px]"),
 	};
 }
 
@@ -28,14 +28,18 @@ export function InterestViewsGrid({
 	onOpenProfile,
 	now,
 	isProfileBlocked,
+	hasProfileSnapshot,
 	scrollContainerRef,
+	mode = "views",
 }: {
 	items: InterestItem[];
 	browseCardsById: Map<string, BrowseCard>;
 	onOpenProfile: (profileId: string) => void;
 	now: number;
 	isProfileBlocked: (profileId: string) => boolean;
+	hasProfileSnapshot: (profileId: string) => boolean;
 	scrollContainerRef: RefObject<HTMLDivElement | null>;
+	mode?: InterestTab;
 }) {
 	const { isDesktop, mobileGridColumns, gridTemplateColumns, gridClassName } = useViewsGridLayout();
 	const { rowMetrics, probeRef } = useGridRowMetrics(
@@ -108,7 +112,9 @@ export function InterestViewsGrid({
 								onOpenProfile={onOpenProfile}
 								now={now}
 								isBlocked={isProfileBlocked(item.profileId)}
+								canOpenWhileBlocked={hasProfileSnapshot(item.profileId)}
 								isDesktop={isDesktop}
+								mode={mode}
 							/>
 						))}
 					</div>

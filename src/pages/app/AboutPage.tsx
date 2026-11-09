@@ -1,41 +1,19 @@
-import { Ban, ChevronRight, Code2, ExternalLink, GitBranch, HeartHandshake, Scale } from "lucide-react";
+import { Ban, Code2, ExternalLink, GitBranch, Globe, HeartHandshake, Scale } from "lucide-react";
 import { DiscordIcon, TelegramIcon } from "../../components/icons/BrandIcons";
-import { HeartFilled, LockFilled, MegaphoneFilled } from "../../components/icons/FilledIcons";
-import { useMemo, useState, type ComponentType, type ReactNode } from "react";
+import { HeartFilled, LockFilled } from "../../components/icons/FilledIcons";
+import { useState, type ComponentType, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import toast from "react-hot-toast";
-import semver from "semver";
 import { PageHeader } from "../../components/PageHeader";
-import { VersionAnnouncement } from "../../components/VersionAnnouncement";
 import { usePreferences } from "../../contexts/PreferencesContext";
-import { VERSION_ANNOUNCEMENTS } from "../../data/versionAnnouncements";
 import { triggerSinModeUnlock } from "../../utils/sinModeEasterEgg";
 import { openExternalUrl } from "../../utils/githubIssues";
+import { DISCORD_URL, REPO_URL, TELEGRAM_URL, WEBSITE_URL } from "../../config/links-config";
 import logo from "../../images/freegrind-logo.webp";
 
 type AboutIcon = ComponentType<{ className?: string }>;
 
 const DEV_TAP_TARGET = 7;
-const REPO_URL = "https://github.com/fdev8974/free-grind";
-const DISCORD_URL = "https://discord.gg/cJqTaWPMFF";
-const TELEGRAM_URL = "https://t.me/freegrind";
-
-/**
- * "What's new" for the running version: its own entry (a pre-release shares
- * its final version's one), else the newest one released before it.
- */
-function findCurrentAnnouncement(appVersion: string) {
-	const release = semver.coerce(appVersion)?.version;
-	const exact =
-		VERSION_ANNOUNCEMENTS.find((a) => a.version === appVersion) ??
-		VERSION_ANNOUNCEMENTS.find((a) => a.version === release);
-	if (exact || !release) return exact ?? null;
-	return (
-		VERSION_ANNOUNCEMENTS.filter((a) => semver.valid(a.version) && semver.lte(a.version, release)).sort((a, b) =>
-			semver.rcompare(a.version, b.version),
-		)[0] ?? null
-	);
-}
 
 function SectionLabel({ children }: { children: ReactNode }) {
 	return <p className="mb-2 px-1 text-xs font-semibold uppercase tracking-widest text-[var(--text-muted)]">{children}</p>;
@@ -61,7 +39,7 @@ function ProjectRow({
 	return (
 		<Tag
 			{...(onClick ? { type: "button" as const, onClick } : {})}
-			className={`flex w-full items-center gap-3 px-4 py-3.5 text-left ${onClick ? "transition-colors hover:bg-[var(--surface-2)] active:bg-[var(--surface-2)]" : ""}`}
+			className={`flex w-full items-center gap-3 px-4 py-3.5 text-start ${onClick ? "transition-colors hover-fill" : ""}`}
 		>
 			<div className={`shrink-0 rounded-2xl p-2.5 ${iconClass}`}>
 				<Icon className="h-5 w-5" />
@@ -77,13 +55,10 @@ function ProjectRow({
 
 const externalIcon = <ExternalLink className="h-4 w-4 opacity-60" />;
 
-
 export function AboutPage() {
 	const { t } = useTranslation();
 	const { developerMode, setPreferences } = usePreferences();
 	const appVersion = import.meta.env.VITE_APP_VERSION;
-	const announcement = useMemo(() => findCurrentAnnouncement(appVersion), [appVersion]);
-	const [showAnnouncement, setShowAnnouncement] = useState(false);
 	const [devTapCount, setDevTapCount] = useState(0);
 	const [lastDevTapAt, setLastDevTapAt] = useState(0);
 
@@ -115,30 +90,17 @@ export function AboutPage() {
 		}
 	};
 
-	if (showAnnouncement && announcement) {
-		return (
-			<div className="app-shell z-[300]">
-				<VersionAnnouncement
-					announcement={announcement}
-					appVersion={announcement.version === semver.coerce(appVersion)?.version ? appVersion : undefined}
-					buttonLabel={t("common.close", { defaultValue: "Close" })}
-					onClose={() => setShowAnnouncement(false)}
-				/>
-			</div>
-		);
-	}
-
 	return (
 		<section className="app-screen">
 			<PageHeader backTo="/settings" title={t("settings.about")} />
 
 			<div className="grid gap-6">
-				<div className="native-card overflow-hidden">
+				<div className="native-group">
 					{/* Tapping the app row 7 times toggles Developer Mode. */}
 					<button
 						type="button"
 						onClick={handleVersionTap}
-						className="flex w-full items-center gap-3 px-4 py-3.5 text-left transition-colors hover:bg-[var(--surface-2)] active:bg-[var(--surface-2)]"
+						className="flex w-full items-center gap-3 px-4 py-3.5 text-start transition-colors hover-fill"
 					>
 						<div className="shrink-0 rounded-2xl bg-slate-500/15 text-slate-400 p-2.5">
 							<img src={logo} alt="" className="h-5 w-5 rounded-md object-cover" draggable={false} />
@@ -157,7 +119,7 @@ export function AboutPage() {
 
 				<div>
 					<SectionLabel>{t("about_page.section_principles", { defaultValue: "Why Free Grind" })}</SectionLabel>
-					<div className="native-card overflow-hidden divide-y divide-[var(--border)]">
+					<div className="native-group">
 						<ProjectRow
 							icon={LockFilled}
 							iconClass="bg-emerald-500/15 text-emerald-400"
@@ -187,7 +149,7 @@ export function AboutPage() {
 
 				<div>
 					<SectionLabel>{t("about_page.section_community", { defaultValue: "Community" })}</SectionLabel>
-					<div className="native-card overflow-hidden divide-y divide-[var(--border)]">
+					<div className="native-group">
 						{/* Brand colors as solid tiles on purpose: no color-mix (see accent-tint in index.css). */}
 						<ProjectRow
 							icon={DiscordIcon}
@@ -210,20 +172,17 @@ export function AboutPage() {
 
 				<div>
 					<SectionLabel>{t("about_page.section_project", { defaultValue: "Project" })}</SectionLabel>
-					<div className="native-card overflow-hidden divide-y divide-[var(--border)]">
-						{announcement && (
-							<ProjectRow
-								icon={MegaphoneFilled}
-								iconClass="bg-[var(--surface-2)] text-[var(--accent)]"
-								label={t("about_page.whats_new", { defaultValue: "What's New" })}
-								description={t("about_page.whats_new_desc", {
-									defaultValue: "Highlights of version {{version}}",
-									version: announcement.version,
-								})}
-								right={<ChevronRight className="h-4 w-4 opacity-50" />}
-								onClick={() => setShowAnnouncement(true)}
-							/>
-						)}
+					<div className="native-group">
+						<ProjectRow
+							icon={Globe}
+							iconClass="bg-indigo-500/15 text-indigo-400"
+							label={t("about_page.resources.website_title", { defaultValue: "Website" })}
+							description={t("about_page.resources.website_desc", {
+								defaultValue: "Downloads, guides, and project news.",
+							})}
+							right={externalIcon}
+							onClick={() => void openExternalUrl(WEBSITE_URL)}
+						/>
 						<ProjectRow
 							icon={GitBranch}
 							iconClass="bg-green-500/15 text-green-400"

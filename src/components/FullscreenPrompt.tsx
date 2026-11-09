@@ -1,5 +1,16 @@
 import type { ReactNode } from "react";
+import { createPortal } from "react-dom";
 import type { LucideIcon } from "lucide-react";
+
+/**
+ * App-shell backdrop for a full-screen prompt a routed page shows in place of
+ * itself (settings previews, About's announcement). Portaled to <body> so it
+ * covers the whole window: inside ProtectedLayout it would start right of the
+ * desktop nav rail, leaving the rail visible beside/through the prompt.
+ */
+export function FullscreenPortal({ className = "", children }: { className?: string; children: ReactNode }) {
+	return createPortal(<div className={`app-shell fixed inset-0 ${className}`}>{children}</div>, document.body);
+}
 
 /**
  * Full-page prompt in the same fs-card shell as TokenExpiredPrompt and
@@ -33,7 +44,7 @@ export function FullscreenPrompt({
 			<div className="fs-card-inner fs-card-lg flex flex-col">
 				<div
 					className="flex min-h-0 flex-1 flex-col overflow-y-auto px-6 text-center"
-					style={{ paddingTop: "max(48px, env(safe-area-inset-top))", paddingBottom: "24px" }}
+					style={{ paddingTop: "max(48px, var(--safe-area-top))", paddingBottom: "24px" }}
 					data-lenis-prevent
 				>
 					{/* my-auto rather than justify-center: centers short content, but
@@ -52,7 +63,7 @@ export function FullscreenPrompt({
 
 				<div
 					className="flex shrink-0 flex-col gap-2 px-6 pt-2"
-					style={{ paddingBottom: "max(28px, calc(env(safe-area-inset-bottom) + 12px))" }}
+					style={{ paddingBottom: "max(28px, calc(var(--safe-area-bottom) + 12px))" }}
 				>
 					{footer}
 				</div>

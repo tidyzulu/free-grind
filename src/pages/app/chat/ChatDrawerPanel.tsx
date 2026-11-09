@@ -13,7 +13,7 @@ import {
 	Share2,
 	X,
 } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useDrawerMediaDelete } from "./useDrawerMediaDelete";
 import { useDrawerUploadQueue } from "./useDrawerUploadQueue";
 import { ImagesFilled } from "../../../components/icons/FilledIcons";
@@ -22,8 +22,8 @@ import {
 	DRAWER_ICON_BUTTON_CLASS,
 	drawerGridClass,
 	DRAWER_PRIMARY_BUTTON_CLASS,
-	DrawerActionButton,
-	DrawerActionBar,
+	DrawerAddButton,
+	DrawerAddTile,
 	DrawerBody,
 	DrawerGridSkeleton,
 	DrawerEmptyState,
@@ -31,6 +31,7 @@ import {
 	DrawerGrid,
 	DrawerHeader,
 	DrawerMediaPreview,
+	DRAWER_TILE_LOADING,
 	DrawerMediaTile,
 	DRAWER_TILE_CLASS,
 	DrawerTileCornerButton,
@@ -48,12 +49,20 @@ import { BottomSheet, SHEET_FOOTER_FIELD_CLASS, sheetButtonClass } from "../../.
 import { ConfirmDialog } from "../../../components/ui/confirm-dialog";
 import { useApiFunctions } from "../../../hooks/useApiFunctions";
 import { useLocalMediaCache } from "../../../hooks/useLocalMediaCache";
-import { getCachedMediaUri, getDrawerMediaKey } from "../../../services/mediaStore";
+import { getCachedMediaUri, getDrawerMediaKey, getDrawerMediaSrc, hydrateStoredMedia } from "../../../services/mediaStore";
+import {
+	listRestoredDrawerMedia,
+	oldMediaId,
+	subscribeToRestoredDrawerMedia,
+	type RestoredDrawerMedia,
+} from "../../../services/restoredDrawerMedia";
 import { usePreferences } from "../../../contexts/PreferencesContext";
+import { useCanSendExpiringAlbums } from "../../../services/assignmentsStore";
 import * as chatDb from "../../../services/chatDb";
 import type { StoredDrawerCollection } from "../../../services/chatDb";
 import { appLog } from "../../../utils/logger";
 import { proxyMediaUrl } from "../../../utils/mediaProxy";
+import { VideoFirstFrame } from "../../../components/VideoFirstFrame";
 import type { Album as OwnAlbum, AlbumLimits } from "../../../types/albums";
 import { useCreateAlbum } from "../settings-albums/useCreateAlbum";
 import { AlbumEditorSheet } from "../settings-albums/AlbumEditorSheet";
@@ -77,6 +86,71 @@ export interface DrawerMedia {
 	sendCount: number;
 }
 
+/** A restored item: still waiting for its upload, or uploaded (`uploaded` set). */
+type RestoredDrawerEntry = RestoredDrawerMedia & { uploaded?: DrawerMedia };
+
+/**
+ * Drawer media restored from another profile's backup (see
+ * restoredDrawerMedia.ts), in the backup's order: newest on top, like the
+ * drawer itself. A finished upload swaps its tile in place for the real item
+ * instead of reloading the grid, so nothing jumps around while the restore
+ * runs; the drawer list is refreshed quietly through `onUploaded` so the new
+ * item can be sent.
+ */
+function useRestoredDrawerMedia(onUploaded: () => void | Promise<void>) {
+	const [entries, setEntries] = useState<RestoredDrawerEntry[]>([]);
+	const onUploadedRef = useRef(onUploaded);
+	onUploadedRef.current = onUploaded;
+
+	useEffect(() => {
+		let cancelled = false;
+		listRestoredDrawerMedia()
+			.then((next) => {
+				if (cancelled) return;
+				setEntries([...next].sort((a, b) => oldMediaId(b.mediaKey) - oldMediaId(a.mediaKey)));
+				for (const item of next) hydrateStoredMedia(item.mediaKey);
+			})
+			.catch((error: unknown) => appLog.warn("[ChatDrawerPanel] loading restored drawer media failed", error));
+		const unsubscribe = subscribeToRestoredDrawerMedia(({ mediaKey, uploaded }) => {
+			setEntries((previous) =>
+				uploaded
+					? previous.map((entry) =>
+							entry.mediaKey === mediaKey
+								? {
+										...entry,
+										uploaded: {
+											id: uploaded.mediaId,
+											url: "",
+											contentType: uploaded.contentType,
+											createdTs: Date.now(),
+											used: false,
+											takenOnGrindr: false,
+											sendCount: 0,
+										},
+									}
+								: entry,
+						)
+					: previous.filter((entry) => entry.mediaKey !== mediaKey),
+			);
+			if (uploaded) {
+				hydrateStoredMedia(getDrawerMediaKey(uploaded.mediaId));
+				void onUploadedRef.current();
+			}
+		});
+		return () => {
+			cancelled = true;
+			unsubscribe();
+		};
+	}, []);
+
+	/** Drops an uploaded item that was deleted from the drawer since. */
+	const removeUploaded = useCallback((mediaId: number) => {
+		setEntries((previous) => previous.filter((entry) => entry.uploaded?.id !== mediaId));
+	}, []);
+
+	return { entries, removeUploaded };
+}
+
 type DrawerTab = "media" | "albums" | "collections";
 const DRAWER_TABS: readonly DrawerTab[] = ["media", "albums", "collections"];
 
@@ -85,7 +159,7 @@ interface ChatDrawerPanelProps {
 	error: string | null;
 	media: DrawerMedia[];
 	onBack: () => void;
-	onLoadMedia: () => void | Promise<void>;
+	onLoadMedia: (options?: { silent?: boolean }) => void | Promise<void>;
 	onSendMedia: (mediaIds: number[], maxViews?: number) => void | Promise<void>;
 	isSending: boolean;
 	/** Called after media was deleted from the drawer here, to drop it from the list. */
@@ -135,6 +209,22 @@ export function ChatDrawerPanel({
 	// Re-renders once a background fetch lands a drawer item in the local
 	// media cache, so it can swap in the cached copy without waiting for a DB read.
 	useLocalMediaCache();
+	const { entries: restoredEntries, removeUploaded: removeRestoredUploaded } = useRestoredDrawerMedia(() => onLoadMedia({ silent: true }));
+	// Uploaded restored items keep their spot in the restored block: the
+	// refreshed drawer list (where they'd sort to the top as just added) only
+	// supplies their real data, e.g. the url to send them by.
+	const restoredUploadedIds = useMemo(
+		() => new Set(restoredEntries.flatMap((entry) => (entry.uploaded ? [entry.uploaded.id] : []))),
+		[restoredEntries],
+	);
+	const drawerOnlyMedia = useMemo(
+		() => (restoredUploadedIds.size === 0 ? media : media.filter((item) => !restoredUploadedIds.has(item.id))),
+		[media, restoredUploadedIds],
+	);
+	const restoredMedia = useMemo(() => {
+		const byId = new Map(media.map((item) => [item.id, item]));
+		return restoredEntries.map((entry) => (entry.uploaded ? { ...entry, uploaded: byId.get(entry.uploaded.id) ?? entry.uploaded } : entry));
+	}, [restoredEntries, media]);
 	const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
 	const { preview: drawerPreview, bind: bindPreview, consumeClick: consumePreviewClick } = useDrawerMediaPreview();
 	const [selectedAlbumIds, setSelectedAlbumIds] = useState<Set<number>>(new Set());
@@ -158,9 +248,20 @@ export function ChatDrawerPanel({
 	const combined = !splitDrawerCategories;
 	const hasCombinedGroups = combined && (albums.length > 0 || collections.length > 0);
 	const showSection = (tab: DrawerTab) => combined || activeTab === tab;
-	const tabSwipe = useSwipeTabs<DrawerTab>(DRAWER_TABS, activeTab, setActiveTab, !combined);
+	// Switching tabs starts over: a pick from the tab left behind would
+	// otherwise keep its send/share footer up under a tab that doesn't show it.
+	const changeTab = useCallback((tab: DrawerTab) => {
+		setActiveTab(tab);
+		setSelectedIds(new Set());
+		setSelectedAlbumIds(new Set());
+		setSelectedCollectionId(null);
+	}, []);
+	const tabSwipe = useSwipeTabs<DrawerTab>(DRAWER_TABS, activeTab, changeTab, !combined);
 	const EXPIRY_OPTIONS = ["INDEFINITE", "ONCE", "TEN_MINUTES", "ONE_HOUR", "ONE_DAY"];
 	const [albumExpirationType, setAlbumExpirationType] = useState<string>(defaultAlbumExpirationType);
+	// Free accounts can't share expiring albums: no expiry picker, always INDEFINITE.
+	const canSendExpiringAlbums = useCanSendExpiringAlbums();
+	const effectiveAlbumExpirationType = canSendExpiringAlbums ? albumExpirationType : "INDEFINITE";
 	const EXPIRY_LABELS: Record<string, string> = {
 		INDEFINITE: t("chat_drawer.expiry.unlimited", { defaultValue: "Unlimited" }),
 		ONCE: t("chat_drawer.expiry.once", { defaultValue: "Once" }),
@@ -217,8 +318,9 @@ export function ChatDrawerPanel({
 			next.delete(mediaId);
 			return next;
 		});
+		removeRestoredUploaded(mediaId);
 		onMediaDeleted(mediaId);
-	}, [onMediaDeleted]);
+	}, [onMediaDeleted, removeRestoredUploaded]);
 	const deletion = useDrawerMediaDelete({ onDeleted: removeDeleted });
 
 	// Deleting albums and collections right from their tiles, after a confirm.
@@ -430,11 +532,11 @@ export function ChatDrawerPanel({
 				tabIndex={0}
 				onClick={() => { if (hasSelection) return; setSelectedAlbumIds(prev => { const n = new Set(prev); n.has(album.albumId) ? n.delete(album.albumId) : n.add(album.albumId); return n; }); }}
 				onKeyDown={(e) => { if (e.key === "Enter" && !hasSelection) { setSelectedAlbumIds(prev => { const n = new Set(prev); n.has(album.albumId) ? n.delete(album.albumId) : n.add(album.albumId); return n; }); } }}
-				className={`${DRAWER_TILE_CLASS} cursor-pointer transition ${dimmed ? "opacity-30 pointer-events-none" : ""}`}
+				className={`${DRAWER_TILE_CLASS} drawer-tile-zoom cursor-pointer transition ${dimmed ? "opacity-30 pointer-events-none" : ""}`}
 			>
 				{cover ? (
 					<>
-						<img src={proxyMediaUrl(cover)} alt="" className="absolute inset-0 h-full w-full scale-110 object-cover" style={{ filter: "blur(3px)" }} />
+						<img src={proxyMediaUrl(cover)} alt="" className="drawer-tile-media absolute inset-0 h-full w-full scale-110 object-cover" style={{ filter: "blur(3px)" }} />
 						<div className="absolute inset-0 bg-black/25" />
 					</>
 				) : (
@@ -506,25 +608,26 @@ export function ChatDrawerPanel({
 						.map((item) => ({
 							src: getCachedMediaUri(getDrawerMediaKey(item.id)) ?? item.url,
 							isVideo: item.contentType.startsWith("video/"),
+							posterKey: getDrawerMediaKey(item.id),
 						})),
 				})}
 				onClick={() => { if (consumePreviewClick()) return; if (!dimmed) toggleCollectionSelection(collection); }}
 				onKeyDown={(e) => { if (e.key === "Enter" && !dimmed) toggleCollectionSelection(collection); }}
-				className={`${DRAWER_TILE_CLASS} no-touch-callout cursor-pointer transition ${dimmed ? "opacity-30 pointer-events-none" : ""}`}
+				className={`${DRAWER_TILE_CLASS} drawer-tile-zoom no-touch-callout cursor-pointer transition ${dimmed ? "opacity-30 pointer-events-none" : ""}`}
 			>
 				{coverItems.length > 0 ? (
-					<div className={`absolute inset-0 grid gap-0.5 bg-[color-mix(in_srgb,var(--surface)_92%,black_8%)] ${mosaicClass} ${mosaicRows}`}>
+					<div className={`drawer-tile-media absolute inset-0 grid gap-0.5 bg-[color-mix(in_srgb,var(--surface)_92%,black_8%)] ${mosaicClass} ${mosaicRows}`}>
 						{coverItems.map((item, index) => {
-							const src = getCachedMediaUri(getDrawerMediaKey(item.id)) ?? item.url;
+							const src = getDrawerMediaSrc(item);
 							// With three items the first spans the full left column.
 							const span = coverItems.length === 3 && index === 0 ? "row-span-2" : "";
-							return item.contentType.startsWith("video/") ? (
-								<video
+							return src == null ? (
+								<div key={item.id} className={`min-h-0 animate-pulse bg-[var(--surface-2)] ${span}`} />
+							) : item.contentType.startsWith("video/") ? (
+								<VideoFirstFrame
 									key={item.id}
-									src={proxyMediaUrl(src, { as: "video" })}
-									preload="metadata"
-									muted
-									onLoadedMetadata={(e) => { (e.currentTarget as HTMLVideoElement).currentTime = 0.001; }}
+									src={src}
+									posterKey={getDrawerMediaKey(item.id)}
 									className={`h-full w-full min-h-0 object-cover ${span}`}
 								/>
 							) : (
@@ -566,20 +669,68 @@ export function ChatDrawerPanel({
 	// Capture / upload actions, shown as the first tiles of the media grid.
 	const actionsDisabled = upload.isUploading || hasSelection || hasAlbumSelection || hasCollectionSelection || noConversation;
 	const drawerActions = upload.actions;
-	// Not split into categories and no albums yet: there's no albums tab with
-	// its own create button, so it joins the grid's action row (the empty
-	// drawer's buttons below get it the same way).
-	const gridActions = combined && albums.length === 0 && !isLoadingAlbums && canCreateAlbum
-		? [
-			...drawerActions,
-			{
-				key: "create-album",
-				icon: isCreatingAlbum ? <Loader2 className="h-4 w-4 animate-spin" /> : <ImagesFilled className="h-4 w-4" />,
-				label: t("chat_drawer.albums_create", { defaultValue: "Create album" }),
-				onClick: () => void handleCreateAlbum(),
-			},
-		]
-		: drawerActions;
+	// One action each, so their tiles run them without a sheet. Album
+	// creation is hidden once the plan's album limit is reached.
+	const createAlbumActions = canCreateAlbum
+		? [{
+			key: "create-album",
+			icon: <Plus />,
+			label: t("chat_drawer.albums_create", { defaultValue: "Create album" }),
+			onClick: () => void handleCreateAlbum(),
+		}]
+		: [];
+	const createCollectionActions = [{
+		key: "create-collection",
+		icon: <Plus />,
+		label: t("chat_drawer.collections_create", { defaultValue: "Create collection" }),
+		onClick: () => setEditingCollection(null),
+	}];
+
+
+	/** `key`: a restored item keeps its tile's key once uploaded, so it isn't remounted. */
+	const renderMediaTile = (item: DrawerMedia, key: string | number = item.id) => {
+		const isSelected = selectedIds.has(item.id);
+		const isItemVideo = item.contentType.startsWith("video/");
+		const mediaSrc = getDrawerMediaSrc(item);
+		// 1-based send position, previewing a selected collection's contents.
+		const collectionPosition = selectedCollection ? sendIds.indexOf(item.id) + 1 : 0;
+		const isBlocked = hasAlbumSelection || noConversation || (hasCollectionSelection && collectionPosition === 0);
+		const isClickable = !isBlocked && !hasCollectionSelection;
+
+		return (
+			<DrawerMediaTile
+				key={key}
+				src={mediaSrc ?? item.url}
+				isVideo={isItemVideo}
+				posterKey={getDrawerMediaKey(item.id)}
+				placeholder={mediaSrc == null ? DRAWER_TILE_LOADING : undefined}
+				alt={t("chat_drawer.media_alt")}
+				selected={isSelected}
+				muted={isBlocked}
+				onSelect={isClickable ? () => toggleSelection(item.id, isItemVideo) : undefined}
+				previewProps={bindPreview({ src: mediaSrc ?? item.url, isVideo: isItemVideo })}
+				consumePreviewClick={consumePreviewClick}
+				takenOnGrindr={item.takenOnGrindr}
+				busy={deletion.deletingId === item.id}
+				onDelete={hasCollectionSelection ? undefined : () => deletion.requestDelete(item.id)}
+				isDeleting={deletion.deletingId === item.id}
+				deleteLabel={t("chat_drawer.delete_media")}
+			>
+				{item.used && !isSelected ? (
+					<div className="absolute inset-0 flex items-center justify-center bg-black/40">
+						<span className="text-[11px] font-semibold uppercase tracking-widest text-white/90">
+							{t("chat_drawer.sent", { defaultValue: "Sent" })}
+						</span>
+					</div>
+				) : null}
+				{!isSelected && collectionPosition > 0 ? (
+					<span className="pointer-events-none absolute end-1 top-1 flex h-5 min-w-5 items-center justify-center rounded-full bg-[var(--accent)] px-1 text-[11px] font-bold text-[var(--accent-contrast)]">
+						{collectionPosition}
+					</span>
+				) : null}
+			</DrawerMediaTile>
+		);
+	};
 
 	return (
 		<>
@@ -598,7 +749,10 @@ export function ChatDrawerPanel({
 			expandable={!upload.step}
 			isDesktop={isDesktop}
 			bg="bg-[color-mix(in_srgb,var(--surface)_92%,black_8%)]"
-			panelClassName="px-4"
+			// Mobile's expandable sheet has a fixed medium height already; on
+			// desktop a min height keeps the panel from shrinking from the
+			// loading skeleton down to the empty state.
+			panelClassName={isDesktop ? "min-h-[55dvh] px-4" : "px-4"}
 		>
 			<DrawerHeader
 				title={upload.stepTitle ?? t("chat_drawer.title", { defaultValue: "Drawer" })}
@@ -648,17 +802,23 @@ export function ChatDrawerPanel({
 								{ value: "albums" as const, label: t("chat_drawer.tab_albums", { defaultValue: "Albums" }) },
 								{ value: "collections" as const, label: t("chat_drawer.tab_collections", { defaultValue: "Collections" }) },
 							];
-							return <SlidingTabs<DrawerTab> tabs={tabs} value={activeTab} onChange={setActiveTab} className="mb-2 shrink-0" />;
+							return <SlidingTabs<DrawerTab> tabs={tabs} value={activeTab} onChange={changeTab} className="mb-2 shrink-0" />;
 						})()}
 
 						{/* Content Grid */}
-						<DrawerBody isLoading={isLoading || !hasSlidIn} isDesktop={isDesktop} error={error} onRetry={onLoadMedia} gestureProps={tabSwipe}>
-								<div className="flex flex-col gap-3">
+						{/* The slide-in gate is only for rendering many tiles: an empty
+						    drawer goes straight to its (cheap) empty state, without a
+						    tall skeleton shrinking down to it. */}
+						<DrawerBody skeletonKey={`chat-drawer:${combined ? "combined" : activeTab}`} isLoading={(isLoading && !upload.isUploading) || (!hasSlidIn && media.length > 0)} isDesktop={isDesktop} error={error} onRetry={onLoadMedia} gestureProps={tabSwipe}>
+								{/* sheet-fill: a tab's loading skeleton fills the expanded sheet,
+								    without a short tab scrolling by the sheet's bottom spacer. */}
+								<div className="sheet-fill flex flex-1 flex-col gap-3">
 								{!combined && activeTab === "albums" && albums.length === 0 && (
 									isLoadingAlbums ? (
 										<DrawerGridSkeleton isDesktop={isDesktop} />
 									) : (
 										<DrawerEmptyState
+											className="my-auto"
 											icon={<Album className="h-5 w-5" />}
 											title={t("chat_drawer.albums_empty", { defaultValue: "You don't have any albums yet." })}
 											hint={t("chat_drawer.albums_empty_hint", { defaultValue: "Albums let you share several photos at once, and stop sharing any time." })}
@@ -670,6 +830,7 @@ export function ChatDrawerPanel({
 								{!combined && activeTab === "collections" && collections.length === 0 && (
 									collectionsLoaded ? (
 										<DrawerEmptyState
+											className="my-auto"
 											icon={<Layers className="h-5 w-5" />}
 											title={t("chat_drawer.collections_empty", { defaultValue: "You don't have any collections yet." })}
 											hint={t("chat_drawer.collections_empty_hint", { defaultValue: "Collections group drawer photos so you can send them together in one tap." })}
@@ -681,99 +842,118 @@ export function ChatDrawerPanel({
 									)
 								)}
 								{!combined && ((activeTab === "albums" && albums.length > 0) || (activeTab === "collections" && collections.length > 0)) && (
-									<div className={drawerGridClass(isDesktop)}>
-										{/* Like the media tab's add actions: a create row above the albums. */}
-										{/* Hidden once the plan's album limit is reached. */}
-										{activeTab === "albums" && canCreateAlbum && (
-											<DrawerActionBar
+									<div data-drawer-grid className={drawerGridClass(isDesktop)}>
+										{/* Like the media tab's add tile: a create tile first among the albums. */}
+										{activeTab === "albums" ? (
+											<DrawerAddTile
+												label={t("chat_drawer.albums_create", { defaultValue: "Create album" })}
+												actions={createAlbumActions}
+												isDesktop={isDesktop}
 												disabled={isCreatingAlbum}
-												actions={[{
-													key: "create-album",
-													icon: isCreatingAlbum ? <Loader2 className="animate-spin" /> : <Plus />,
-													label: t("chat_drawer.albums_create", { defaultValue: "Create album" }),
-													onClick: () => void handleCreateAlbum(),
-												}]}
+											/>
+										) : (
+											<DrawerAddTile
+												label={t("chat_drawer.collections_create", { defaultValue: "Create collection" })}
+												actions={createCollectionActions}
+												isDesktop={isDesktop}
 											/>
 										)}
 										{activeTab === "albums" ? albumTiles : collectionTiles}
 									</div>
 								)}
-								{showSection("media") && (media.length > 0 || hasCombinedGroups) && (
+								{showSection("media") && (media.length > 0 || restoredEntries.length > 0 || hasCombinedGroups || upload.isUploading) && (
 								<DrawerGrid isDesktop={isDesktop}>
-									<DrawerActionBar actions={gridActions} disabled={actionsDisabled || isCreatingAlbum} />
+									<DrawerAddTile
+										label={t("chat_drawer.add_media", { defaultValue: "Add media" })}
+										actions={drawerActions}
+										isDesktop={isDesktop}
+										disabled={actionsDisabled}
+									/>
+									{/* Not split into categories: no albums or collections tab with
+									    their own create tiles, so they come along here. */}
+									{combined && (
+										<>
+											<DrawerAddTile
+												label={t("chat_drawer.albums_create", { defaultValue: "Create album" })}
+												actions={createAlbumActions}
+												isDesktop={isDesktop}
+												disabled={actionsDisabled || isCreatingAlbum}
+											/>
+											<DrawerAddTile
+												label={t("chat_drawer.collections_create", { defaultValue: "Create collection" })}
+												actions={createCollectionActions}
+												isDesktop={isDesktop}
+												disabled={actionsDisabled}
+											/>
+										</>
+									)}
+									{upload.uploadTiles}
 									{/* Not split into categories: albums and collections share the media grid. */}
 									{combined && albumTiles}
 									{combined && collectionTiles}
-									{media.map((item) => {
-										const isSelected = selectedIds.has(item.id);
-										const isItemVideo = item.contentType.startsWith("video/");
-										const mediaSrc = getCachedMediaUri(getDrawerMediaKey(item.id)) ?? item.url;
-										// 1-based send position, previewing a selected collection's contents.
-										const collectionPosition = selectedCollection ? sendIds.indexOf(item.id) + 1 : 0;
-										const isBlocked = hasAlbumSelection || noConversation || (hasCollectionSelection && collectionPosition === 0);
-										const isClickable = !isBlocked && !hasCollectionSelection;
-
+									{/* Restored from another profile's backup, newest on top like the
+									    rest of the drawer: uploaded bit by bit in the background, each
+									    tile turning into a regular one in place once it's up. */}
+									{restoredMedia.map(({ mediaKey, isVideo, uploaded }) => {
+										if (uploaded) return renderMediaTile(uploaded, mediaKey);
+										const src = getCachedMediaUri(mediaKey);
 										return (
 											<DrawerMediaTile
-												key={item.id}
-												src={mediaSrc}
-												isVideo={isItemVideo}
+												key={mediaKey}
+												src={src ?? ""}
+												isVideo={isVideo}
+												posterKey={mediaKey}
+												placeholder={src == null ? DRAWER_TILE_LOADING : undefined}
 												alt={t("chat_drawer.media_alt")}
-												selected={isSelected}
-												muted={isBlocked}
-												onSelect={isClickable ? () => toggleSelection(item.id, isItemVideo) : undefined}
-												previewProps={bindPreview({ src: mediaSrc, isVideo: isItemVideo })}
-												consumePreviewClick={consumePreviewClick}
-												takenOnGrindr={item.takenOnGrindr}
-												busy={deletion.deletingId === item.id}
-												onDelete={hasCollectionSelection ? undefined : () => deletion.requestDelete(item.id)}
-												isDeleting={deletion.deletingId === item.id}
-												deleteLabel={t("chat_drawer.delete_media")}
+												busy
 											>
-												{item.used && !isSelected ? (
-													<div className="absolute inset-0 flex items-center justify-center bg-black/40">
-														<span className="text-[11px] font-semibold uppercase tracking-widest text-white/90">
-															{t("chat_drawer.sent", { defaultValue: "Sent" })}
-														</span>
-													</div>
-												) : null}
-												{!isSelected && collectionPosition > 0 ? (
-													<span className="pointer-events-none absolute right-1 top-1 flex h-5 min-w-5 items-center justify-center rounded-full bg-[var(--accent)] px-1 text-[11px] font-bold text-[var(--accent-contrast)]">
-														{collectionPosition}
+												<div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-1 bg-black/45 text-white">
+													<Loader2 className="h-4 w-4 animate-spin" />
+													<span className="text-[10px] font-semibold uppercase tracking-widest">
+														{t("chat_drawer.restoring", { defaultValue: "Restoring" })}
 													</span>
-												) : null}
+												</div>
 											</DrawerMediaTile>
 										);
 									})}
+									{drawerOnlyMedia.map((item) => renderMediaTile(item))}
 								</DrawerGrid>
 								)}
 								{/* Empty drawer: the add actions on their own, as the way in. */}
-								{showSection("media") && media.length === 0 && !hasCombinedGroups && (
+								{showSection("media") && media.length === 0 && restoredEntries.length === 0 && !hasCombinedGroups && !upload.isUploading && (
 									<DrawerEmptyState
+										className="my-auto"
 										icon={<ImagesFilled className="h-5 w-5" />}
 										title={t("chat_drawer.empty", { defaultValue: "Your drawer is empty." })}
 										hint={t("chat_drawer.empty_hint", { defaultValue: "Take a photo or video, or upload one from your device." })}
 									>
-										{/* Not split into categories: there is no albums tab with its own create link, so it joins the actions. */}
-										<div className={`grid w-full gap-2 ${combined ? "max-w-md grid-cols-4" : "max-w-sm grid-cols-3"}`}>
-											{drawerActions.map((action) => (
-												<DrawerActionButton
-													key={action.key}
-													icon={action.icon}
-													label={action.label}
-													onClick={action.onClick}
-													disabled={actionsDisabled}
-												/>
-											))}
-											{combined && (
-												<DrawerActionButton
-													icon={<ImagesFilled className="h-4 w-4" />}
-													label={t("chat_drawer.albums_create", { defaultValue: "Create album" })}
-													onClick={() => void handleCreateAlbum()}
-													disabled={!canCreateAlbum || isCreatingAlbum}
-												/>
-											)}
-										</div>
+										{/* Not split into categories: there are no albums or collections tabs with their own create tiles, so they join the sheet's actions. */}
+										<DrawerAddButton
+											label={t("chat_drawer.add_media", { defaultValue: "Add media" })}
+											actions={combined
+												? [
+													...drawerActions,
+													...(canCreateAlbum && !isCreatingAlbum
+														? [{
+															key: "create-album",
+															icon: <Album className="h-4 w-4" />,
+															iconClassName: "bg-violet-500/15 text-violet-400",
+															label: t("chat_drawer.albums_create", { defaultValue: "Create album" }),
+															onClick: () => void handleCreateAlbum(),
+														}]
+														: []),
+													{
+														key: "create-collection",
+														icon: <Layers className="h-4 w-4" />,
+														iconClassName: "bg-amber-500/15 text-amber-400",
+														label: t("chat_drawer.collections_create", { defaultValue: "Create collection" }),
+														onClick: () => setEditingCollection(null),
+													},
+												]
+												: drawerActions}
+											isDesktop={isDesktop}
+											disabled={actionsDisabled}
+										/>
 									</DrawerEmptyState>
 								)}
 								</div>
@@ -801,23 +981,25 @@ export function ChatDrawerPanel({
 										</>
 									) : (
 										<>
-											<div className={`${SHEET_FOOTER_FIELD_CLASS} min-w-0 flex-1`}>
-												<Hourglass className="pointer-events-none absolute left-3 h-4 w-4 shrink-0" />
-												<select
-													value={albumExpirationType}
-													onChange={(e) => setAlbumExpirationType(e.target.value)}
-													className="h-full w-full appearance-none rounded-full bg-transparent pl-9 pr-3 text-sm font-semibold text-[var(--text)] focus:outline-none cursor-pointer text-center"
-												>
-													{EXPIRY_OPTIONS.map((opt) => (
-														<option key={opt} value={opt}>{EXPIRY_LABELS[opt]}</option>
-													))}
-												</select>
-											</div>
+											{canSendExpiringAlbums && (
+												<div className={`${SHEET_FOOTER_FIELD_CLASS} min-w-0 flex-1`}>
+													<Hourglass className="pointer-events-none absolute start-3 h-4 w-4 shrink-0" />
+													<select
+														value={albumExpirationType}
+														onChange={(e) => setAlbumExpirationType(e.target.value)}
+														className="h-full w-full appearance-none rounded-full bg-transparent ps-9 pe-3 text-sm font-semibold text-[var(--text)] focus:outline-none cursor-pointer text-center"
+													>
+														{EXPIRY_OPTIONS.map((opt) => (
+															<option key={opt} value={opt}>{EXPIRY_LABELS[opt]}</option>
+														))}
+													</select>
+												</div>
+											)}
 											<button
 												type="button"
 												onClick={() => {
 													if (selectedAlbumIds.size === 0 || !onShareAlbum) return;
-													void Promise.all([...selectedAlbumIds].map(id => onShareAlbum!(id, albumExpirationType))).then(() => { setSelectedAlbumIds(new Set()); closeSheet(); });
+													void Promise.all([...selectedAlbumIds].map(id => onShareAlbum!(id, effectiveAlbumExpirationType))).then(() => { setSelectedAlbumIds(new Set()); closeSheet(); });
 												}}
 												disabled={isSharingAlbum}
 												className={DRAWER_PRIMARY_BUTTON_CLASS}

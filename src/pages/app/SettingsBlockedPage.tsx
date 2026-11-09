@@ -74,7 +74,7 @@ export function SettingsBlockedPage() {
 								const displayName =
 									typeof nameRaw === "string" && nameRaw.trim().length > 0
 										? nameRaw.trim()
-										: t("settings_blocked.name_fallback", { defaultValue: "Someone" });
+										: t("common.unknown_display_name");
 								const hashRaw = (p as { profileImageMediaHash?: unknown }).profileImageMediaHash;
 								const avatarUrl =
 									typeof hashRaw === "string" && validateMediaHash(hashRaw)
@@ -93,7 +93,7 @@ export function SettingsBlockedPage() {
 						const meta = detailsById.get(profileId);
 						return {
 							profileId,
-							displayName: meta?.displayName ?? t("settings_blocked.name_fallback", { defaultValue: "Someone" }),
+							displayName: meta?.displayName ?? t("common.unknown_display_name"),
 							avatarUrl: meta?.avatarUrl ?? null,
 						} satisfies BlockedProfileListItem;
 					}),
@@ -157,7 +157,8 @@ export function SettingsBlockedPage() {
 
 	return (
 		<PullToRefreshContainer
-			className="app-screen"
+			className="app-screen flex flex-col"
+			contentClassName="flex flex-1 flex-col"
 			onRefresh={() => refetchIds()}
 			isDisabled={isLoading}
 			refreshingLabel={t("settings_blocked.refreshing")}
@@ -168,7 +169,8 @@ export function SettingsBlockedPage() {
 				subtitle={t("settings_blocked.subtitle")}
 			/>
 
-			<div className="grid gap-6">
+			{/* Fills the rest of the screen so the empty state can sit centered in it. */}
+			<div className={`grid flex-1 gap-6 ${!isLoading && !error && blockedProfiles.length === 0 ? "content-center" : "content-start"}`}>
 				{isLoading ? (
 					<div>
 						<div className="mb-2 flex items-center gap-2 px-1">
@@ -177,7 +179,7 @@ export function SettingsBlockedPage() {
 								<div className="h-3.5 w-5 animate-pulse rounded-full ink-tint-10" />
 							)}
 						</div>
-						<div className="native-card divide-y divide-[color-mix(in_srgb,var(--text)_8%,transparent)] overflow-hidden">
+						<div className="native-group">
 							{Array.from({ length: isLoadingIds ? 4 : (blockedIdsData?.length ?? 4) }).map((_, i) => (
 								<div key={i} className="flex items-center gap-3 px-4 py-3">
 									<div className="h-11 w-11 shrink-0 animate-pulse rounded-full overflow-hidden ink-tint-10" />
@@ -213,14 +215,14 @@ export function SettingsBlockedPage() {
 								{blockedProfiles.length}
 							</span>
 						</div>
-						<div className="native-card divide-y divide-[color-mix(in_srgb,var(--text)_8%,transparent)] overflow-hidden">
+						<div className="native-group">
 							{blockedProfiles.map((profile) => {
 								const isMutating = mutatingProfileId === profile.profileId;
 								return (
 									<div key={profile.profileId} className="flex items-center gap-3 px-4 py-3">
 										<button
 											type="button"
-											className="flex min-w-0 flex-1 items-center gap-3 text-left"
+											className="flex min-w-0 flex-1 items-center gap-3 text-start"
 											onClick={() => navigate(`/profile/${profile.profileId}`, { state: { returnTo: location.pathname } })}
 										>
 											<div className="h-11 w-11 shrink-0 rounded-full overflow-hidden bg-[var(--surface-2)] drop-shadow-sm">
@@ -261,23 +263,21 @@ export function SettingsBlockedPage() {
 						</div>
 					</div>
 				)}
-				{/* Unblock all: a destructive action row of its own, like in the
-				    native settings apps, with its explanation as a footnote. */}
+				{/* Unblock all: a borderless red-tinted action button of its own,
+				    with its explanation as a footnote. */}
 				{!isLoading && !error && blockedProfiles.length > 0 && (
 					<div>
-						<div className="native-card overflow-hidden">
-							<button
+						<button
 								type="button"
 								onClick={() => setConfirmUnblockAll(true)}
 								disabled={isUnblockingAll}
-								className="flex w-full items-center justify-center gap-2 px-4 py-3.5 text-sm font-semibold text-red-500 transition-colors hover:bg-red-500/8 active:bg-red-500/12 disabled:opacity-60"
+								className="flex w-full items-center justify-center gap-2 rounded-[20px] bg-red-500/12 px-4 py-3.5 text-sm font-semibold text-red-500 transition-colors hover:bg-red-500/18 active:bg-red-500/24 disabled:opacity-60"
 							>
 								{isUnblockingAll ? <Loader2 className="h-4 w-4 animate-spin" /> : <ShieldOff className="h-4 w-4" />}
 								{isUnblockingAll
 									? t("settings_blocked.unblocking_all", { defaultValue: "Unblocking…" })
 									: t("settings_blocked.unblock_all_title", { defaultValue: "Unblock All" })}
 							</button>
-						</div>
 						<p className="mt-2 px-4 text-xs leading-relaxed text-[var(--text-muted)]">
 							{t("settings_blocked.unblock_all_desc", { defaultValue: "Remove all blocked accounts at once. This cannot be undone." })}
 						</p>

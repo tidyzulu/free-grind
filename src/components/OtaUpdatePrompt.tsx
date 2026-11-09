@@ -1,4 +1,4 @@
-import { Download, Loader2, RefreshCcw, Zap } from "lucide-react";
+import { Download, Loader2, Zap } from "lucide-react";
 import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
@@ -17,48 +17,19 @@ import {
 	type PendingHotswapUpdate,
 } from "../services/hotswap";
 import { appLog } from "../utils/logger";
-import { FullscreenPrompt, fullscreenPrimaryButtonClass, fullscreenSecondaryButtonClass, fullscreenCardClass } from "./FullscreenPrompt";
+import { FullscreenPrompt, fullscreenPrimaryButtonClass, fullscreenSecondaryButtonClass } from "./FullscreenPrompt";
 import { ToggleRow } from "./ui/toggle-row";
-import { VersionCompare, type VersionCompareSide } from "./ui/version-compare";
-import { hourCycleOptions } from "../utils/timeFormat";
+import { VersionCompare, VersionCompareLink, type VersionCompareSide } from "./ui/version-compare";
+import { buildDate, formatBuildTime, releaseOf } from "../utils/otaVersion";
 import { formatRelativeTime } from "../utils/relativeTime";
+import { GITHUB_OTA_SIGNING_URL, githubCompareUrl } from "../utils/githubIssues";
+import { VersionChangesLink } from "./VersionChangesSheet";
 
-/**
- * OTA bundle versions look like `1.2.0-ota.development.1729500000` (see
- * scripts/publish-ota.mjs) — only the release part is meaningful to users.
- */
-function displayVersion(version: string | null): string | null {
-	return version?.replace(/-ota\..*$/, "") || null;
+/** CI publishes bundles with notes like "Automated OTA upload for <sha> on <channel>". */
+function noteCommit(notes: string | null): string | null {
+	return notes?.match(/\b[0-9a-f]{40}\b/)?.[0] ?? null;
 }
 
-/** The trailing Unix-seconds sequence of an OTA version is its publish time. */
-function buildDate(version: string | null): Date | null {
-	const seconds = Number(version?.match(/-ota\..*\.(\d{9,})$/)?.[1]);
-	return Number.isFinite(seconds) && seconds > 0 ? new Date(seconds * 1000) : null;
-}
-
-/** Release part of a bundle version; the embedded frontend has the app's own. */
-function releaseOf(version: string | null): string | null {
-	return displayVersion(version) ?? import.meta.env.VITE_APP_VERSION ?? null;
-}
-
-/**
- * "Today, 09:12" / "Yesterday, 14:03" / "Monday, 14:03" within the last week,
- * else a medium date — the build time is the only thing telling OTA bundles apart.
- */
-function formatBuildTime(date: Date, lang: string): string {
-	const time = date.toLocaleTimeString(lang, { hour: "2-digit", minute: "2-digit", ...hourCycleOptions() });
-	const startOfDay = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
-	const daysAgo = Math.round((startOfDay(new Date()) - startOfDay(date)) / 86_400_000);
-	if (daysAgo === 0 || daysAgo === 1) {
-		const day = new Intl.RelativeTimeFormat(lang, { numeric: "auto" }).format(-daysAgo, "day");
-		return `${day.charAt(0).toLocaleUpperCase(lang)}${day.slice(1)}, ${time}`;
-	}
-	if (daysAgo > 1 && daysAgo < 7) {
-		return `${date.toLocaleDateString(lang, { weekday: "long" })}, ${time}`;
-	}
-	return date.toLocaleString(lang, { dateStyle: "medium", timeStyle: "short", ...hourCycleOptions() });
-}
 
 /** How much newer the new build is, in its largest whole unit ("3 days newer"). */
 function newerBy(t: TFunction, newer: Date, older: Date): string | null {
@@ -84,15 +55,24 @@ function bundleSide(
 	showVersion: boolean,
 	/** Installed version, for the "… newer" hint on the new build. */
 	comparedTo?: string | null,
+	/** Full commit sha of the build; shown short as the title so the time isn't repeated. */
+	commit?: string | null,
 ): VersionCompareSide {
 	const release = showVersion ? releaseOf(version) : null;
 	const builtAt = buildDate(version);
 	const olderBuild = buildDate(comparedTo ?? null);
 	const newer = builtAt && olderBuild ? newerBy(t, builtAt, olderBuild) : null;
+	const shortCommit = commit && /^[0-9a-f]{7,40}$/i.test(commit) ? commit.slice(0, 7) : null;
 
 	return {
 		label,
-		title: builtAt ? formatBuildTime(builtAt, lang) : t("ota_prompt.built_in", { defaultValue: "Included with the app" }),
+		title: shortCommit ? (
+			<span className="font-mono">{shortCommit}</span>
+		) : builtAt ? (
+			formatBuildTime(builtAt, lang)
+		) : (
+			t("ota_prompt.built_in", { defaultValue: "Included with the app" })
+		),
 		detail:
 			release || builtAt ? (
 				<>
@@ -195,10 +175,13 @@ export function OtaUpdatePromptView({
 	// it does on the regular screen, and come back if the download fails.
 	const progressOnly = update.autoStart === true;
 	const hideButtons = progressOnly && !failed;
+	// The running frontend is the installed build, so its commit is the diff base.
+	const newCommit = update.commit ?? noteCommit(update.notes);
+	const compareUrl = githubCompareUrl(import.meta.env.VITE_COMMIT_HASH, newCommit);
 
 	return (
 		<FullscreenPrompt
-			icon={RefreshCcw}
+			icon={Download}
 			title={t("ota_prompt.title", { defaultValue: "Update Available" })}
 			description={t("ota_prompt.description", {
 				defaultValue: "A new version of the app interface is ready to download. It only takes a moment and the app reloads afterwards.",
@@ -259,14 +242,30 @@ export function OtaUpdatePromptView({
 				</>
 			}
 		>
-			<div className={`${fullscreenCardClass} divide-y divide-[var(--border)] overflow-hidden text-left`}>
+			<div className={"native-group text-start"}>
 				<VersionCompare
 					from={
 						installedVersion === undefined
 							? undefined
-							: bundleSide(t, i18n.language, t("ota_prompt.installed", { defaultValue: "Installed build" }), installedVersion, versionChanged)
+							: bundleSide(
+									t,
+									i18n.language,
+									t("ota_prompt.installed", { defaultValue: "Installed build" }),
+									installedVersion,
+									versionChanged,
+									undefined,
+									import.meta.env.VITE_COMMIT_HASH,
+								)
 					}
-					to={bundleSide(t, i18n.language, t("ota_prompt.new", { defaultValue: "New build" }), update.version, versionChanged, installedVersion)}
+					to={bundleSide(
+						t,
+						i18n.language,
+						t("ota_prompt.new", { defaultValue: "New build" }),
+						update.version,
+						versionChanged,
+						installedVersion,
+						newCommit,
+					)}
 				/>
 				{!progressOnly && <ToggleRow
 					checked={autoUpdate}
@@ -277,6 +276,11 @@ export function OtaUpdatePromptView({
 					description={t("ota_prompt.auto_desc", { defaultValue: "Install future frontend updates without asking." })}
 				/>}
 			</div>
+			{compareUrl ? (
+				<VersionChangesLink from={import.meta.env.VITE_COMMIT_HASH} to={newCommit} />
+			) : (
+				<VersionCompareLink url={GITHUB_OTA_SIGNING_URL} label={t("onboarding.updates_more", { defaultValue: "More about that" })} />
+			)}
 		</FullscreenPrompt>
 	);
 }

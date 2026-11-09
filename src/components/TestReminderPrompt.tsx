@@ -27,6 +27,82 @@ function currentMonthValue(): string {
 	return `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
 }
 
+export function TestReminderPromptView({
+	onSave,
+	onSkip,
+	isSaving = false,
+}: {
+	/** Called with the picked month as a UTC timestamp (first of the month). */
+	onSave: (timestamp: number) => void;
+	onSkip: () => void;
+	isSaving?: boolean;
+}) {
+	const { t } = useTranslation();
+	const [monthValue, setMonthValue] = useState(currentMonthValue);
+
+	const handleSave = () => {
+		if (!monthValue || isSaving) {
+			return;
+		}
+		const timestamp = Date.parse(`${monthValue}-01T00:00:00.000Z`);
+		if (!Number.isFinite(timestamp)) {
+			return;
+		}
+		onSave(timestamp);
+	};
+
+	return (
+		<div className="fs-card-outer fs-card-overlay no-touch-callout">
+			<div className="fs-card-inner fs-card-lg flex flex-col">
+				<div
+					className="flex flex-1 flex-col items-center justify-center px-8 text-center"
+					style={{
+						paddingTop: "max(48px, var(--safe-area-top))",
+						paddingBottom: "max(24px, var(--safe-area-bottom))",
+					}}
+				>
+					<div className="mb-6 flex h-20 w-20 items-center justify-center rounded-2xl border border-[var(--border)] bg-[var(--surface-2)]">
+						<ShieldPlus className="h-9 w-9 text-[var(--accent)]" />
+					</div>
+					<h1 className="text-2xl font-bold text-[var(--text)]">{t("test_reminder.title")}</h1>
+					<p className="mt-2 max-w-xs text-sm leading-relaxed text-[var(--text-muted)]">
+						{t("test_reminder.description")}
+					</p>
+					<div className="mt-6 w-full max-w-[240px]">
+						<LastTestedMonthPicker
+							value={monthValue}
+							onChange={setMonthValue}
+							notSetLabel={t("profile_editor.sections.states.not_set")}
+						/>
+					</div>
+				</div>
+
+				<div
+					className="flex h-44 shrink-0 flex-col justify-end gap-2 px-6"
+					style={{ paddingBottom: "max(28px, calc(var(--safe-area-bottom) + 12px))" }}
+				>
+					<button
+						type="button"
+						onClick={handleSave}
+						disabled={!monthValue || isSaving}
+						className={fullscreenPrimaryButtonClass}
+					>
+						{isSaving ? t("test_reminder.saving") : t("test_reminder.save")}
+					</button>
+					<button
+						type="button"
+						onClick={onSkip}
+						disabled={isSaving}
+						className="w-full rounded-xl py-3 text-sm font-medium text-[var(--text-muted)] transition hover:text-[var(--text)] disabled:opacity-60"
+					>
+						{t("test_reminder.skip")}
+					</button>
+				</div>
+			</div>
+		</div>
+	);
+}
+
 /**
  * Gates the routed app behind a full-page HIV test reminder — same slot in
  * the tree as onboarding/VersionAnnouncement in App.tsx, not a floating
@@ -48,7 +124,6 @@ export function TestReminderGate({ children }: { children: ReactNode }) {
 	const [isDismissed, setIsDismissed] = useState(() =>
 		processDismissCountdown(TEST_REMINDER_DISMISS_KEY),
 	);
-	const [monthValue, setMonthValue] = useState(currentMonthValue);
 	const [isSaving, setIsSaving] = useState(false);
 
 	const isOverdue =
@@ -60,15 +135,7 @@ export function TestReminderGate({ children }: { children: ReactNode }) {
 		return <>{children}</>;
 	}
 
-	const handleSave = async () => {
-		if (!monthValue || isSaving) {
-			return;
-		}
-		const timestamp = Date.parse(`${monthValue}-01T00:00:00.000Z`);
-		if (!Number.isFinite(timestamp)) {
-			return;
-		}
-
+	const handleSave = async (timestamp: number) => {
 		setIsSaving(true);
 		try {
 			await apiFunctions.updateMyProfile({ lastTestedDate: timestamp });
@@ -86,57 +153,14 @@ export function TestReminderGate({ children }: { children: ReactNode }) {
 
 	return (
 		<div className="app-shell">
-		<div className="fs-card-outer fs-card-overlay no-touch-callout">
-			<div className="fs-card-inner fs-card-lg flex flex-col">
-				<div
-					className="flex flex-1 flex-col items-center justify-center px-8 text-center"
-					style={{
-						paddingTop: "max(48px, env(safe-area-inset-top))",
-						paddingBottom: "max(24px, env(safe-area-inset-bottom))",
-					}}
-				>
-					<div className="mb-6 flex h-20 w-20 items-center justify-center rounded-2xl border border-[var(--border)] bg-[var(--surface-2)]">
-						<ShieldPlus className="h-9 w-9 text-[var(--accent)]" />
-					</div>
-					<h1 className="text-2xl font-bold text-[var(--text)]">{t("test_reminder.title")}</h1>
-					<p className="mt-2 max-w-xs text-sm leading-relaxed text-[var(--text-muted)]">
-						{t("test_reminder.description")}
-					</p>
-					<div className="mt-6 w-full max-w-[240px]">
-						<LastTestedMonthPicker
-							value={monthValue}
-							onChange={setMonthValue}
-							notSetLabel={t("profile_editor.sections.states.not_set")}
-						/>
-					</div>
-				</div>
-
-				<div
-					className="flex h-44 shrink-0 flex-col justify-end gap-2 px-6"
-					style={{ paddingBottom: "max(28px, calc(env(safe-area-inset-bottom) + 12px))" }}
-				>
-					<button
-						type="button"
-						onClick={() => void handleSave()}
-						disabled={!monthValue || isSaving}
-						className={fullscreenPrimaryButtonClass}
-					>
-						{isSaving ? t("test_reminder.saving") : t("test_reminder.save")}
-					</button>
-					<button
-						type="button"
-						onClick={() => {
-							writeDismissedFlag(TEST_REMINDER_DISMISS_KEY, TEST_REMINDER_REOPEN_COUNT);
-							setIsDismissed(true);
-						}}
-						disabled={isSaving}
-						className="w-full rounded-xl py-3 text-sm font-medium text-[var(--text-muted)] transition hover:text-[var(--text)] disabled:opacity-60"
-					>
-						{t("test_reminder.skip")}
-					</button>
-				</div>
-			</div>
-		</div>
+			<TestReminderPromptView
+				onSave={(timestamp) => void handleSave(timestamp)}
+				onSkip={() => {
+					writeDismissedFlag(TEST_REMINDER_DISMISS_KEY, TEST_REMINDER_REOPEN_COUNT);
+					setIsDismissed(true);
+				}}
+				isSaving={isSaving}
+			/>
 		</div>
 	);
 }

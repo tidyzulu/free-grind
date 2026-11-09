@@ -5,18 +5,21 @@ import { cn } from "../../utils/cn";
 import { ToggleRow } from "./toggle-row";
 
 /** A labelled group inside a bottom sheet: small muted heading (plus an
- * optional current value on the right) above its content — same look as the
- * location sheet's sections. */
+ * optional current value, or a small control via `action`, on the right)
+ * above its content — same look as the location sheet's sections. */
 export function SheetSection({
 	title,
 	value,
 	badge,
+	action,
 	className,
 	children,
 }: {
 	title: string;
 	value?: string;
 	badge?: ReactNode;
+	/** A small control for the whole section (e.g. a SheetSegmented), right of the title. */
+	action?: ReactNode;
 	className?: string;
 	children: ReactNode;
 }) {
@@ -28,9 +31,48 @@ export function SheetSection({
 					{badge}
 				</div>
 				{value ? <span className="shrink-0 text-xs font-semibold tabular-nums text-[var(--text)]">{value}</span> : null}
+				{action}
 			</div>
 			{children}
 		</section>
+	);
+}
+
+/** Compact segmented control for a SheetSection's `action` slot: one soft
+ * pill, the chosen option filled with the accent. */
+export function SheetSegmented<T extends string>({
+	value,
+	options,
+	onChange,
+	disabled,
+}: {
+	value: T;
+	options: { value: T; label: string }[];
+	onChange: (value: T) => void;
+	disabled?: boolean;
+}) {
+	return (
+		<div role="radiogroup" className="inline-flex shrink-0 rounded-full ink-tint-8 p-0.5">
+			{options.map((option) => {
+				const active = option.value === value;
+				return (
+					<button
+						key={option.value}
+						type="button"
+						role="radio"
+						aria-checked={active}
+						disabled={disabled}
+						onClick={() => onChange(option.value)}
+						className={cn(
+							"rounded-full px-2.5 py-0.5 text-xs font-semibold transition disabled:cursor-default",
+							active ? "bg-[var(--accent)] text-[var(--accent-contrast)]" : "text-[var(--text-muted)] hover:text-[var(--text)]",
+						)}
+					>
+						{option.label}
+					</button>
+				);
+			})}
+		</div>
 	);
 }
 
@@ -98,15 +140,38 @@ export function SheetChip({
 }
 
 /** Look of a plain form field in a sheet (date, time, multi-line note):
- * surface-2 fill, thin border, accent border while focused. Add the height
+ * surface-2 fill, borderless at rest (like the cards), accent border while focused. Add the height
  * and padding at the call site (e.g. "h-11 px-3", or "px-4 py-3 resize-none"). */
 export const SHEET_FIELD_CLASS =
-	"w-full rounded-xl border border-[var(--border)] bg-[var(--surface-2)] text-sm text-[var(--text)] outline-none transition placeholder:text-[var(--text-muted)] focus:border-[var(--accent)]";
+	"w-full rounded-xl border border-transparent bg-[var(--surface-2)] text-sm text-[var(--text)] outline-none transition placeholder:text-[var(--text-muted)] focus:border-[var(--accent)]";
 
-/** Plain surface-2 container for list-style rows in a sheet section. */
+/** Container for list-style rows in a sheet section: the sheet's own (accent
+ * tinted) fill lifted by a touch of the text color, like the resting chips,
+ * rather than the palette's surface-2, which clashed with the tinted sheet.
+ * Its --border follows suit, so dividers inside match too. The sheet color
+ * comes first in each mix, since the build falls back to the first color
+ * where color-mix is unsupported. */
 export function SheetCard({ className, children }: { className?: string; children: ReactNode }) {
-	return <div className={cn("rounded-2xl bg-[var(--surface-2)] px-4 py-3", className)}>{children}</div>;
+	return (
+		<div
+			className={cn(
+				SHEET_CARD_FILL_CLASS,
+				"rounded-2xl [--border:color-mix(in_srgb,var(--sheet-bg,var(--surface))_84%,var(--text))] px-4 py-3",
+				className,
+			)}
+		>
+			{children}
+		</div>
+	);
 }
+
+/** SheetCard's fill on its own, for other cards in a sheet (e.g. a hero row). */
+export const SHEET_CARD_FILL_CLASS = "bg-[color-mix(in_srgb,var(--sheet-bg,var(--surface))_93%,var(--text))]";
+
+/** Grouped list in a sheet: one native-group tile per row, in the SheetCard
+ * fill, with gaps instead of divider lines. Rows bring their own padding. */
+export const SHEET_GROUP_CLASS =
+	"native-group [--card-bg:color-mix(in_srgb,var(--sheet-bg,var(--surface))_93%,var(--text))] [--hover-base:var(--card-bg)]";
 
 export interface SheetToggleItem {
 	key: string;
@@ -116,11 +181,11 @@ export interface SheetToggleItem {
 	description?: string;
 }
 
-/** On/off options in a sheet as native-style list rows: one SheetCard, a
- * switch per row, dividers between them (e.g. a photo's upload options). */
+/** On/off options in a sheet as native-style list rows: a switch per row,
+ * one tile each in a SHEET_GROUP_CLASS group (e.g. a photo's upload options). */
 export function SheetToggleList({ items, className }: { items: SheetToggleItem[]; className?: string }) {
 	return (
-		<SheetCard className={cn("divide-y divide-[var(--border)] py-0", className)}>
+		<div className={cn(SHEET_GROUP_CLASS, className)}>
 			{items.map((item) => (
 				<ToggleRow
 					key={item.key}
@@ -128,10 +193,10 @@ export function SheetToggleList({ items, className }: { items: SheetToggleItem[]
 					onChange={item.onChange}
 					label={item.label}
 					description={item.description}
-					padding="py-3"
+					padding="px-4 py-3"
 				/>
 			))}
-		</SheetCard>
+		</div>
 	);
 }
 
@@ -166,7 +231,7 @@ export function SheetSearchInput({
 			className="relative rounded-full bg-[color-mix(in_srgb,var(--surface)_82%,transparent)] shadow-[0_2px_6px_rgba(0,0,0,0.14),0_8px_24px_rgba(0,0,0,0.22)] ring-1 ring-[var(--border)]/50 backdrop-blur-xl transition focus-within:ring-2 focus-within:ring-[var(--chip-accent)]"
 			style={{ "--chip-accent": accentColor } as CSSProperties}
 		>
-			<Search className="pointer-events-none absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--text-muted)]" />
+			<Search className="pointer-events-none absolute start-4 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--text-muted)]" />
 			<input
 				type="text"
 				value={value}
@@ -174,16 +239,16 @@ export function SheetSearchInput({
 				onFocus={onFocus}
 				onBlur={onBlur}
 				placeholder={placeholder}
-				className="h-12 w-full rounded-full bg-transparent pl-11 pr-11 text-[15px] text-[var(--text)] outline-none placeholder:text-[var(--text-muted)]"
+				className="h-12 w-full rounded-full bg-transparent ps-11 pe-11 text-[15px] text-[var(--text)] outline-none placeholder:text-[var(--text-muted)]"
 			/>
 			{isLoading ? (
-				<Loader2 className="pointer-events-none absolute right-4 top-1/2 h-4 w-4 -translate-y-1/2 animate-spin text-[var(--text-muted)]" />
+				<Loader2 className="pointer-events-none absolute end-4 top-1/2 h-4 w-4 -translate-y-1/2 animate-spin text-[var(--text-muted)]" />
 			) : value ? (
 				<button
 					type="button"
 					onClick={() => onChange("")}
 					aria-label={t("common.clear", { defaultValue: "Clear" })}
-					className="absolute right-2.5 top-1/2 -translate-y-1/2 rounded-full p-1.5 text-[var(--text-muted)] transition hover:text-[var(--text)]"
+					className="absolute end-2.5 top-1/2 -translate-y-1/2 rounded-full p-1.5 text-[var(--text-muted)] transition hover:text-[var(--text)]"
 				>
 					<X className="h-3.5 w-3.5" />
 				</button>
@@ -222,7 +287,8 @@ export function SheetMoreButton({
 }
 
 /** Plain text field for a sheet (e.g. a name), same look as SheetSearchInput.
- * Enter or leaving the field calls `onCommit`; `trailing` sits inside on the right. */
+ * Enter or leaving the field calls `onCommit`; `trailing` sits inside on the right.
+ * `invalid` outlines it in red (its message is the caller's, below it). */
 export function SheetTextInput({
 	value,
 	onChange,
@@ -232,6 +298,7 @@ export function SheetTextInput({
 	disabled,
 	autoFocus,
 	trailing,
+	invalid,
 	accentColor = "var(--accent)",
 }: {
 	value: string;
@@ -242,11 +309,13 @@ export function SheetTextInput({
 	disabled?: boolean;
 	autoFocus?: boolean;
 	trailing?: ReactNode;
+	invalid?: boolean;
 	accentColor?: string;
 }) {
 	return (
-		<div className="relative" style={{ "--chip-accent": accentColor } as CSSProperties}>
+		<div className="relative" style={{ "--chip-accent": invalid ? "#f87171" : accentColor } as CSSProperties}>
 			<input
+				aria-invalid={invalid || undefined}
 				type="text"
 				value={value}
 				onChange={(event) => onChange(event.target.value)}
@@ -262,12 +331,13 @@ export function SheetTextInput({
 				disabled={disabled}
 				autoFocus={autoFocus}
 				className={cn(
-					"h-11 w-full rounded-xl border border-[var(--border)] bg-[var(--surface-2)] px-3 text-sm text-[var(--text)] outline-none transition placeholder:text-[var(--text-muted)] focus:border-[var(--chip-accent)] disabled:opacity-60",
-					trailing ? "pr-10" : undefined,
+					"h-11 w-full rounded-xl border border-transparent bg-[var(--surface-2)] px-3 text-sm text-[var(--text)] outline-none transition placeholder:text-[var(--text-muted)] focus:border-[var(--chip-accent)] disabled:opacity-60",
+					trailing ? "pe-10" : undefined,
+					invalid ? "border-[var(--chip-accent)]" : undefined,
 				)}
 			/>
 			{trailing && (
-				<div className="pointer-events-none absolute right-3 top-1/2 flex -translate-y-1/2 items-center text-[var(--text-muted)]">
+				<div className="pointer-events-none absolute end-3 top-1/2 flex -translate-y-1/2 items-center text-[var(--text-muted)]">
 					{trailing}
 				</div>
 			)}

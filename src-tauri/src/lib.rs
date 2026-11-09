@@ -1,4 +1,6 @@
 mod api;
+#[cfg(desktop)]
+mod app_disguise;
 mod commands;
 mod error;
 mod instance_lock;
@@ -6,6 +8,7 @@ mod media;
 mod media_proxy;
 mod state;
 mod storage;
+mod upload;
 mod windows_instance;
 
 use crate::state::AppState;
@@ -81,6 +84,8 @@ fn create_linux_main_window(app: &tauri::App) -> tauri::Result<()> {
 /// websocket-bridge tasks it spawns run in the background from here on.
 fn init_client(app: &tauri::AppHandle) {
     api::auth::SigningKeyStorage::forget_unscoped();
+    // The backend (official or self-hosted) must be set before any request.
+    api::server::apply_persisted_server();
     let device = api::auth::DeviceStorage::load().ok().flatten();
     let session = api::auth::AuthStorage::get_session().ok().flatten();
     if let Err(e) = api::auth::adopt_client(app, device, session) {
@@ -151,15 +156,19 @@ pub fn run() {
             .plugin(api::facebook_oauth::plugin())
             .plugin(api::google_oauth::plugin())
             .manage(AppState::default())
+            .manage(upload::UploadLock::default())
             .manage(media_proxy::MediaProxy::default())
             .plugin(media_proxy_flag())
             .register_asynchronous_uri_scheme_protocol(media_proxy::SCHEME, media_proxy::handle)
             .setup(|app| {
                 let app_handle = app.handle().clone();
                 init_client(&app_handle);
+                upload::staged::discard_all(&app_handle);
 
                 #[cfg(target_os = "linux")]
                 create_linux_main_window(app)?;
+
+                app_disguise::restore(&app_handle);
 
                 #[cfg(target_os = "linux")]
                 {
@@ -235,6 +244,8 @@ pub fn run() {
             })
             .invoke_handler(tauri::generate_handler![
                 api::runtime::runtime_context,
+                app_disguise::app_disguise_get,
+                app_disguise::app_disguise_set,
                 api::runtime::webview_version,
                 api::runtime::app_commit_hash,
                 api::runtime::create_child_instance,
@@ -258,6 +269,7 @@ pub fn run() {
                 api::auth::auth_state,
                 api::auth::account_restriction,
                 api::auth::accept_ban_agreement,
+                api::locale::set_api_locale,
                 api::entitlements::enter_honduras,
                 api::entitlements::leave_honduras,
                 api::entitlements::restore_stranded_location,
@@ -267,6 +279,9 @@ pub fn run() {
                 api::auth::switch_account,
                 api::auth::remove_saved_account,
                 api::auth::create_transfer_code,
+                api::server::get_server_config,
+                api::server::test_server,
+                api::server::set_server_config,
                 api::auth::sign_in_with_transfer_code,
                 api::rest::request,
                 api::rest::fetch_external,
@@ -281,11 +296,23 @@ pub fn run() {
                 commands::backup::export_backup_to_file,
                 commands::backup::import_backup_from_file,
                 commands::backup::inspect_backup_file,
+                commands::backup::read_own_profile_fallback_source,
+                commands::backup::list_local_backups,
                 commands::backup::copy_file_to_android_uri,
                 commands::backup::copy_android_uri_to_file,
                 commands::media_upload::upload_profile_image,
                 commands::media_upload::upload_chat_media,
                 commands::media_sanitize::sanitize_upload_media,
+                upload::staged::stage_media,
+                upload::staged::append_staged_media,
+                upload::staged::discard_staged_media,
+                upload::staged::write_staged_media,
+                upload::staged::resize_staged_media,
+                upload::video::upload_staged_chat_video,
+                upload::video::upload_staged_album_video,
+                upload::edit::video_trim_points,
+                upload::edit::video_needed_ranges,
+                upload::edit::video_decode_window,
             ])
             .build(context)
             .expect("error while running tauri application");
@@ -348,6 +375,7 @@ pub fn run() {
 
         builder
             .manage(AppState::default())
+            .manage(upload::UploadLock::default())
             .manage(media_proxy::MediaProxy::default())
             .plugin(media_proxy_flag())
             .register_asynchronous_uri_scheme_protocol(media_proxy::SCHEME, media_proxy::handle)
@@ -357,6 +385,7 @@ pub fn run() {
                 eprintln!("Free Grind binary {} starting", app.package_info().version);
                 let app_handle = app.handle().clone();
                 init_client(&app_handle);
+                upload::staged::discard_all(&app_handle);
                 Ok(())
             })
             .invoke_handler(tauri::generate_handler![
@@ -384,6 +413,7 @@ pub fn run() {
                 api::auth::auth_state,
                 api::auth::account_restriction,
                 api::auth::accept_ban_agreement,
+                api::locale::set_api_locale,
                 api::entitlements::enter_honduras,
                 api::entitlements::leave_honduras,
                 api::entitlements::restore_stranded_location,
@@ -393,6 +423,9 @@ pub fn run() {
                 api::auth::switch_account,
                 api::auth::remove_saved_account,
                 api::auth::create_transfer_code,
+                api::server::get_server_config,
+                api::server::test_server,
+                api::server::set_server_config,
                 api::auth::sign_in_with_transfer_code,
                 api::rest::request,
                 api::rest::fetch_external,
@@ -407,11 +440,23 @@ pub fn run() {
                 commands::backup::export_backup_to_file,
                 commands::backup::import_backup_from_file,
                 commands::backup::inspect_backup_file,
+                commands::backup::read_own_profile_fallback_source,
+                commands::backup::list_local_backups,
                 commands::backup::copy_file_to_android_uri,
                 commands::backup::copy_android_uri_to_file,
                 commands::media_upload::upload_profile_image,
                 commands::media_upload::upload_chat_media,
                 commands::media_sanitize::sanitize_upload_media,
+                upload::staged::stage_media,
+                upload::staged::append_staged_media,
+                upload::staged::discard_staged_media,
+                upload::staged::write_staged_media,
+                upload::staged::resize_staged_media,
+                upload::video::upload_staged_chat_video,
+                upload::video::upload_staged_album_video,
+                upload::edit::video_trim_points,
+                upload::edit::video_needed_ranges,
+                upload::edit::video_decode_window,
             ])
             .run(context)
             .expect("error while running tauri application");

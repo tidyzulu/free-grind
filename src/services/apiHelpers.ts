@@ -12,6 +12,15 @@ export class ApiFunctionError extends Error {
 	}
 }
 
+/**
+ * The server refusing a request about another profile for good: 400 / 404 /
+ * 410 is what comes back for a profile that no longer exists. Retrying that
+ * won't help, unlike rate limiting or a dropped connection.
+ */
+export function isGoneProfileError(error: unknown): boolean {
+	return error instanceof ApiFunctionError && (error.status === 400 || error.status === 404 || error.status === 410);
+}
+
 /** Banned terms per moderated field, as reported by a rejected profile update. */
 export interface BannedTermsByField {
 	displayName?: string[];
@@ -115,14 +124,17 @@ export function mediaUploadErrorToApiFunctionError(
 	t: (key: string, options?: { defaultValue?: string }) => string,
 ): ApiFunctionError {
 	if (error && typeof error === "object" && (error as { kind?: unknown }).kind === "MediaRejected") {
-		const { status, reason } = ((error as { message?: unknown }).message ?? {}) as {
+		const { status, reason, detail } = ((error as { message?: unknown }).message ?? {}) as {
 			status?: unknown;
 			reason?: unknown;
+			detail?: unknown;
 		};
 		const known = typeof reason === "string" ? MEDIA_REJECTION_MESSAGES[reason] : undefined;
+		// The server's own detail says why (bad_request/internal_error alone don't).
+		const why = typeof detail === "string" && detail ? `${String(reason)}: ${detail}` : String(reason);
 		const message = known
 			? t(known.key, { defaultValue: known.defaultValue })
-			: `${t("api.errors.media_rejected", { defaultValue: "The server rejected the upload" })} (${String(reason)})`;
+			: `${t("api.errors.media_rejected", { defaultValue: "The server rejected the upload" })} (${why})`;
 		return new ApiFunctionError(message, typeof status === "number" ? status : 0, error);
 	}
 	const base = commandErrorToApiFunctionError(error, fallback);

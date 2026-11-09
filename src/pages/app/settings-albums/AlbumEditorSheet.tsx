@@ -1,14 +1,11 @@
 import {
 	AlertTriangle,
-	Clock,
 	Film,
+	Folder,
 	GripVertical,
 	Images,
-	Inbox,
 	Loader2,
-	Play,
 	Trash2,
-	Upload,
 	UserMinus,
 	Users,
 	Video,
@@ -16,7 +13,6 @@ import {
 import { useCallback, useEffect, useRef, useState, type ChangeEvent } from "react";
 import { useTranslation } from "react-i18next";
 import toast from "react-hot-toast";
-import { fetch as tauriFetch } from "@tauri-apps/plugin-http";
 import {
 	DndContext,
 	PointerSensor,
@@ -33,26 +29,36 @@ import {
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import { useApiFunctions } from "../../../hooks/useApiFunctions";
-import { CameraFilled, CameraPlusFilled, ImagesFilled } from "../../../components/icons/FilledIcons";
+import { usePreferences } from "../../../contexts/PreferencesContext";
+import { CameraFilled, ImagesFilled, InboxFilled } from "../../../components/icons/FilledIcons";
 import { ConfirmDialog } from "../../../components/ui/confirm-dialog";
 import { BottomSheet, SHEET_ICON_BUTTON_CLASS, SheetClose, SheetCloseButton, SHEET_FOOTER_CLASS, sheetButtonClass } from "../../../components/ui/bottom-sheet";
-import { NATIVE_SHEET_BG, SheetActionList, afterSheetClose } from "../../../components/ui/action-sheet";
+import { NATIVE_SHEET_BG, afterSheetClose } from "../../../components/ui/action-sheet";
 import { SheetSection, SheetTextInput } from "../../../components/ui/sheet-section";
 import { ProfileImage } from "../../../components/ui/profile-image";
+import { MediaUploadOverlay } from "../../../components/ui/progress-ring";
 import type { Album, AlbumDetail, AlbumLimits, AlbumMedia } from "../../../types/albums";
 import { getCachedMediaUri, getDrawerMediaKey } from "../../../services/mediaStore";
 import { appLog } from "../../../utils/logger";
 import { getThumbImageUrl, validateMediaHash } from "../../../utils/media";
-import { proxyMediaUrl } from "../../../utils/mediaProxy";
 import {
-	DrawerActionBar,
-	DrawerActionButton,
+	DrawerAddTile,
+	type DrawerAddAction,
+	DrawerAddButton,
 	DrawerEmptyState,
 	DrawerGridSkeleton,
 	DrawerHeader,
+	DrawerMediaPreview,
+	DrawerMediaTile,
+	MediaPreviewFallback,
+	drawerGridClass,
+	useDrawerMediaPreview,
 } from "../chat/drawerUi";
+import { useUploadTiles } from "../chat/useUploadTiles";
 import type { DrawerMedia } from "../chat/ChatDrawerPanel";
+import { resolveVideoEdit } from "../../../services/videoEdit";
 import { AlbumDrawerPickerSheet } from "./AlbumDrawerPickerSheet";
+import { MediaEditSheet } from "../chat/MediaEditSheet";
 import {
 	buildMultipartBody,
 	countAlbumMedia,
@@ -60,7 +66,7 @@ import {
 	getVideodimensions,
 	getVideoDurationMs,
 } from "./settingsAlbumsUtils";
-import { useOwnDrawerMedia } from "./useOwnDrawerMedia";
+import { downloadDrawerMedia, useOwnDrawerMedia } from "./useOwnDrawerMedia";
 
 type SortableAlbumMediaItemProps = {
 	item: AlbumMedia;
@@ -68,14 +74,20 @@ type SortableAlbumMediaItemProps = {
 	isReordering: boolean;
 	isDeleting: boolean;
 	onDeleteClick: () => void;
+	/** From useDrawerMediaPreview, for the hold-to-peek. */
+	bindPreview: ReturnType<typeof useDrawerMediaPreview>["bind"];
+	consumePreviewClick: () => boolean;
 };
 
+/** An album item as a drawer tile (delete, peek), plus the grip to reorder. */
 function SortableAlbumMediaItem({
 	item,
 	index,
 	isReordering,
 	isDeleting,
 	onDeleteClick,
+	bindPreview,
+	consumePreviewClick,
 }: SortableAlbumMediaItemProps) {
 	const { t } = useTranslation();
 	const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
@@ -87,7 +99,7 @@ function SortableAlbumMediaItem({
 	};
 
 	const imageUrl = item.thumbUrl || item.url || item.coverUrl || "";
-	const isVideo = item.contentType?.startsWith("video/");
+	const isVideo = item.contentType?.startsWith("video/") ?? false;
 	const isProcessing = item.processing;
 	const isRejected = item.rejectionId != null;
 	// A freshly uploaded video has no preview until the server finishes
@@ -96,74 +108,64 @@ function SortableAlbumMediaItem({
 	// The album poll swaps in a fresh URL once processing is done; try that one.
 	useEffect(() => setPreviewFailed(false), [imageUrl]);
 	const showPreview = Boolean(imageUrl) && !isProcessing && !previewFailed;
+	// The peek shows the full media: the video itself, the full-size photo.
+	const peekSrc = (isVideo ? item.url : item.url || imageUrl) ?? "";
 
 	return (
-		<div
-			ref={setNodeRef}
-			style={style}
-			className={`relative overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--surface-2)] ${isDragging ? "z-10 opacity-40" : ""}`}
-		>
-			{showPreview ? (
-				<img
-					src={proxyMediaUrl(imageUrl)}
-					alt={t("settings_albums.media_alt", { index: index + 1 })}
-					onError={() => setPreviewFailed(true)}
-					className={`aspect-square w-full object-cover ${isRejected ? "opacity-40 grayscale" : ""}`}
-				/>
-			) : (
-				<div className="flex aspect-square w-full flex-col items-center justify-center gap-1.5 bg-[var(--surface)] text-[var(--text-muted)]">
-					{isVideo ? <Film className="h-7 w-7 opacity-50" /> : <Images className="h-7 w-7 opacity-50" />}
-					{isProcessing ? <Loader2 className="h-3.5 w-3.5 animate-spin opacity-70" /> : null}
-				</div>
-			)}
-
-			{isVideo && showPreview && (
-				<div className="pointer-events-none absolute inset-0 flex items-center justify-center">
-					<div className="flex h-8 w-8 items-center justify-center rounded-full bg-black/60 backdrop-blur-sm">
-						<Play className="h-4 w-4 fill-white text-white" />
+		<div ref={setNodeRef} style={style} className={isDragging ? "relative z-10 opacity-40" : undefined}>
+			<DrawerMediaTile
+				src={imageUrl}
+				isVideo={isVideo}
+				posterSrc={isVideo ? imageUrl : undefined}
+				alt={t("settings_albums.media_alt", { index: index + 1 })}
+				mediaClassName={isRejected ? "opacity-40 grayscale" : ""}
+				// A preview that fails to load shows the tile's own "no preview";
+				// this only keeps the peek from opening it.
+				onMediaError={() => setPreviewFailed(true)}
+				placeholder={isProcessing ? (
+					<div className="flex h-full w-full items-center justify-center text-[var(--text-muted)]">
+						{isVideo ? <Film className="h-7 w-7 opacity-50" /> : <Images className="h-7 w-7 opacity-50" />}
+						{/* Styled like the upload before it (see useUploadTiles), the ring
+						    spinning: the server doesn't say how far along it is. */}
+						<MediaUploadOverlay progress={null} label={t("settings_albums.processing", { defaultValue: "Processing" })} />
 					</div>
-				</div>
-			)}
-
-			{(isProcessing || isRejected) && (
-				<div className="absolute left-1.5 top-1.5">
-					<span
-						className={[
-							"inline-flex items-center gap-0.5 rounded-md px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-white shadow-sm",
-							isRejected ? "bg-red-500/90" : "bg-amber-500/90",
-						].join(" ")}
-					>
-						{isRejected ? (
-							<AlertTriangle className="h-2.5 w-2.5" />
-						) : (
-							<Clock className="h-2.5 w-2.5" />
-						)}
-						{isRejected
-							? t("settings_albums.rejected", { defaultValue: "Rejected" })
-							: t("settings_albums.processing", { defaultValue: "Processing" })}
-					</span>
-				</div>
-			)}
-
-			{!isReordering && (
-				<div
-					{...attributes}
-					{...listeners}
-					className="absolute right-1.5 top-1.5 cursor-grab touch-none rounded-lg bg-black/40 p-1.5 text-white backdrop-blur-sm active:cursor-grabbing"
-				>
-					<GripVertical className="h-3 w-3" />
-				</div>
-			)}
-
-			<button
-				type="button"
-				onClick={onDeleteClick}
-				disabled={isDeleting || isReordering}
-				className="absolute bottom-1.5 right-1.5 inline-flex h-6 w-6 items-center justify-center rounded-md bg-black/50 text-white backdrop-blur-sm disabled:opacity-30"
-				title={t("settings_albums.delete")}
+				) : !imageUrl ? (
+					<MediaPreviewFallback isVideo={isVideo} />
+				) : undefined}
+				previewProps={showPreview && peekSrc ? bindPreview({ src: peekSrc, isVideo, placeholderSrc: isVideo ? undefined : imageUrl }) : undefined}
+				consumePreviewClick={consumePreviewClick}
+				busy={isDeleting}
+				onDelete={isReordering ? undefined : onDeleteClick}
+				isDeleting={isDeleting}
+				deleteLabel={t("settings_albums.delete")}
 			>
-				<Trash2 className="h-3 w-3" />
-			</button>
+				{isRejected && (
+					// Bottom left: the top corners hold delete and the grip.
+					<div className="absolute bottom-1.5 start-1.5 max-w-[calc(100%-0.75rem)]">
+						<span className="inline-flex max-w-full items-center gap-0.5 rounded-md bg-red-500/90 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-white shadow-sm">
+							<AlertTriangle className="h-2.5 w-2.5 shrink-0" />
+							<span className="truncate">{t("settings_albums.rejected", { defaultValue: "Rejected" })}</span>
+						</span>
+					</div>
+				)}
+
+				{!isReordering && (
+					<div
+						{...attributes}
+						{...listeners}
+						// The grip drags; it mustn't also start the tile's hold-to-peek.
+						onPointerDown={(event) => {
+							listeners?.onPointerDown?.(event);
+							event.stopPropagation();
+						}}
+						onClick={(event) => event.stopPropagation()}
+						// Placed and drawn like the tile's corner buttons (see DrawerTileCornerButton).
+						className="absolute end-1.5 top-1.5 z-[1] inline-flex h-5 w-5 cursor-grab touch-none items-center justify-center rounded-full bg-black/60 text-white active:cursor-grabbing"
+					>
+						<GripVertical className="h-3 w-3" />
+					</div>
+				)}
+			</DrawerMediaTile>
 		</div>
 	);
 }
@@ -212,15 +214,24 @@ export function AlbumEditorSheet({
 }: AlbumEditorSheetProps) {
 	const { t } = useTranslation();
 	const apiFunctions = useApiFunctions();
+	const { notifyAlbumUpdates } = usePreferences();
 	const albumId = album.albumId;
 	const [fetchedLimits, setFetchedLimits] = useState<AlbumLimits | null>(null);
 	const limits = limitsProp !== undefined ? limitsProp : fetchedLimits;
+	// Album videos get trimmed to the plan's length (it isn't enforced server-side).
+	const maxVideoMs = limits?.maxVideoLength ?? Number.POSITIVE_INFINITY;
 	const [albumName, setAlbumName] = useState(album.albumName?.trim() ?? "");
 	const [editingName, setEditingName] = useState(album.albumName?.trim() ?? "");
 	const [isSavingEdit, setIsSavingEdit] = useState(false);
 	const [detail, setDetail] = useState<AlbumDetail | undefined>(initialDetail);
 	const [isLoadingDetails, setIsLoadingDetails] = useState(false);
-	const [isUploading, setIsUploading] = useState(false);
+	// Files on their way into the album, as placeholder tiles with their progress.
+	const uploadTiles = useUploadTiles();
+	const isUploading = uploadTiles.isUploading;
+	const { preview: mediaPreview, bind: bindPreview, consumeClick: consumePreviewClick } = useDrawerMediaPreview();
+	const [editingFiles, setEditingFiles] = useState<File[] | null>(null);
+	const mediaEditDoneRef = useRef<((edited: File[] | null) => void) | null>(null);
+	const editedFilesRef = useRef<File[]>([]);
 	const [isReordering, setIsReordering] = useState(false);
 	const [deletingContentId, setDeletingContentId] = useState<string | null>(null);
 	const [confirmDeleteContentId, setConfirmDeleteContentId] = useState<string | null>(null);
@@ -236,7 +247,6 @@ export function AlbumEditorSheet({
 	const [isDrawerPickerOpen, setIsDrawerPickerOpen] = useState(false);
 	const [isAddingFromDrawer, setIsAddingFromDrawer] = useState(false);
 	const drawerPickerCloseRef = useRef<(() => void) | null>(null);
-	const [isAddSheetOpen, setIsAddSheetOpen] = useState(false);
 
 	// Shares
 	const [shareProfiles, setShareProfiles] = useState<ShareProfileListItem[] | null>(null);
@@ -319,7 +329,7 @@ export function AlbumEditorSheet({
 							const displayName =
 								typeof nameRaw === "string" && nameRaw.trim().length > 0
 									? nameRaw.trim()
-									: t("settings_albums.share_name_fallback", { defaultValue: "Someone" });
+									: t("common.unknown_display_name");
 							const hashRaw = (p as { profileImageMediaHash?: unknown }).profileImageMediaHash;
 							const avatarUrl =
 								typeof hashRaw === "string" && validateMediaHash(hashRaw)
@@ -441,30 +451,6 @@ export function AlbumEditorSheet({
 		void loadDrawerMedia(true);
 	};
 
-	// Drawer item as a File, for uploading it to an album directly. A locally
-	// cached copy is a base64 data: URI, decoded here without a fetch; the CDN
-	// URL goes through plugin-http, the webview's own fetch is blocked by CORS.
-	const downloadDrawerMedia = async (item: DrawerMedia): Promise<File | null> => {
-		const extension = item.contentType.split("/")[1]?.split(";")[0] || "mp4";
-		const fileName = `drawer-${item.id}.${extension}`;
-		try {
-			const cachedUri = getCachedMediaUri(getDrawerMediaKey(item.id));
-			const base64 = cachedUri?.startsWith("data:") ? cachedUri.slice(cachedUri.indexOf(",") + 1) : null;
-			if (base64) {
-				const binary = atob(base64);
-				const bytes = new Uint8Array(binary.length);
-				for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
-				return new File([bytes], fileName, { type: item.contentType });
-			}
-			const response = await tauriFetch(item.url);
-			if (!response.ok) throw new Error(`Download failed (${response.status})`);
-			return new File([await response.arrayBuffer()], fileName, { type: item.contentType });
-		} catch (downloadError) {
-			appLog.warn(`[AlbumEditorSheet] failed to download drawer media ${item.id}`, downloadError);
-			return null;
-		}
-	};
-
 	// Applies the album's limits (free slots, size, video count and length)
 	// to files about to be uploaded; toasts and drops the ones that don't fit.
 	const filterAlbumUploads = async (files: File[]): Promise<File[]> => {
@@ -521,18 +507,11 @@ export function AlbumEditorSheet({
 				}
 				videoSlotsLeft -= 1;
 
-				if (limits?.maxVideoLength != null || limits?.minVideoLength != null) {
+				// A video over maxVideoLength gets trimmed to it (see uploadFilesToAlbum).
+				if (limits?.minVideoLength != null) {
 					const durationMs = await getVideoDurationMs(file);
 					if (durationMs != null) {
-						if (limits.maxVideoLength != null && durationMs > limits.maxVideoLength) {
-							toast.error(t("settings_albums.error_video_too_long", {
-								defaultValue: "\"{{name}}\" is too long (max {{max}}).",
-								name: file.name,
-								max: formatMs(limits.maxVideoLength),
-							}));
-							continue;
-						}
-						if (limits.minVideoLength != null && durationMs < limits.minVideoLength) {
+						if (durationMs < limits.minVideoLength) {
 							toast.error(t("settings_albums.error_video_too_short", {
 								defaultValue: "\"{{name}}\" is too short (min {{min}}).",
 								name: file.name,
@@ -550,69 +529,146 @@ export function AlbumEditorSheet({
 		return valid;
 	};
 
-	const uploadFilesToAlbum = async (files: File[]) => {
-		for (const file of files) {
-			const multipart = await buildMultipartBody(file);
-			const isVideo = file.type.startsWith("video/");
-			const dims = isVideo ? await getVideodimensions(file) : undefined;
-			await apiFunctions.uploadOwnAlbumContent({ albumId, multipart, ...dims });
+	// One file into the album, under its placeholder tile. Videos stream from
+	// disk, cut to the editor's pick or the plan's maxVideoLength and upright
+	// (see videoEdit); a binary without streaming sends them whole instead.
+	// A failure is reported and drops the tile; resolves whether it went in.
+	const uploadFileToAlbum = async (file: File, tileId: number): Promise<boolean> => {
+		const isVideo = file.type.startsWith("video/");
+		try {
+			await uploadTiles.track(tileId, isVideo, async (onProgress) => {
+				if (isVideo) {
+					const streamed = await apiFunctions.uploadOwnAlbumVideo({
+						albumId,
+						file,
+						isFresh: notifyAlbumUpdates,
+						edit: await resolveVideoEdit(file, maxVideoMs),
+						onLandscapeKept: () =>
+							toast(t("chat.attachments.landscape_kept", {
+								defaultValue: "This device can't turn the video upright, so it was sent in landscape. The official app may not show it properly.",
+							})),
+						onProgress,
+						...(limits?.maxContentSize != null ? { maxBodySize: limits.maxContentSize } : {}),
+					});
+					if (streamed) return;
+				}
+				const multipart = await buildMultipartBody(file);
+				const dims = isVideo ? await getVideodimensions(file) : undefined;
+				await apiFunctions.uploadOwnAlbumContent({ albumId, multipart, isFresh: notifyAlbumUpdates, ...dims });
+			});
+			return true;
+		} catch (uploadError) {
+			appLog.error("[AlbumEditorSheet] upload failed", uploadError);
+			toast.error(uploadError instanceof Error ? uploadError.message : t("settings_albums.error_upload_fallback"));
+			uploadTiles.drop([tileId]);
+			return false;
 		}
 	};
 
+	// Each file shows as a tile in the grid right away; they upload one after
+	// another, and the tiles go once the album has reloaded.
+	const uploadFilesToAlbum = async (files: File[]): Promise<number> => {
+		const ids = uploadTiles.add(files);
+		let added = 0;
+		try {
+			for (const [index, file] of files.entries()) {
+				if (await uploadFileToAlbum(file, ids[index])) added += 1;
+			}
+			if (added > 0) await loadDetails();
+		} finally {
+			uploadTiles.drop(ids);
+		}
+		return added;
+	};
+
+	// Like an upload from the device: the picker closes right away and the
+	// picked media show as placeholder tiles in the album until it reloaded.
 	// Photos go in by drawer id. Videos can't (the by-id endpoint doesn't add
 	// them), so they're downloaded from the drawer and uploaded directly.
 	const handleAddFromDrawer = async (mediaIds: number[]) => {
-		if (mediaIds.length === 0) return;
 		const drawerById = new Map(drawerMedia.map((item) => [item.id, item]));
-		const videoIds = mediaIds.filter((id) => drawerById.get(id)?.contentType.startsWith("video/"));
-		const imageIds = mediaIds.filter((id) => !videoIds.includes(id));
+		const items = mediaIds.flatMap((id) => drawerById.get(id) ?? []);
+		if (items.length === 0) return;
+		// Animated close; falls back to unmounting if the sheet is already gone.
+		if (drawerPickerCloseRef.current) drawerPickerCloseRef.current();
+		else setIsDrawerPickerOpen(false);
+
+		const isVideoItem = (item: DrawerMedia) => item.contentType.startsWith("video/");
+		const tileIds = uploadTiles.add(items.map((item) => ({
+			src: getCachedMediaUri(getDrawerMediaKey(item.id)) ?? item.url,
+			isVideo: isVideoItem(item),
+		})));
+		const tileFor = new Map(items.map((item, index) => [item.id, tileIds[index]]));
+		const images = items.filter((item) => !isVideoItem(item));
+		const videos = items.filter(isVideoItem);
 		setIsAddingFromDrawer(true);
+		let added = 0;
 		try {
-			let added = 0;
-			if (imageIds.length > 0) {
-				await apiFunctions.addOwnAlbumContentByIds({ albumId, ids: imageIds });
-				added += imageIds.length;
-			}
-			if (videoIds.length > 0) {
-				const downloaded: File[] = [];
-				for (const id of videoIds) {
-					const item = drawerById.get(id);
-					const file = item ? await downloadDrawerMedia(item) : null;
-					if (file) downloaded.push(file);
-					else toast.error(t("settings_albums.error_drawer_video_download", { defaultValue: "Couldn't load a video from your drawer." }));
+			if (images.length > 0) {
+				// One request for all photos; each tile shows it.
+				const request = apiFunctions.addOwnAlbumContentByIds({ albumId, ids: images.map((item) => item.id), isFresh: notifyAlbumUpdates });
+				try {
+					await Promise.all(images.map((item) => uploadTiles.track(tileFor.get(item.id)!, false, () => request)));
+					added += images.length;
+				} catch (addError) {
+					toast.error(addError instanceof Error ? addError.message : t("settings_albums.error_upload_fallback"));
+					uploadTiles.drop(images.map((item) => tileFor.get(item.id)!));
 				}
-				const valid = await filterAlbumUploads(downloaded);
-				await uploadFilesToAlbum(valid);
-				added += valid.length;
 			}
-			if (added > 0) toast.success(t("settings_albums.toast_added_from_drawer", { count: added }));
-			await loadDetails();
-			// Animated close; falls back to unmounting if the sheet is already gone.
-			if (drawerPickerCloseRef.current) drawerPickerCloseRef.current();
-			else setIsDrawerPickerOpen(false);
-		} catch (addError) {
-			toast.error(addError instanceof Error ? addError.message : t("settings_albums.error_upload_fallback"));
+			if (videos.length > 0) {
+				// All downloaded first, so the album's limits see them together.
+				const tileForFile = new Map<File, number>();
+				for (const item of videos) {
+					const file = await downloadDrawerMedia(item);
+					if (file) {
+						tileForFile.set(file, tileFor.get(item.id)!);
+					} else {
+						toast.error(t("settings_albums.error_drawer_video_download", { defaultValue: "Couldn't load a video from your drawer." }));
+						uploadTiles.drop([tileFor.get(item.id)!]);
+					}
+				}
+				const valid = await filterAlbumUploads([...tileForFile.keys()]);
+				uploadTiles.drop([...tileForFile].filter(([file]) => !valid.includes(file)).map(([, id]) => id));
+				for (const file of valid) {
+					if (await uploadFileToAlbum(file, tileForFile.get(file)!)) added += 1;
+				}
+			}
+			if (added > 0) {
+				toast.success(t("settings_albums.toast_added_from_drawer", { count: added }));
+				await loadDetails();
+			}
 		} finally {
+			uploadTiles.drop(tileIds);
 			setIsAddingFromDrawer(false);
 		}
+	};
+
+	// Picked files go through the edit sheet first, all in one; resolves the
+	// edited files, or null when it was closed before the last one.
+	const editFiles = (files: File[]) =>
+		new Promise<File[] | null>((resolve) => {
+			editedFilesRef.current = [];
+			mediaEditDoneRef.current = resolve;
+			setEditingFiles(files);
+		});
+	const finishMediaEdit = (confirmed: boolean) => {
+		const done = mediaEditDoneRef.current;
+		mediaEditDoneRef.current = null;
+		setEditingFiles(null);
+		done?.(confirmed ? editedFilesRef.current : null);
 	};
 
 	const handleUploadInputChange = async (event: ChangeEvent<HTMLInputElement>) => {
 		const files = Array.from(event.target.files ?? []);
 		event.target.value = "";
 		if (!files.length || isUploading) return;
-		const valid = await filterAlbumUploads(files);
-		if (valid.length === 0) return;
-		setIsUploading(true);
-		try {
-			await uploadFilesToAlbum(valid);
-			toast.success(t("settings_albums.toast_picture_added", { count: valid.length }));
-			await loadDetails();
-		} catch (uploadError) {
-			toast.error(uploadError instanceof Error ? uploadError.message : t("settings_albums.error_upload_fallback"));
-		} finally {
-			setIsUploading(false);
-		}
+		const filtered = await filterAlbumUploads(files);
+		if (filtered.length === 0) return;
+		const valid = await editFiles(filtered);
+		if (!valid || valid.length === 0) return;
+		// Each file's failure is reported (and its tile dropped) as it happens.
+		const added = await uploadFilesToAlbum(valid);
+		if (added > 0) toast.success(t("settings_albums.toast_picture_added", { count: added }));
 	};
 
 	const reorderAlbumContent = async (content: AlbumMedia[], fromIndex: number, toIndex: number) => {
@@ -714,17 +770,44 @@ export function AlbumEditorSheet({
 	};
 
 	const showDetailsSkeleton = isLoadingDetails && !detail;
+	const albumContent = detail?.content ?? [];
 
-	// Add actions, as in the collection editor: the bar above the media, or
-	// the empty state's buttons. "Add media" asks: from the device or the drawer.
-	const addActions = [
-		{ key: "photo", icon: <CameraFilled className="h-4 w-4" />, label: t("chat_drawer.take_photo"), onClick: () => cameraInputRef.current?.click() },
-		{ key: "video", icon: <Video className="h-4 w-4 fill-current" />, label: t("chat_drawer.record_video", { defaultValue: "Record video" }), onClick: () => cameraVideoInputRef.current?.click() },
+	// Add actions, as in the collection editor: the add tile's sheet lists
+	// them all (the device and the drawer each their own), as do the empty
+	// state's buttons. File pickers are clicked synchronously, as user gestures.
+	const addActions: DrawerAddAction[] = [
+		{
+			key: "photo",
+			icon: <CameraFilled className="h-4 w-4" />,
+			iconClassName: "bg-sky-500/15 text-sky-400",
+			label: t("chat_drawer.take_photo"),
+			description: t("chat_drawer.take_photo_desc", { defaultValue: "Take a new one with the camera" }),
+			onClick: () => cameraInputRef.current?.click(),
+		},
+		{
+			key: "video",
+			icon: <Video className="h-4 w-4 fill-current" />,
+			iconClassName: "bg-rose-500/15 text-rose-400",
+			label: t("chat_drawer.record_video", { defaultValue: "Record video" }),
+			description: t("chat_drawer.record_video_desc", { defaultValue: "Record a new one with the camera" }),
+			onClick: () => cameraVideoInputRef.current?.click(),
+		},
 		{
 			key: "upload",
-			icon: isUploading ? <Loader2 className="h-4 w-4 animate-spin" /> : <CameraPlusFilled className="h-4 w-4" />,
-			label: isUploading ? t("settings_albums.uploading") : t("chat_drawer.add_media", { defaultValue: "Add media" }),
-			onClick: () => setIsAddSheetOpen(true),
+			icon: <Folder className="h-4 w-4 fill-current" />,
+			iconClassName: "bg-violet-500/15 text-violet-400",
+			label: t("settings_albums.add_upload", { defaultValue: "Upload from device" }),
+			description: t("settings_albums.add_upload_desc", { defaultValue: "Photos and videos stored on this device" }),
+			onClick: () => uploadInputRef.current?.click(),
+		},
+		{
+			key: "drawer",
+			icon: <InboxFilled className="h-4 w-4" />,
+			iconClassName: "bg-emerald-500/15 text-emerald-400",
+			label: t("settings_albums.add_from_drawer", { defaultValue: "Add from Drawer" }),
+			description: t("settings_albums.add_drawer_desc", { defaultValue: "Media saved in your chat drawer" }),
+			// Once the add sheet has popped its history entry (from the empty state's button, right away).
+			onClick: () => afterSheetClose(openDrawerPicker),
 		},
 	];
 	const isAdding = isUploading || isAddingFromDrawer;
@@ -737,7 +820,9 @@ export function AlbumEditorSheet({
 				expandable
 				isDesktop={isDesktop}
 				bg={NATIVE_SHEET_BG}
-				panelClassName="px-4"
+				// Like the chat drawer: a min height on desktop, so the panel doesn't
+				// shrink from the loading skeleton down to the empty state.
+				panelClassName={isDesktop ? "min-h-[55dvh] px-4" : "px-4"}
 			>
 				<DrawerHeader
 					className="mb-1"
@@ -818,34 +903,43 @@ export function AlbumEditorSheet({
 					className="hidden"
 				/>
 
-				<div className="-mx-4 min-h-0 flex-1 overflow-y-auto px-4" data-lenis-prevent>
+				<div className="-mx-4 flex min-h-0 flex-1 flex-col overflow-y-auto px-4" data-lenis-prevent>
 					{showDetailsSkeleton ? (
 						<DrawerGridSkeleton isDesktop={isDesktop} />
-					) : !detail || detail.content.length === 0 ? (
+					) : (!detail || detail.content.length === 0) && !isUploading ? (
 						<DrawerEmptyState
+							className="my-auto"
 							icon={<ImagesFilled className="h-5 w-5" />}
 							title={t("settings_albums.no_media")}
 							hint={t("settings_albums.no_media_hint", { defaultValue: "Take a photo or video, upload from your device, or add media from your chat drawer." })}
 						>
-							<div className="grid w-full max-w-sm grid-cols-3 gap-2">
-								{addActions.map((action) => (
-									<DrawerActionButton key={action.key} icon={action.icon} label={action.label} onClick={action.onClick} disabled={isAdding} />
-								))}
-							</div>
+							<DrawerAddButton
+								label={t("chat_drawer.add_media", { defaultValue: "Add media" })}
+								actions={addActions}
+								isDesktop={isDesktop}
+								disabled={isAdding}
+							/>
 						</DrawerEmptyState>
 					) : (
 						<DndContext
 							sensors={sensors}
-							onDragEnd={handleAlbumMediaDragEnd(detail.content)}
+							onDragEnd={handleAlbumMediaDragEnd(albumContent)}
 						>
 							<SortableContext
-								items={detail.content.map((item) => item.contentId)}
+								items={albumContent.map((item) => item.contentId)}
 								strategy={rectSortingStrategy}
 							>
-								<div className={`grid gap-2 ${isDesktop ? "grid-cols-6" : "grid-cols-3"}`}>
-									{/* Add actions as the grid's first row, like the collection editor. */}
-									<DrawerActionBar actions={addActions} disabled={isAdding} />
-									{detail.content.map((item, index) => (
+								{/* The media drawer's grid and tiles. */}
+								<div className={drawerGridClass(isDesktop)}>
+									{/* The add tile first, like the collection editor. */}
+									<DrawerAddTile
+										label={t("chat_drawer.add_media", { defaultValue: "Add media" })}
+										actions={addActions}
+										isDesktop={isDesktop}
+										disabled={isAdding}
+									/>
+									{uploadTiles.tiles}
+									{albumContent.map((item, index) => (
 										<SortableAlbumMediaItem
 											key={`${albumId}-${item.contentId}`}
 											item={item}
@@ -853,6 +947,8 @@ export function AlbumEditorSheet({
 											isReordering={isReordering}
 											isDeleting={deletingContentId === item.contentId}
 											onDeleteClick={() => setConfirmDeleteContentId(item.contentId)}
+											bindPreview={bindPreview}
+											consumePreviewClick={consumePreviewClick}
 										/>
 									))}
 								</div>
@@ -861,35 +957,9 @@ export function AlbumEditorSheet({
 					)}
 				</div>
 
+				<DrawerMediaPreview media={mediaPreview} />
 			</BottomSheet>
 
-			{isAddSheetOpen && (
-				<SheetActionList
-					title={t("chat_drawer.add_media", { defaultValue: "Add media" })}
-					onClose={() => setIsAddSheetOpen(false)}
-					isDesktop={isDesktop}
-					actions={[
-						{
-							key: "upload",
-							icon: Upload,
-							iconClassName: "bg-sky-500/15 text-sky-400",
-							label: t("settings_albums.add_upload", { defaultValue: "Upload from device" }),
-							description: t("settings_albums.add_upload_desc", { defaultValue: "Photos and videos stored on this device" }),
-							// Clicked synchronously so it still counts as a user gesture.
-							onSelect: () => uploadInputRef.current?.click(),
-						},
-						{
-							key: "drawer",
-							icon: Inbox,
-							iconClassName: "bg-violet-500/15 text-violet-400",
-							label: t("settings_albums.add_from_drawer", { defaultValue: "Add from Drawer" }),
-							description: t("settings_albums.add_drawer_desc", { defaultValue: "Media saved in your chat drawer" }),
-							// Once this sheet has popped its history entry.
-							onSelect: () => afterSheetClose(openDrawerPicker),
-						},
-					]}
-				/>
-			)}
 
 			{isSharesSheetOpen && (
 				<BottomSheet
@@ -947,11 +1017,11 @@ export function AlbumEditorSheet({
 									return (
 										<div
 											key={profile.profileId}
-											className="flex items-center gap-3 px-4 py-2.5 transition-colors hover:bg-[var(--surface-2)]"
+											className="flex items-center gap-3 px-4 py-2.5 transition-colors hover-fill"
 										>
 											<SheetClose
 												onClick={() => { pendingProfileIdRef.current = profile.profileId; }}
-												className="flex min-w-0 flex-1 items-center gap-3 text-left active:opacity-70"
+												className="flex min-w-0 flex-1 items-center gap-3 text-start active:opacity-70"
 											>
 												<div className="h-12 w-12 shrink-0 rounded-full overflow-hidden bg-[var(--surface-2)] drop-shadow-sm">
 													<ProfileImage src={profile.avatarUrl} alt={profile.displayName} />
@@ -1037,6 +1107,9 @@ export function AlbumEditorSheet({
 				const remainingSlots = limits?.maxContentItemsPerAlbum != null
 					? Math.max(0, limits.maxContentItemsPerAlbum - mediaCounts.total)
 					: Infinity;
+				const remainingVideoSlots = limits?.maxVideosPerAlbum != null
+					? Math.max(0, limits.maxVideosPerAlbum - mediaCounts.videos)
+					: Infinity;
 				return (
 					<AlbumDrawerPickerSheet
 						media={drawerMedia}
@@ -1048,10 +1121,29 @@ export function AlbumEditorSheet({
 						closeRef={drawerPickerCloseRef}
 						isSubmitting={isAddingFromDrawer}
 						remainingSlots={remainingSlots}
+						remainingVideoSlots={remainingVideoSlots}
 						isDesktop={isDesktop}
 					/>
 				);
 			})() : null}
+			{editingFiles && (
+				<MediaEditSheet
+					files={editingFiles}
+					photoLabel={t("settings_albums.edit_photo", { defaultValue: "Edit photo" })}
+					videoLabel={t("settings_albums.edit_video", { defaultValue: "Edit video" })}
+					confirmLabel={t("settings_albums.add_video", { defaultValue: "Add to album" })}
+					maxVideoMs={maxVideoMs}
+					// Album uploads take neither.
+					showTakenOnGrindr={false}
+					showLooping={false}
+					// An album takes a single video, so a split has nowhere to go.
+					allowVideoSplit={false}
+					isDesktop={isDesktop}
+					zIndex="z-[70]"
+					onConfirmFile={(edit) => editedFilesRef.current.push(edit.file)}
+					onDone={finishMediaEdit}
+				/>
+			)}
 		</>
 	);
 }

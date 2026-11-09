@@ -7,13 +7,13 @@ import { PageHeader } from "../../components/PageHeader";
 import { ConfirmDialog } from "../../components/ui/confirm-dialog";
 import { NATIVE_SHEET_BG, afterSheetClose } from "../../components/ui/action-sheet";
 import { BottomSheet, SheetClose, SheetCloseButton, SHEET_FOOTER_CLASS, sheetButtonClass } from "../../components/ui/bottom-sheet";
-import { SHEET_FIELD_CLASS, SheetChip, SheetSearchInput, SheetSection } from "../../components/ui/sheet-section";
+import { SHEET_FIELD_CLASS, SheetChip, SheetSection } from "../../components/ui/sheet-section";
 import { useApi } from "../../hooks/useApi";
 import { useApiFunctions } from "../../hooks/useApiFunctions";
 import { useDesktopBreakpoint } from "../../hooks/useDesktopBreakpoint";
 import { cn } from "../../utils/cn";
 import { DrawerEmptyState } from "./chat/drawerUi";
-import { CodeBlock, HEADER_ICON_BUTTON_CLASS, copyText, formatTimestamp } from "./settings-dev/inspectorUi";
+import { CodeBlock, HEADER_ICON_BUTTON_CLASS, PageSearchBar, copyText, formatTimestamp } from "./settings-dev/inspectorUi";
 import {
 	clearApiTraceEntries,
 	exportApiTraceEntries,
@@ -83,20 +83,20 @@ function EntryDetailSheet({
 			bg={NATIVE_SHEET_BG}
 			panelClassName={isDesktop ? "max-h-[85dvh] px-4" : "px-4"}
 		>
-			<div className="mb-3 flex shrink-0 items-start justify-between gap-3">
+			<div className="mb-3 flex shrink-0 items-center justify-between gap-3">
 				<div className="min-w-0">
-					<div className="flex items-center gap-2">
-						<span className={cn("shrink-0 rounded-md px-1.5 py-0.5 font-mono text-[10px] font-bold", methodBadgeClass(entry.method))}>
+					<p className="break-all font-mono text-sm font-semibold text-[var(--text)]">{entry.path}</p>
+					<div className="mt-0.5 flex flex-wrap items-center gap-x-1.5 gap-y-1 text-xs leading-snug text-[var(--text-muted)]">
+						<span className={cn("shrink-0 rounded-md px-1.5 py-px font-mono text-[10px] font-bold", methodBadgeClass(entry.method))}>
 							{entry.method}
 						</span>
-						<span className={cn("shrink-0 rounded-full px-2 py-0.5 text-[11px] font-semibold tabular-nums", statusPillClass(entry))}>
+						<span className={cn("shrink-0 rounded-full px-1.5 py-px text-[10px] font-semibold tabular-nums", statusPillClass(entry))}>
 							{entry.status ?? "Error"}
 						</span>
+						<span className="tabular-nums">
+							{formatTimestamp(entry.timestamp)} · {entry.durationMs} ms · {entry.kind === "rest" ? "REST" : "Invoke"}
+						</span>
 					</div>
-					<p className="mt-1.5 break-all font-mono text-sm font-semibold text-[var(--text)]">{entry.path}</p>
-					<p className="mt-0.5 text-xs text-[var(--text-muted)]">
-						{formatTimestamp(entry.timestamp)} · {entry.durationMs} ms · {entry.kind === "rest" ? "REST" : "Invoke"}
-					</p>
 				</div>
 				<SheetCloseButton />
 			</div>
@@ -254,7 +254,7 @@ function ComposerSheet({
 							<div className="relative">
 								<pre
 									className={cn(
-										"min-w-0 whitespace-pre-wrap break-all rounded-xl px-3 py-2.5 pr-10 font-mono text-xs leading-relaxed",
+										"min-w-0 whitespace-pre-wrap break-all rounded-xl px-3 py-2.5 pe-10 font-mono text-xs leading-relaxed",
 										result.ok ? "bg-[var(--surface-2)] text-[var(--text)]" : "bg-red-500/10 text-red-500",
 									)}
 								>
@@ -264,7 +264,7 @@ function ComposerSheet({
 									type="button"
 									onClick={() => copyText(result.text, "Response")}
 									aria-label="Copy response"
-									className="absolute right-1.5 top-1.5 inline-flex h-7 w-7 items-center justify-center rounded-full text-[var(--text-muted)] transition hover:ink-tint-10 hover:text-[var(--text)]"
+									className="absolute end-1.5 top-1.5 inline-flex h-7 w-7 items-center justify-center rounded-full text-[var(--text-muted)] transition hover:ink-tint-10 hover:text-[var(--text)]"
 								>
 									<Copy className="h-3.5 w-3.5" />
 								</button>
@@ -340,30 +340,29 @@ export function ApiInspectorPage() {
 
 	return (
 		<section className="app-screen">
-			<div className="mx-auto grid w-full min-w-0 max-w-4xl gap-5">
-				<PageHeader
-					backTo="/settings"
-					title="API Inspector"
-					subtitle="Every request the app makes, live. Tap one for details, or send your own."
-					subtitleClassName="-mt-3 mb-0"
-					actions={
-						<>
-							<button type="button" onClick={() => void handleExport()} disabled={entries.length === 0 || isExporting} className={HEADER_ICON_BUTTON_CLASS} aria-label="Export" title="Export as JSON">
-								{isExporting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
-							</button>
-							<button type="button" onClick={() => setIsConfirmClearOpen(true)} disabled={entries.length === 0} className={cn(HEADER_ICON_BUTTON_CLASS, "hover:text-red-500")} aria-label="Clear" title="Clear all">
-								<Trash2 className="h-4 w-4" />
-							</button>
-						</>
-					}
-				/>
+			<PageHeader
+				backTo="/settings"
+				title="API Inspector"
+				subtitle="Every request the app makes, live. Tap one for details, or send your own."
+				actions={
+					<>
+						<button type="button" onClick={() => void handleExport()} disabled={entries.length === 0 || isExporting} className={HEADER_ICON_BUTTON_CLASS} aria-label="Export" title="Export as JSON">
+							{isExporting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
+						</button>
+						<button type="button" onClick={() => setIsConfirmClearOpen(true)} disabled={entries.length === 0} className={cn(HEADER_ICON_BUTTON_CLASS, "hover:text-red-500")} aria-label="Clear" title="Clear all">
+							<Trash2 className="h-4 w-4" />
+						</button>
+					</>
+				}
+			/>
 
+			<div className="grid min-w-0 gap-5">
 				{/* New request */}
-				<div className="native-card overflow-hidden">
+				<div className="native-group">
 					<button
 						type="button"
 						onClick={() => setComposerDraft({ method: "GET", path: "", body: "" })}
-						className="flex w-full items-center gap-3 px-4 py-3.5 text-left transition hover:bg-[var(--surface-2)]"
+						className="flex w-full items-center gap-3 px-4 py-3.5 text-start transition hover-fill"
 					>
 						<div className="shrink-0 rounded-2xl accent-tint-15 p-2.5 text-[var(--accent)]">
 							<Send className="h-5 w-5" />
@@ -376,23 +375,21 @@ export function ApiInspectorPage() {
 					</button>
 				</div>
 
-				<div className="grid min-w-0 gap-3">
-					<SheetSearchInput value={query} onChange={setQuery} placeholder="Search path, method, status or error" />
-					<div className="flex flex-wrap gap-2">
-						{filters.map((filter) => (
-							<SheetChip key={filter.value} size="sm" active={kind === filter.value} onClick={() => setKind(filter.value)}>
-								{filter.label}
-							</SheetChip>
-						))}
-					</div>
-				</div>
+				<PageSearchBar value={query} onChange={setQuery} placeholder="Search path, method, status or error" />
 
 				<div className="min-w-0">
-					<div className="mb-2 flex items-center gap-2 px-1">
+					<div className="mb-2 flex flex-wrap items-center gap-2 px-1">
 						<p className="text-xs font-semibold uppercase tracking-widest text-[var(--text-muted)]">Requests</p>
 						<span className="rounded-full ink-tint-10 px-2 py-0.5 text-[10px] font-bold tabular-nums text-[var(--text-muted)]">
 							{filtered.length}
 						</span>
+						<div className="ms-auto flex flex-wrap justify-end gap-1.5">
+							{filters.map((filter) => (
+								<SheetChip key={filter.value} size="sm" active={kind === filter.value} onClick={() => setKind(filter.value)}>
+									{filter.label}
+								</SheetChip>
+							))}
+						</div>
 					</div>
 					{filtered.length === 0 ? (
 						<div className="native-card overflow-hidden px-4">
@@ -406,13 +403,13 @@ export function ApiInspectorPage() {
 							/>
 						</div>
 					) : (
-						<div className="native-card divide-y divide-[var(--border)] overflow-hidden">
+						<div className="native-group">
 							{filtered.map((entry) => (
 								<button
 									key={entry.id}
 									type="button"
 									onClick={() => setOpenEntry(entry)}
-									className="flex w-full min-w-0 items-center gap-3 px-4 py-3 text-left transition hover:bg-[var(--surface-2)]"
+									className="flex w-full min-w-0 items-center gap-3 px-4 py-3 text-start transition hover-fill"
 								>
 									<span className={cn("w-14 shrink-0 rounded-md py-0.5 text-center font-mono text-[10px] font-bold", methodBadgeClass(entry.method))}>
 										{entry.method.length > 6 ? entry.method.slice(0, 6) : entry.method}

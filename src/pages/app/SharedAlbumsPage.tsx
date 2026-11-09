@@ -17,7 +17,7 @@ import type { ConversationEntry } from "../../types/chat";
 import { albumViewerFolderKey, type AlbumViewer, type SharedAlbumItem } from "../../types/shared-albums";
 import type { GetSharedAlbumsInput } from "../../types/api-functions";
 import { getThumbImageUrl, validateMediaHash } from "../../utils/media";
-import { formatDistance, getOnlineStatusMeta } from "./gridpage/utils";
+import { formatDistance, getOnlineStatusLabelArgs, getOnlineStatusMeta } from "./gridpage/utils";
 import { cn } from "../../utils/cn";
 import {
 	captureAlbum,
@@ -92,7 +92,7 @@ function AlbumCard({
 				<button
 					type="button"
 					onClick={onClick}
-					className="relative block aspect-[4/6] w-full text-left"
+					className="relative block aspect-[4/6] w-full text-start"
 				>
 					{previewUrl ? (
 						<img
@@ -107,7 +107,7 @@ function AlbumCard({
 						</div>
 					)}
 					{showsAlbumNumber ? (
-						<div className="absolute left-2 top-2 inline-flex h-6 items-center gap-1 rounded-full bg-black/60 px-2 text-[10px] font-semibold leading-none tabular-nums text-white/85">
+						<div className="absolute start-2 top-2 inline-flex h-6 items-center gap-1 rounded-full bg-black/60 px-2 text-[10px] font-semibold leading-none tabular-nums text-white/85">
 							<Layers className="h-3 w-3" />
 							{item.albumNumber}/{item.totalAlbumsShared}
 						</div>
@@ -151,7 +151,7 @@ function AlbumCard({
 					}}
 					disabled={isDeleting}
 					title={t("shared_albums.delete")}
-					className="absolute right-2 top-2 inline-flex h-6 w-6 items-center justify-center rounded-full bg-black/60 text-white/85 transition hover:bg-red-500/80 hover:text-white disabled:opacity-50"
+					className="absolute end-2 top-2 inline-flex h-6 w-6 items-center justify-center rounded-full bg-black/60 text-white/85 transition hover:bg-red-500/80 hover:text-white disabled:opacity-50"
 				>
 					<Trash2 className="h-3 w-3" />
 				</button>
@@ -164,7 +164,7 @@ export function SharedAlbumsPage() {
 	const { t } = useTranslation();
 	const navigate = useNavigate();
 	const { userId } = useAuth();
-	const { mobileGridColumns, unitsPreset, showAlbumSensitiveContentWarning, openAlbumAsBottomSheet } = usePreferences();
+	const { mobileGridColumns, unitsPreset, showAlbumSensitiveContentWarning, openAlbumAsBottomSheet, showOnlineTimeLeft } = usePreferences();
 	const apiFunctions = useApiFunctions();
 
 	const [isLoading, setIsLoading] = useState(true);
@@ -207,7 +207,7 @@ export function SharedAlbumsPage() {
 
 					profileMap.set(counterparty.profileId, {
 						profileName:
-							entry.data.name?.trim() || t("shared_albums.name_fallback"),
+							entry.data.name?.trim() || t("common.unknown_display_name"),
 						conversationId: entry.data.conversationId ?? null,
 						profileMediaHash: counterparty.mediaHash,
 					});
@@ -231,7 +231,7 @@ export function SharedAlbumsPage() {
 				const profileName =
 					profileMeta?.profileName ||
 					sharedAlbum.profile.name?.trim() ||
-					t("shared_albums.name_fallback");
+					t("common.unknown_display_name");
 
 				return {
 					profileId: sharedAlbum.ownerProfileId,
@@ -318,7 +318,7 @@ export function SharedAlbumsPage() {
 						if (profileId == null) {
 							return null;
 						}
-						let profileName = t("shared_albums.name_fallback");
+						let profileName = t("common.unknown_display_name");
 						let profileMediaHash: string | null = null;
 						if (stored.conversationId) {
 							const conversation = await getConversation(stored.conversationId).catch(() => null);
@@ -429,7 +429,7 @@ export function SharedAlbumsPage() {
 					}),
 				);
 
-				const nameFallback = t("shared_albums.name_fallback");
+				const nameFallback = t("common.unknown_display_name");
 				const applyDetails = (item: SharedAlbumItem): SharedAlbumItem => {
 					const details = detailsById.get(item.profileId);
 					if (!details) return item;
@@ -880,8 +880,9 @@ export function SharedAlbumsPage() {
 	const albumHeader = useMemo(() => {
 		if (!viewer) return undefined;
 		const statusMeta = getOnlineStatusMeta(viewer.lastOnline, viewer.onlineUntil);
+		const onlineLabel = getOnlineStatusLabelArgs(statusMeta, showOnlineTimeLeft);
 		const statusLabel = statusMeta.isOnline
-			? t(statusMeta.labelKey, { count: statusMeta.count })
+			? t(onlineLabel.key, { count: onlineLabel.count })
 			: statusMeta.labelKey === "browse_page.status_offline"
 				? t(statusMeta.labelKey)
 				: t(statusMeta.labelKey, { count: statusMeta.count });
@@ -894,14 +895,14 @@ export function SharedAlbumsPage() {
 			isOnlineEndingSoon: statusMeta.isEndingSoon,
 			onClick: () => handleViewProfile(viewer.profileId),
 		};
-	}, [viewer, t, unitsPreset, handleViewProfile]);
+	}, [viewer, t, unitsPreset, showOnlineTimeLeft, handleViewProfile]);
 
 	return (
 		<>
 			<PullToRefreshContainer
 				className="app-screen flex h-dvh flex-col w-full !px-0 !pb-0 overflow-x-hidden"
 				contentClassName="flex flex-1 flex-col min-h-0"
-				style={{ overflow: "visible", overflowX: "hidden", paddingTop: "calc(env(safe-area-inset-top, 0px) + 10px)" }}
+				style={{ overflow: "visible", overflowX: "hidden", paddingTop: "calc(var(--safe-area-top) + 10px)" }}
 				onRefresh={handleRefresh}
 				isDisabled={isLoading || isRefreshing}
 				isAtTop={() => (feedContainerRef.current?.scrollTop ?? 0) <= 0}
@@ -911,7 +912,7 @@ export function SharedAlbumsPage() {
 				{/* Header */}
 				<header className="relative z-20 shrink-0 pointer-events-none">
 					<PageHeaderBackground color="var(--accent)" />
-					<div className="pointer-events-auto flex flex-col gap-3 mx-auto w-full max-w-6xl px-4 sm:px-5">
+					<div className="pointer-events-auto flex flex-col gap-3 mx-auto w-full max-w-6xl px-4 sm:px-5 rail:max-w-none rail:px-[var(--app-px)]">
 						{/* Row 1: title + count subtitle + refresh */}
 						<div className="flex items-center justify-between gap-2">
 							<div className="flex min-w-0 items-center gap-2">
@@ -991,7 +992,7 @@ export function SharedAlbumsPage() {
 				</header>
 
 				<FeedScrollContainer ref={feedContainerRef}>
-					<div className="mx-auto w-full max-w-6xl px-[var(--app-px)] pb-[calc(env(safe-area-inset-bottom,0px)+120px)]">
+					<div className="mx-auto w-full max-w-6xl rail:max-w-none px-[var(--app-px)] pb-[calc(var(--safe-area-bottom)+120px)] rail:pb-[var(--page-bottom)]">
 						{isLoading ? (
 							<div
 								className="grid gap-4"

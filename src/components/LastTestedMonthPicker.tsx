@@ -68,7 +68,7 @@ export function LastTestedMonthPicker({
 			<button
 				type="button"
 				onClick={() => setIsOpen((prev) => !prev)}
-				className="input-field flex w-full items-center justify-between text-left"
+				className="input-field flex w-full items-center justify-between text-start"
 			>
 				<span className={value ? "" : "text-[var(--text-muted)]"}>{selectedLabel}</span>
 				<ChevronDown
@@ -76,14 +76,14 @@ export function LastTestedMonthPicker({
 				/>
 			</button>
 			{isOpen && (
-				<div className="absolute z-20 mt-1 flex max-h-56 w-full flex-col gap-1 overflow-y-auto rounded-lg border border-[var(--border)] bg-[var(--surface)] p-2 shadow-lg">
+				<div className="absolute z-20 mt-1 flex max-h-56 w-full flex-col gap-1 overflow-y-auto rounded-lg menu-surface p-2">
 					<button
 						type="button"
 						onClick={() => {
 							onChange("");
 							setIsOpen(false);
 						}}
-						className={`block w-full rounded-sm px-2 py-2 text-left text-sm transition-colors hover:bg-[var(--surface-2)] ${
+						className={`block w-full rounded-sm px-2 py-2 text-start text-sm transition-colors hover-fill ${
 							!value ? "font-semibold text-[var(--accent)]" : "text-[var(--text-muted)]"
 						}`}
 					>
@@ -97,7 +97,7 @@ export function LastTestedMonthPicker({
 								onChange(option.value);
 								setIsOpen(false);
 							}}
-							className={`block w-full rounded-sm px-2 py-2 text-left text-sm transition-colors hover:bg-[var(--surface-2)] ${
+							className={`block w-full rounded-sm px-2 py-2 text-start text-sm transition-colors hover-fill ${
 								value === option.value ? "font-semibold text-[var(--accent)]" : ""
 							}`}
 						>

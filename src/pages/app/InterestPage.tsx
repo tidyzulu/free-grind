@@ -5,7 +5,7 @@ import { useTranslation } from "react-i18next";
 import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import { useInterestData } from "../../hooks/queries/useInterestQueries";
 import { useBlockedProfileIds } from "../../hooks/queries/useProfileQueries";
-import { getBlockStatesByProfileIds } from "../../services/chatDb";
+import { getBlockStatesByProfileIds, listProfileSnapshotIds } from "../../services/chatDb";
 import { markInterestSeen, getInterestTabLastSeen, markInterestTabSeen } from "../../services/seenStore";
 import { EmptyState, ErrorState } from "../../components/ui/states";
 import { PullToRefreshContainer } from "./components/PullToRefreshContainer";
@@ -17,16 +17,17 @@ import {
 import { InterestTabs, InterestRow, type InterestTabConfig } from "./interest/InterestComponents";
 import { InterestViewsGrid, useViewsGridLayout } from "./interest/InterestViewsGrid";
 import { getAllCachedBrowseCardsById } from "./gridpage/cache";
-import { InterestOnboardingModal } from "./interest/InterestOnboardingModal";
+import { INTEREST_ONBOARDING_SEEN_KEY, InterestOnboardingModal } from "./interest/InterestOnboardingModal";
 import {
 	SCROLL_RESTORATION_TIMEOUT_MS,
 } from "../../config/ui-constants";
 import { cn } from "../../utils/cn";
+import { useDesktopBreakpoint } from "../../hooks/useDesktopBreakpoint";
 import { PageHeaderBackground } from "../../components/ui/PageHeaderBackground";
 import { FeedScrollContainer } from "../../components/ui/FeedScrollContainer";
 import { usePreferences } from "../../contexts/PreferencesContext";
 
-const ONBOARDING_KEY = "fg-interest-onboarding-seen";
+const ONBOARDING_KEY = INTEREST_ONBOARDING_SEEN_KEY;
 
 const TAB_ICONS: Record<InterestTab, ComponentType<{ className?: string }>> = { views: EyeFilled, taps: FlameFilled, sent: SendFilled };
 
@@ -52,11 +53,11 @@ function InterestViewsGridSkeleton() {
 					key={i}
 					className={cn(
 						"relative h-0 w-full animate-pulse overflow-hidden bg-[var(--surface-2)] pb-[100%]",
-						isDesktop ? "rounded-xl" : "rounded-[4px]",
+						isDesktop ? "rounded-xl" : "rounded-[6px]",
 					)}
 				>
-					<div className="absolute left-2 top-2 h-4 w-9 rounded-full bg-white/20" />
-					<div className="absolute bottom-2 left-2 flex flex-col gap-1.5">
+					<div className="absolute start-2 top-2 h-4 w-9 rounded-full bg-white/20" />
+					<div className="absolute bottom-2 start-2 flex flex-col gap-1.5">
 						<div className="h-2.5 w-16 rounded-full bg-white/20" />
 						<div className="h-2 w-10 rounded-full bg-white/15" />
 					</div>
@@ -68,7 +69,7 @@ function InterestViewsGridSkeleton() {
 
 function InterestSkeleton({ mode }: { mode: InterestTab }) {
 	return (
-		<div className="flex items-center gap-4 border-b border-[var(--surface-2)] py-3 pl-4 pr-4">
+		<div className="flex items-center gap-4 border-b border-[var(--surface-2)] py-3 ps-4 pe-4">
 			<div className="h-15 w-15 shrink-0 rounded-full overflow-hidden animate-pulse bg-[var(--surface-2)]" />
 			<div className="flex flex-1 flex-col gap-2">
 				<div className="h-3 w-28 animate-pulse rounded-full bg-[var(--surface-2)]" />
@@ -88,17 +89,21 @@ export function InterestPage() {
 	const navigate = useNavigate();
 	const location = useLocation();
 	const [searchParams, setSearchParams] = useSearchParams();
-	const defaultSetting = window.localStorage.getItem("fg-interest-default-tab") === "views" ? "views" : "taps";
-	const lastActiveTab = window.localStorage.getItem("fg-interest-last-tab");
 	const isValidTab = (value: string | null): value is InterestTab =>
 		value === "taps" || value === "views" || value === "sent";
+	const storedDefault = window.localStorage.getItem("fg-interest-default-tab");
+	const defaultSetting: InterestTab = isValidTab(storedDefault) ? storedDefault : "taps";
+	const lastActiveTab = window.localStorage.getItem("fg-interest-last-tab");
 	// Falls back to the last tab the user actually looked at (not just their configured default),
 	// since navigating back to /interest (e.g. via the bottom nav) drops the ?tab= param entirely.
 	const fallbackTab: InterestTab = isValidTab(lastActiveTab) ? lastActiveTab : defaultSetting;
 	const tabParam = searchParams.get("tab");
 	const activeTab: InterestTab = isValidTab(tabParam) ? tabParam : fallbackTab;
-	// Views render as a tile grid by default; "list" shows them as rows like taps.
-	const isViewsGrid = activeTab === "views" && window.localStorage.getItem("fg-interest-views-layout") !== "list";
+	// Desktop: every tab is a tile grid. Mobile: views render as a tile grid by
+	// default ("list" in the settings shows them as rows like taps).
+	const isDesktop = useDesktopBreakpoint();
+	const isViewsGrid =
+		isDesktop || (activeTab === "views" && window.localStorage.getItem("fg-interest-views-layout") !== "list");
 
 	useEffect(() => {
 		window.localStorage.setItem("fg-interest-last-tab", activeTab);
@@ -221,6 +226,33 @@ export function InterestPage() {
 	const isProfileBlocked = useCallback(
 		(profileId: string) => blockedByMeProfileIds.has(profileId) || blockedByOtherProfileIds.has(profileId),
 		[blockedByMeProfileIds, blockedByOtherProfileIds],
+	);
+
+	// Blocked profiles with a local snapshot stay openable — the profile page
+	// falls back to that snapshot once the live profile is only a stub.
+	const [snapshotProfileIds, setSnapshotProfileIds] = useState<Set<string>>(new Set());
+	useEffect(() => {
+		const blockedIds = [...new Set([...views, ...taps, ...sentTaps].map((item) => item.profileId))].filter(
+			(id) => blockedByMeProfileIds.has(id) || blockedByOtherProfileIds.has(id),
+		);
+		if (blockedIds.length === 0) {
+			setSnapshotProfileIds(new Set());
+			return;
+		}
+		let cancelled = false;
+		void listProfileSnapshotIds(blockedIds)
+			.then((ids) => {
+				if (!cancelled) setSnapshotProfileIds(ids);
+			})
+			.catch(() => {});
+		return () => {
+			cancelled = true;
+		};
+	}, [views, taps, sentTaps, blockedByMeProfileIds, blockedByOtherProfileIds]);
+
+	const hasProfileSnapshot = useCallback(
+		(profileId: string) => snapshotProfileIds.has(profileId),
+		[snapshotProfileIds],
 	);
 
 	const [lastSeenViews, setLastSeenViews] = useState(() => getInterestTabLastSeen("views"));
@@ -526,14 +558,19 @@ export function InterestPage() {
 
 	const handleOpenProfile = useCallback(
 		(profileId: string) => {
-			if (isProfileBlocked(profileId)) {
+			if (isProfileBlocked(profileId) && !hasProfileSnapshot(profileId)) {
 				return;
 			}
 			navigate(`/profile/${profileId}`, {
-				state: { returnTo: `${location.pathname}${location.search}` },
+				state: {
+					returnTo: `${location.pathname}${location.search}`,
+					// Profile over the page (see App.tsx), so closing it doesn't
+					// reload Interest — same as inbox and Right Now.
+					backgroundLocation: location,
+				},
 			});
 		},
-		[navigate, location.pathname, location.search, isProfileBlocked],
+		[navigate, location, isProfileBlocked, hasProfileSnapshot],
 	);
 
 	const handleTouchStart = useCallback((event: TouchEvent<HTMLDivElement>) => {
@@ -542,7 +579,7 @@ export function InterestPage() {
 	}, []);
 
 	const tabOrder: InterestTab[] = useMemo(
-		() => (defaultSetting === "views" ? ["views", "taps", "sent"] : ["taps", "views", "sent"]),
+		() => [defaultSetting, ...(["taps", "views", "sent"] as const).filter((tab) => tab !== defaultSetting)],
 		[defaultSetting],
 	);
 
@@ -614,9 +651,10 @@ export function InterestPage() {
 			spinnerColor="var(--accent)"
 		>
 			{/* Header */}
-			<header className="relative z-20 flex shrink-0 flex-col pb-3 pointer-events-none">
+			{/* pb-4: same gap between the tab pill and the feed as Right Now / Inbox. */}
+			<header className="relative z-20 flex shrink-0 flex-col pb-4 pointer-events-none">
 				<PageHeaderBackground color="var(--accent)" />
-				<div className="pointer-events-auto flex flex-col gap-3 mx-auto w-full max-w-4xl">
+				<div className="pointer-events-auto flex flex-col gap-3 mx-auto w-full max-w-4xl rail:max-w-none">
 					<div className="px-[var(--app-px)] flex items-center justify-between">
 						<h1 className="app-title">{t("interest_page.title")}</h1>
 						{developerMode && showDebugInfo && (
@@ -630,7 +668,7 @@ export function InterestPage() {
 					</div>
 
 					<div className="flex flex-col gap-3">
-						<div className="flex h-12 items-center justify-between pl-[var(--app-px)] pr-4 -mt-1">
+						<div className="flex items-center justify-between ps-[var(--app-px)] pe-4">
 							<InterestTabs
 								activeTab={activeTab}
 								tabs={tabConfigs}
@@ -646,7 +684,7 @@ export function InterestPage() {
 				onTouchStart={handleTouchStart}
 				onTouchEnd={handleTouchEnd}
 			>
-				<div className="mx-auto w-full max-w-4xl pb-[calc(env(safe-area-inset-bottom,0px)+120px)] px-0">
+				<div className="mx-auto w-full max-w-4xl rail:max-w-none pb-[calc(var(--safe-area-bottom)+120px)] rail:pb-[var(--page-bottom)] px-0">
 					{(isLoading && (activeItems.length === 0 || isDemoLoading)) ? (
 						isViewsGrid ? (
 							<InterestViewsGridSkeleton />
@@ -685,7 +723,9 @@ export function InterestPage() {
 											onOpenProfile={handleOpenProfile}
 											now={nowTimestamp}
 											isProfileBlocked={isProfileBlocked}
+											hasProfileSnapshot={hasProfileSnapshot}
 											scrollContainerRef={feedContainerRef}
+											mode={activeTab}
 										/>
 									) : displayedItems.map((item) => (
 										<InterestRow
@@ -695,6 +735,7 @@ export function InterestPage() {
 											onOpenProfile={handleOpenProfile}
 											now={nowTimestamp}
 											isBlocked={isProfileBlocked(item.profileId)}
+											canOpenWhileBlocked={hasProfileSnapshot(item.profileId)}
 										/>
 									))}
 

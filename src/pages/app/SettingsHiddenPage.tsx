@@ -81,7 +81,7 @@ export function SettingsHiddenPage() {
 									: null;
 							if (displayName || avatarUrl) {
 								detailsById.set(profileId, {
-									displayName: displayName ?? t("settings_hidden.name_fallback", { defaultValue: "Someone" }),
+									displayName: displayName ?? t("common.unknown_display_name"),
 									avatarUrl,
 								});
 							}
@@ -105,7 +105,7 @@ export function SettingsHiddenPage() {
 						displayName:
 							meta?.displayName ??
 							profile.displayName ??
-							t("settings_hidden.name_fallback", { defaultValue: "Someone" }),
+							t("common.unknown_display_name"),
 						avatarUrl,
 					} satisfies HiddenProfileListItem;
 				}),
@@ -158,7 +158,8 @@ export function SettingsHiddenPage() {
 
 	return (
 		<PullToRefreshContainer
-			className="app-screen"
+			className="app-screen flex flex-col"
+			contentClassName="flex flex-1 flex-col"
 			onRefresh={() => loadHiddenProfiles()}
 			isDisabled={isLoading}
 			refreshingLabel={t("settings_hidden.refreshing")}
@@ -169,13 +170,14 @@ export function SettingsHiddenPage() {
 				subtitle={t("settings_hidden.subtitle")}
 			/>
 
-			<div className="grid gap-6">
+			{/* Fills the rest of the screen so the empty state can sit centered in it. */}
+			<div className={`grid flex-1 gap-6 ${!isLoading && !error && hiddenProfiles.length === 0 ? "content-center" : "content-start"}`}>
 				{isLoading ? (
 					<div>
 						<div className="mb-2 flex items-center gap-2 px-1">
 							<div className="h-3 w-16 animate-pulse rounded-full ink-tint-10" />
 						</div>
-						<div className="native-card divide-y divide-[color-mix(in_srgb,var(--text)_8%,transparent)] overflow-hidden">
+						<div className="native-group">
 							{Array.from({ length: 4 }).map((_, i) => (
 								<div key={i} className="flex items-center gap-3 px-4 py-3">
 									<div className="h-11 w-11 shrink-0 animate-pulse rounded-full overflow-hidden ink-tint-10" />
@@ -211,14 +213,14 @@ export function SettingsHiddenPage() {
 								{hiddenProfiles.length}
 							</span>
 						</div>
-						<div className="native-card divide-y divide-[color-mix(in_srgb,var(--text)_8%,transparent)] overflow-hidden">
+						<div className="native-group">
 							{hiddenProfiles.map((profile) => {
 								const isMutating = mutatingProfileId === profile.profileId;
 								return (
 									<div key={profile.profileId} className="flex items-center gap-3 px-4 py-3">
 										<button
 											type="button"
-											className="flex min-w-0 flex-1 items-center gap-3 text-left"
+											className="flex min-w-0 flex-1 items-center gap-3 text-start"
 											onClick={() => navigate(`/profile/${profile.profileId}`, { state: { returnTo: location.pathname } })}
 										>
 											<div className="h-11 w-11 shrink-0 rounded-full overflow-hidden bg-[var(--surface-2)] drop-shadow-sm">
@@ -260,19 +262,17 @@ export function SettingsHiddenPage() {
 				{/* Unhide all: an action row of its own with its explanation as a footnote. */}
 				{!isLoading && !error && hiddenProfiles.length > 0 && (
 					<div>
-						<div className="native-card overflow-hidden">
-							<button
+						<button
 								type="button"
 								onClick={() => setConfirmUnhideAll(true)}
 								disabled={isUnhidingAll}
-								className="flex w-full items-center justify-center gap-2 px-4 py-3.5 text-sm font-semibold text-[var(--accent)] transition-colors hover:ink-tint-6 active:ink-tint-10 disabled:opacity-60"
+								className="flex w-full items-center justify-center gap-2 rounded-[20px] accent-tint-12 px-4 py-3.5 text-sm font-semibold text-[var(--accent-readable)] transition-colors hover:accent-tint-18 active:accent-tint-24 disabled:opacity-60"
 							>
 								{isUnhidingAll ? <Loader2 className="h-4 w-4 animate-spin" /> : <Eye className="h-4 w-4" />}
 								{isUnhidingAll
 									? t("settings_hidden.unhiding_all", { defaultValue: "Unhiding…" })
 									: t("settings_hidden.unhide_all_title", { defaultValue: "Unhide All" })}
 							</button>
-						</div>
 						<p className="mt-2 px-4 text-xs leading-relaxed text-[var(--text-muted)]">
 							{t("settings_hidden.unhide_all_desc", { defaultValue: "Show all hidden profiles on the grid again." })}
 						</p>

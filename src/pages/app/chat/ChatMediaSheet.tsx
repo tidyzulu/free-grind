@@ -422,6 +422,7 @@ export function ChatMediaSheet({
 			<SlidingTabs<Tab> tabs={tabs} value={tab} onChange={setTab} className="mb-2 shrink-0" />
 
 			<DrawerBody
+				skeletonKey={`chat-media:${conversationId}:${tab}`}
 				isLoading={!hasSlidIn || (isTabLoading && isEmpty)}
 				isDesktop={isDesktop}
 				gestureProps={tabSwipe}
@@ -473,6 +474,7 @@ export function ChatMediaSheet({
 							key={item.mediaKey}
 							src={item.dataUri}
 							isVideo={item.kind === "video"}
+							posterKey={item.mediaKey}
 							onSelect={(tile) => {
 								setViewerHeroRect(getHeroRectFromElement(tile));
 								setViewerIndex(idx);

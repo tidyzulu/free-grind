@@ -273,7 +273,7 @@ export function ShareChatPicker({
 									<button
 										type="button"
 										onClick={() => setQuery("")}
-										className="shrink-0 rounded-full p-1 text-[var(--text-muted)] transition hover:bg-[var(--surface-2)] hover:text-[var(--text)]"
+										className="shrink-0 rounded-full p-1 text-[var(--text-muted)] transition hover-fill hover:text-[var(--text)]"
 										aria-label={t("common.clear", { defaultValue: "Clear" })}
 									>
 										<X className="h-4 w-4" />
@@ -298,7 +298,7 @@ export function ShareChatPicker({
 										type="button"
 										onClick={() => removeFile(file)}
 										aria-label={t("chat.share_target.remove_image", { defaultValue: "Remove image" })}
-										className="absolute right-1 top-1 rounded-full bg-black/60 p-0.5 text-white"
+										className="absolute end-1 top-1 rounded-full bg-black/60 p-0.5 text-white"
 									>
 										<X className="h-3.5 w-3.5" />
 									</button>
@@ -318,7 +318,7 @@ export function ShareChatPicker({
 				<div
 					className="min-h-0 flex-1 overflow-y-auto"
 					style={{
-						paddingBottom: hasSelection ? sendBarHeight : "env(safe-area-inset-bottom, 0px)",
+						paddingBottom: hasSelection ? sendBarHeight : "var(--safe-area-bottom)",
 					}}
 					data-lenis-prevent
 				>
@@ -337,7 +337,7 @@ export function ShareChatPicker({
 									onClick={() => toggleSelected(chat.conversationId)}
 									disabled={isSending}
 									aria-pressed={selectedIds.includes(chat.conversationId)}
-									className="flex w-full items-center gap-4 border-b border-[var(--surface-2)] py-3 pl-4 pr-4 text-left transition hover:bg-[var(--surface-2)]"
+									className="flex w-full items-center gap-4 border-b border-[var(--surface-2)] py-3 ps-4 pe-4 text-start transition hover-fill"
 								>
 									<Avatar chat={chat} selected={selectedIds.includes(chat.conversationId)} />
 									<div className="min-w-0 flex-1">
@@ -358,7 +358,7 @@ export function ShareChatPicker({
 											</span>
 										</div>
 										<p className="mt-0.5 truncate text-sm text-[var(--text-muted)]">
-											{getPreviewText(chat.entry, t)}
+											{getPreviewText(chat.entry, t, userId)}
 										</p>
 									</div>
 								</button>
@@ -376,7 +376,7 @@ export function ShareChatPicker({
 							background: "color-mix(in srgb, var(--surface) 90%, transparent)",
 							backdropFilter: "blur(16px)",
 							WebkitBackdropFilter: "blur(16px)",
-							paddingBottom: "max(12px, calc(env(safe-area-inset-bottom) + 8px))",
+							paddingBottom: "max(12px, calc(var(--safe-area-bottom) + 8px))",
 						}}
 					>
 						<div className="mx-auto flex w-full max-w-[var(--content-max)] flex-col gap-2.5 pt-3">

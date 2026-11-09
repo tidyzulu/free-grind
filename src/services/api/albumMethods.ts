@@ -1,3 +1,7 @@
+import { stagingRanges } from "../videoEdit";
+import { invoke } from "@tauri-apps/api/core";
+import { z } from "zod";
+
 import {
 	albumDetailSchema,
 	albumLimitsSchema,
@@ -33,10 +37,14 @@ import type {
 	RenameOwnAlbumInput,
 	UnshareAlbumInput,
 	UploadOwnAlbumContentInput,
+	UploadOwnAlbumVideoInput,
 	GetSharedAlbumsInput,
 } from "../../types/api-functions";
 import type { RestFetcher } from "../../types/chat-service";
 import { ApiFunctionError, assertSuccess, parseJsonSafe } from "../apiHelpers";
+import { notifyOwnAlbumsChanged, rememberOwnAlbumDetail, rememberOwnAlbumList } from "../ownAlbumsChanged";
+import { MAX_CHAT_MEDIA_BYTES, uploadStagedVideo } from "../stagedVideoUpload";
+import { assertUploadFits, stagedEdit, uploadProgressReporter } from "../videoReencode";
 
 export function createAlbumMethods(fetchRest: RestFetcher, t: (key: string, options?: { defaultValue?: string }) => string) {
 	return {
@@ -44,13 +52,16 @@ export function createAlbumMethods(fetchRest: RestFetcher, t: (key: string, opti
 			const response = await fetchRest("/v1/albums");
 			await assertSuccess(response, t("api.errors.load_albums"));
 			const parsed = albumsResponseSchema.parse(await parseJsonSafe(response));
+			rememberOwnAlbumList(parsed.albums);
 			return parsed.albums;
 		},
 
 		async getOwnAlbumDetails(albumId: string | number): Promise<AlbumDetail> {
 			const response = await fetchRest(`/v2/albums/${albumId}`);
 			await assertSuccess(response, t("api.errors.load_album_details"));
-			return albumDetailSchema.parse(await parseJsonSafe(response));
+			const detail = albumDetailSchema.parse(await parseJsonSafe(response));
+			rememberOwnAlbumDetail(albumId, detail);
+			return detail;
 		},
 
 		async getOwnAlbumStorage(): Promise<AlbumLimits> {
@@ -78,6 +89,7 @@ export function createAlbumMethods(fetchRest: RestFetcher, t: (key: string, opti
 				throw new ApiFunctionError(t("api.errors.invalid_album_response"), response.status, payload);
 			}
 
+			notifyOwnAlbumsChanged();
 			return { albumId };
 		},
 
@@ -87,6 +99,7 @@ export function createAlbumMethods(fetchRest: RestFetcher, t: (key: string, opti
 				body: { albumName: input.albumName },
 			});
 			await assertSuccess(response, t("api.errors.rename_album"));
+			notifyOwnAlbumsChanged();
 			return { ok: true };
 		},
 
@@ -95,6 +108,7 @@ export function createAlbumMethods(fetchRest: RestFetcher, t: (key: string, opti
 				method: "DELETE",
 			});
 			await assertSuccess(response, t("api.errors.delete_album"));
+			notifyOwnAlbumsChanged();
 			return { ok: true };
 		},
 
@@ -104,8 +118,8 @@ export function createAlbumMethods(fetchRest: RestFetcher, t: (key: string, opti
 			const query = new URLSearchParams();
 			if (input.width != null) query.set("width", String(input.width));
 			if (input.height != null) query.set("height", String(input.height));
-			const qs = query.toString();
-			const url = `/v1/albums/${input.albumId}/content${qs ? `?${qs}` : ""}`;
+			query.set("isFresh", String(input.isFresh));
+			const url = `/v1/albums/${input.albumId}/content?${query}`;
 			const response = await fetchRest(url, {
 				method: "POST",
 				rawBody: input.multipart.body,
@@ -129,7 +143,50 @@ export function createAlbumMethods(fetchRest: RestFetcher, t: (key: string, opti
 				);
 			}
 
+			notifyOwnAlbumsChanged();
 			return { contentId };
+		},
+
+		/**
+		 * Streams a video from disk into the album (see stagedVideoUpload), cut
+		 * and turned upright as `edit` says (see videoEdit); its width and
+		 * height come from the file itself, Rust-side.
+		 */
+		async uploadOwnAlbumVideo(input: UploadOwnAlbumVideoInput): Promise<{ contentId: number } | null> {
+			await assertUploadFits(
+				input.file,
+				input.edit,
+				Math.min(MAX_CHAT_MEDIA_BYTES, input.maxBodySize ?? MAX_CHAT_MEDIA_BYTES),
+				t("chat.attachments.too_large"),
+			);
+			const report = uploadProgressReporter(input.edit, input.onProgress);
+			const payload = await uploadStagedVideo(
+				input.file,
+				async (stagedId) =>
+					invoke("upload_staged_album_video", {
+						stagedId,
+						albumId: Number(input.albumId),
+						isFresh: input.isFresh,
+						maxBodySize: input.maxBodySize ?? null,
+						edit: await stagedEdit(stagedId, input.file, input.edit, {
+							onLandscapeKept: input.onLandscapeKept,
+							notSendableMessage: t("chat.errors.video_not_sendable"),
+							onConverting: (fraction) => report("converting", fraction),
+						}),
+						onProgress: report.channel(),
+					}),
+				t("api.errors.upload_content"),
+				t,
+				(fraction) => report("preparing", fraction),
+				await stagingRanges(input.file, input.edit),
+			);
+			if (payload === null) return null;
+			const parsed = z.object({ contentId: z.coerce.number().int() }).safeParse(payload);
+			if (!parsed.success) {
+				throw new ApiFunctionError(t("api.errors.invalid_upload_response"), 0, payload);
+			}
+			notifyOwnAlbumsChanged();
+			return { contentId: parsed.data.contentId };
 		},
 
 		async reorderOwnAlbumContent(
@@ -143,6 +200,7 @@ export function createAlbumMethods(fetchRest: RestFetcher, t: (key: string, opti
 				},
 			);
 			await assertSuccess(response, t("api.errors.reorder_content"));
+			notifyOwnAlbumsChanged();
 			return { ok: true };
 		},
 
@@ -150,7 +208,7 @@ export function createAlbumMethods(fetchRest: RestFetcher, t: (key: string, opti
 			input: AddOwnAlbumContentByIdsInput,
 		): Promise<{ ok: true }> {
 			const response = await fetchRest(
-				`/v1/albums/${input.albumId}/content/chat/list-by-id?isFresh=true`,
+				`/v1/albums/${input.albumId}/content/chat/list-by-id?isFresh=${input.isFresh}`,
 				{
 					method: "POST",
 					body: { ids: input.ids },
@@ -162,6 +220,7 @@ export function createAlbumMethods(fetchRest: RestFetcher, t: (key: string, opti
 					defaultValue: "Failed to add media to album.",
 				}),
 			);
+			notifyOwnAlbumsChanged();
 			return { ok: true };
 		},
 
@@ -175,6 +234,7 @@ export function createAlbumMethods(fetchRest: RestFetcher, t: (key: string, opti
 				},
 			);
 			await assertSuccess(response, t("api.errors.delete_content"));
+			notifyOwnAlbumsChanged();
 			return { ok: true };
 		},
 

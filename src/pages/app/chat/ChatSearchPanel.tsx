@@ -1,4 +1,4 @@
-import { Loader2, MessageCircle } from "lucide-react";
+import { Loader2, Search, SearchX } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useAuth } from "../../../contexts/useAuth";
@@ -12,6 +12,7 @@ import { resolveAvatarSrc } from "../../../services/avatarStore";
 import { getOtherParticipant, getParticipantAvatarUrl, formatConversationTime } from "./chatUtils";
 import { searchMessagesLocal } from "./cache";
 import { highlightMatch } from "./highlightMatch";
+import { DrawerEmptyState } from "./drawerUi";
 
 type Props = {
 	isDesktop: boolean;
@@ -150,11 +151,13 @@ export function ChatSearchPanel({ isDesktop, searchQuery, onClose, onOpenConvers
 
 	if (searchQuery.trim().length < 2) {
 		return (
-			<div className={`flex min-h-0 flex-1 flex-col items-center justify-center gap-3 py-12 ${px} text-[var(--text-muted)]`}>
-				<div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-[var(--surface-2)]">
-					<MessageCircle className="h-7 w-7 opacity-40" />
-				</div>
-				<p className="text-sm">{t("chat_search.min_chars")}</p>
+			<div className={`min-h-0 flex-1 ${px}`}>
+				<DrawerEmptyState
+					icon={<Search />}
+					fanned={false}
+					title={t("chat_search.prompt_title", { defaultValue: "Search your messages" })}
+					hint={t("chat_search.min_chars")}
+				/>
 			</div>
 		);
 	}
@@ -188,7 +191,7 @@ export function ChatSearchPanel({ isDesktop, searchQuery, onClose, onOpenConvers
 							key={result.messageId}
 							type="button"
 							onClick={() => openConversationById(result.conversationId)}
-							className="flex w-full items-center gap-4 border-b border-[var(--surface-2)] py-3 pl-4 pr-4 text-left transition hover:bg-[var(--surface-2)]"
+							className="flex w-full items-center gap-4 border-b border-[var(--surface-2)] py-3 ps-4 pe-4 text-start transition hover-fill"
 						>
 							<div className="h-14 w-14 shrink-0 rounded-full overflow-hidden bg-[var(--surface-2)] drop-shadow-sm">
 								<ProfileImage src={avatarSrc} alt={name} />
@@ -208,10 +211,12 @@ export function ChatSearchPanel({ isDesktop, searchQuery, onClose, onOpenConvers
 					);
 				})}
 				{messageSearchResults.length === 0 && (
-					<div className="flex flex-col items-center gap-2 py-10 text-[var(--text-muted)]">
-						<MessageCircle className="h-7 w-7 opacity-30" />
-						<p className="text-sm">{t("chat_search.no_messages_found")}</p>
-					</div>
+					<DrawerEmptyState
+						icon={<SearchX />}
+						fanned={false}
+						title={t("chat_search.no_messages_found")}
+						hint={t("chat_search.no_messages_found_hint", { defaultValue: "Try a different search term." })}
+					/>
 				)}
 			</div>
 		</div>

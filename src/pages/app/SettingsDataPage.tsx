@@ -2,22 +2,25 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
 	Download,
 	FileDown,
+	Info,
 	Loader2,
 	RotateCcw,
 	ShieldCheck,
 	Trash2,
 	Upload,
 } from "lucide-react";
-import { CalendarDaysFilled, FileUpFilled, MessageSquareQuoteFilled } from "../../components/icons/FilledIcons";
+import { CalendarDaysFilled, FileUpFilled } from "../../components/icons/FilledIcons";
 import toast from "react-hot-toast";
 import { saveTextFile } from "../../services/saveTextFile";
 import { useTranslation } from "react-i18next";
 import { PageHeader } from "../../components/PageHeader";
 import { RowActionPill } from "../../components/ui/row-action-pill";
 import { BackupCategoryPicker } from "../../components/BackupCategoryPicker";
-import { BackupProgressBar } from "../../components/BackupProgressBar";
+import { BackupExportSheet } from "../../components/BackupExportSheet";
+import { BackupProgressView, BackupReadStatus } from "../../components/BackupProgressBar";
+import { LocalBackupList, useLocalBackupsLoader } from "../../components/LocalBackupList";
+import { RestoreStatusEntry } from "../../components/RestoreStatus";
 import { BottomSheet, SheetClose, SheetCloseButton, sheetButtonClass, SHEET_FOOTER_FADE_CLASS } from "../../components/ui/bottom-sheet";
-import { Chip } from "../../components/ui/chip";
 import { ConfirmDialog } from "../../components/ui/confirm-dialog";
 import { useAuth } from "../../contexts/useAuth";
 import { useDesktopBreakpoint } from "../../hooks/useDesktopBreakpoint";
@@ -27,28 +30,19 @@ import {
 	backupErrorMessage as getErrorMessage,
 	cleanupTempFile,
 	copyPickedFileToTemp,
-	exportBackup,
 	importBackupFile,
 	inspectBackupFile,
-	pickBackupFileToTempAndroid,
+	pickBackupFile,
 	type BackupCategoryId,
-	type BackupExportDestination,
+	type BackupReadProgress,
 } from "../../services/backupRestore";
 import { loadEncounters } from "../../services/encounters";
 import { encountersToIcs } from "../../services/icsExport";
 import { deleteAllDownloadedMedia, getDownloadedMediaUsage, isAndroid, isIos } from "../../services/saveMedia";
-import { loadSavedPhrases, parsePhrasesFromTxt, phrasesToTxt, saveSavedPhrases } from "../../services/savedPhrases";
 import { resetAllSettings } from "../../utils/resetSettings";
 import { useSettingsHighlight } from "../../hooks/useSettingsHighlight";
 import { appLog } from "../../utils/logger";
-
-function formatBytes(bytes: number): string {
-	if (bytes <= 0) return "0 B";
-	const units = ["B", "KB", "MB", "GB"];
-	const exponent = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
-	const value = bytes / 1024 ** exponent;
-	return `${exponent === 0 ? value : value.toFixed(1)} ${units[exponent]}`;
-}
+import { formatBytes } from "../../utils/formatBytes";
 
 export function SettingsDataPage() {
 	const { t } = useTranslation();
@@ -59,34 +53,26 @@ export function SettingsDataPage() {
 	const [isLoadingUsage, setIsLoadingUsage] = useState(true);
 	const [isDeleting, setIsDeleting] = useState(false);
 	const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
-	const [isExporting, setIsExporting] = useState(false);
 	const [isImporting, setIsImporting] = useState(false);
+	const [readProgress, setReadProgress] = useState<BackupReadProgress | null>(null);
 	const [isResetting, setIsResetting] = useState(false);
 	const [showResetConfirm, setShowResetConfirm] = useState(false);
 	const fileInputRef = useRef<HTMLInputElement>(null);
 	const isDesktop = useDesktopBreakpoint();
 
-	const [exportCategories, setExportCategories] = useState<Set<BackupCategoryId>>(new Set(BACKUP_CATEGORY_IDS));
-	const [exportDestination, setExportDestination] = useState<BackupExportDestination>("downloads");
-	const [showExportCategoryPicker, setShowExportCategoryPicker] = useState(false);
-	// Closes the export picker animated once the export has finished.
-	const exportSheetCloseRef = useRef<(() => void) | null>(null);
+	const [showExportSheet, setShowExportSheet] = useState(false);
+	const { backups: localBackups, load: loadLocalBackups } = useLocalBackupsLoader();
+	const [showLocalBackups, setShowLocalBackups] = useState(false);
+	const [selectedLocalPath, setSelectedLocalPath] = useState<string | null>(null);
+	const [pickingOtherFile, setPickingOtherFile] = useState(false);
 	const [pendingImport, setPendingImport] = useState<{
 		tempPath: string;
 		categories: BackupCategoryId[];
 		selected: Set<BackupCategoryId>;
 	} | null>(null);
 
-	const [savedPhrases, setSavedPhrases] = useState<string[]>([]);
-	const [isExportingPhrases, setIsExportingPhrases] = useState(false);
-	const [isImportingPhrases, setIsImportingPhrases] = useState(false);
-	const phrasesInputRef = useRef<HTMLInputElement>(null);
 
 	const [isExportingEncounters, setIsExportingEncounters] = useState(false);
-
-	useEffect(() => {
-		void loadSavedPhrases().then(setSavedPhrases);
-	}, []);
 
 	const loadUsage = useCallback(async () => {
 		setIsLoadingUsage(true);
@@ -132,51 +118,21 @@ export function SettingsDataPage() {
 		}
 	};
 
-	const handleExport = async (): Promise<boolean> => {
+	const openExportSheet = () => {
 		if (userId == null) {
 			toast.error(t("data_backup.export_no_user", { defaultValue: "You must be signed in to export." }));
-			return false;
+			return;
 		}
-		if (exportCategories.size === 0) {
-			toast.error(t("data_backup.export_no_categories", { defaultValue: "Choose at least one category to export." }));
-			return false;
-		}
-		setIsExporting(true);
-		try {
-			// The SQL read, base64 decode, zip compression and the copy to the
-			// final location all happen natively (src-tauri/src/commands/backup.rs)
-			// on a worker thread — nothing of the archive crosses the JS bridge.
-			const saved = await exportBackup(chatDb.getActiveChatDbFileName(), userId, Array.from(exportCategories), exportDestination);
-			if (!saved) return false;
-			toast.success(
-				exportDestination === "picker"
-					? t("data_backup.export_success_picker", { defaultValue: "Data exported to the chosen location." })
-					: isAndroid()
-						? t("data_backup.export_success", { defaultValue: "Data exported." })
-					: isIos()
-						? t("data_backup.export_success_ios", { defaultValue: "Data exported. Find it in the Files app under On My iPhone/iPad → Free Grind." })
-						: t("data_backup.export_success_desktop", { defaultValue: "Data exported to Downloads/FreeGrind." }),
-			);
-			return true;
-		} catch (error) {
-			appLog.error("[SettingsDataPage] backup export failed", error);
-			toast.error(getErrorMessage(error, t("data_backup.export_failed", { defaultValue: "Failed to export data." })));
-			return false;
-		} finally {
-			setIsExporting(false);
-		}
+		setShowExportSheet(true);
 	};
 
-	const showImportError = (error: "wrong_owner" | "invalid_format") => {
-		toast.error(
-			error === "wrong_owner"
-				? t("data_backup.import_wrong_owner", { defaultValue: "This export belongs to a different profile and can't be imported here." })
-				: t("data_backup.import_invalid", { defaultValue: "This file isn't a valid data export." }),
-		);
+	const showImportError = () => {
+		toast.error(t("data_backup.import_invalid", { defaultValue: "This file isn't a valid data export." }));
 	};
 
-	/** `stage` copies the picked archive to a local scratch path (null = picker cancelled). */
-	const handleImportFile = async (stage: () => Promise<string | null>) => {
+	/** `stage` copies the picked archive to a local scratch path (null = picker
+	 * cancelled), reporting its progress through `report`. */
+	const handleImportFile = async (stage: (report: (progress: BackupReadProgress) => void) => Promise<string | null>) => {
 		if (userId == null) {
 			toast.error(t("data_backup.import_no_user", { defaultValue: "You must be signed in to import." }));
 			return;
@@ -187,11 +143,12 @@ export function SettingsDataPage() {
 		// the file do we ask the user which of those to restore.
 		let tempPath: string | null = null;
 		try {
-			tempPath = await stage();
+			tempPath = await stage(setReadProgress);
 			if (tempPath == null) return;
-			const inspection = await inspectBackupFile(tempPath, userId);
+			setReadProgress({ stage: "checking" });
+			const inspection = await inspectBackupFile(tempPath);
 			if (!inspection.ok) {
-				showImportError(inspection.error);
+				showImportError();
 				await cleanupTempFile(tempPath);
 				return;
 			}
@@ -201,9 +158,39 @@ export function SettingsDataPage() {
 			toast.error(getErrorMessage(error, t("data_backup.import_failed", { defaultValue: "Failed to import data." })));
 			if (tempPath != null) await cleanupTempFile(tempPath);
 		} finally {
+			setReadProgress(null);
 			setIsImporting(false);
 		}
 	};
+
+	/** Resolves once the picked file was read (or the picker cancelled); right
+	 * away for the <input> fallback, whose result arrives through onChange. */
+	const openBackupPicker = () =>
+		new Promise<void>((resolve) => {
+			let picked = false;
+			void pickBackupFile(
+				(stage) => {
+					picked = true;
+					void handleImportFile(stage).finally(resolve);
+				},
+				() => {
+					setReadProgress({ stage: "opening" });
+					fileInputRef.current?.click();
+				},
+			).finally(() => {
+				// Cancelled, or the <input> fallback (its result arrives through onChange).
+				if (!picked) resolve();
+			});
+		});
+
+	// The <input> fallback's "Opening file…" ends on change, or here if the picker was dismissed.
+	useEffect(() => {
+		const input = fileInputRef.current;
+		if (!input) return;
+		const onCancel = () => setReadProgress((prev) => (prev?.stage === "opening" ? null : prev));
+		input.addEventListener("cancel", onCancel);
+		return () => input.removeEventListener("cancel", onCancel);
+	}, []);
 
 	const handleCancelImport = () => {
 		if (pendingImport) {
@@ -225,7 +212,7 @@ export function SettingsDataPage() {
 				Array.from(pendingImport.selected),
 			);
 			if (!result.ok) {
-				showImportError(result.error);
+				showImportError();
 				return;
 			}
 			// A full import can touch conversations, messages, and every
@@ -261,68 +248,6 @@ export function SettingsDataPage() {
 			}
 			return { ...prev, selected: next };
 		});
-	};
-
-	const toggleExportCategory = (id: BackupCategoryId) => {
-		setExportCategories((prev) => {
-			const next = new Set(prev);
-			if (next.has(id)) {
-				next.delete(id);
-			} else {
-				next.add(id);
-			}
-			return next;
-		});
-	};
-
-	const handleExportPhrasesTxt = async () => {
-		const content = phrasesToTxt(savedPhrases);
-		if (!content) {
-			toast.error(t("data_backup.phrases_export_empty", { defaultValue: "No saved phrases to export." }));
-			return;
-		}
-		setIsExportingPhrases(true);
-		try {
-			const fileName = `free-grind-saved-phrases-${new Date().toISOString().slice(0, 10)}.txt`;
-			await saveTextFile(fileName, `${content}\n`, "text/plain");
-
-			toast.success(
-				isAndroid()
-					? t("data_backup.phrases_export_success", { defaultValue: "Saved phrases exported." })
-					: isIos()
-						? t("data_backup.phrases_export_success_ios", {
-								defaultValue: "Saved phrases exported. Find it in the Files app under On My iPhone/iPad → Free Grind.",
-							})
-						: t("data_backup.phrases_export_success_desktop", { defaultValue: "Saved phrases exported to Downloads/FreeGrind." }),
-			);
-		} catch (error) {
-			toast.error(getErrorMessage(error, t("data_backup.phrases_export_failed", { defaultValue: "Failed to export saved phrases." })));
-		} finally {
-			setIsExportingPhrases(false);
-		}
-	};
-
-	const handleImportPhrasesFile = async (event: React.ChangeEvent<HTMLInputElement>) => {
-		const file = event.target.files?.[0];
-		event.target.value = "";
-		if (!file) return;
-
-		setIsImportingPhrases(true);
-		try {
-			const content = await file.text();
-			const imported = parsePhrasesFromTxt(content);
-			if (imported.length === 0) {
-				toast.error(t("data_backup.phrases_import_empty", { defaultValue: "No valid phrases found in that file." }));
-				return;
-			}
-			const updated = await saveSavedPhrases(imported);
-			setSavedPhrases(updated);
-			toast.success(t("data_backup.phrases_import_success", { defaultValue: "Saved phrases imported." }));
-		} catch {
-			toast.error(t("data_backup.phrases_import_error", { defaultValue: "Failed to import saved phrases." }));
-		} finally {
-			setIsImportingPhrases(false);
-		}
 	};
 
 	const handleExportEncountersIcs = async () => {
@@ -375,13 +300,16 @@ export function SettingsDataPage() {
 
 			<div className="grid gap-8">
 				<div>
-					<div className="native-card overflow-hidden divide-y divide-[var(--border)]">
+					<p className="mb-2 px-1 text-xs font-semibold uppercase tracking-widest text-[var(--text-muted)]">
+						{t("data_backup.backup_section", { defaultValue: "Account Backup" })}
+					</p>
+					<div className="native-group">
+						<RestoreStatusEntry variant="row" />
 						<button
 							id="data-export"
 							type="button"
-							onClick={() => setShowExportCategoryPicker(true)}
-							disabled={isExporting}
-							className={`flex w-full items-center gap-3 px-4 py-3.5 text-left transition-colors ${isExporting ? "opacity-50" : "hover:bg-[var(--surface-2)] active:bg-[var(--surface-2)]"} ${highlightId === "data-export" ? "animate-settings-highlight" : ""}`}
+							onClick={openExportSheet}
+							className={`flex w-full items-center gap-3 px-4 py-3.5 text-start transition-colors hover-fill ${highlightId === "data-export" ? "animate-settings-highlight" : ""}`}
 						>
 							<div className="shrink-0 rounded-2xl bg-teal-500/15 p-2.5 text-teal-400">
 								<FileDown className="h-5 w-5" />
@@ -396,25 +324,28 @@ export function SettingsDataPage() {
 									})}
 								</p>
 							</div>
-							{isExporting ? (
-								<Loader2 className="h-4 w-4 shrink-0 animate-spin text-[var(--text-muted)]" />
-							) : (
-								<Download className="h-4 w-4 shrink-0 text-[var(--text-muted)] opacity-50" />
-							)}
+							<Download className="h-4 w-4 shrink-0 text-[var(--text-muted)] opacity-50" />
 						</button>
 
 						<button
 							id="data-import"
 							type="button"
 							onClick={() => {
-								if (isAndroid()) {
-									void handleImportFile(pickBackupFileToTempAndroid);
-								} else {
-									fileInputRef.current?.click();
+								if (localBackups && localBackups.length > 0) {
+									setShowLocalBackups(true);
+									// Picks up backups exported since the page opened.
+									void loadLocalBackups();
+									return;
 								}
+								// Not scanned yet (or nothing found before): only open the file
+								// picker once a fresh scan confirms there's nothing local.
+								void loadLocalBackups().then((found) => {
+									if (found.length > 0) setShowLocalBackups(true);
+									else void openBackupPicker();
+								});
 							}}
 							disabled={isImporting}
-							className={`flex w-full items-center gap-3 px-4 py-3.5 text-left transition-colors ${isImporting ? "opacity-50" : "hover:bg-[var(--surface-2)] active:bg-[var(--surface-2)]"} ${highlightId === "data-import" ? "animate-settings-highlight" : ""}`}
+							className={`flex w-full items-center gap-3 px-4 py-3.5 text-start transition-colors ${isImporting ? "opacity-50" : "hover-fill"} ${highlightId === "data-import" ? "animate-settings-highlight" : ""}`}
 						>
 							<div className="shrink-0 rounded-2xl bg-violet-500/15 p-2.5 text-violet-400">
 								<FileUpFilled className="h-5 w-5" />
@@ -423,13 +354,17 @@ export function SettingsDataPage() {
 								<p className="text-sm font-semibold leading-snug">
 									{t("data_backup.import", { defaultValue: "Import data" })}
 								</p>
-								<p className="mt-0.5 text-xs leading-snug text-[var(--text-muted)]">
-									{t("data_backup.import_card_desc", {
-										defaultValue: "Merge a previously exported file back in — nothing already here is erased. The app reloads afterwards.",
-									})}
-								</p>
+								{readProgress ? (
+									<BackupReadStatus progress={readProgress} className="mt-1.5" />
+								) : (
+									<p className="mt-0.5 text-xs leading-snug text-[var(--text-muted)]">
+										{t("data_backup.import_card_desc", {
+											defaultValue: "Merge a previously exported file back in — nothing already here is erased. The app reloads afterwards.",
+										})}
+									</p>
+								)}
 							</div>
-							{isImporting ? (
+							{isImporting || readProgress ? (
 								<Loader2 className="h-4 w-4 shrink-0 animate-spin text-[var(--text-muted)]" />
 							) : (
 								<Upload className="h-4 w-4 shrink-0 text-[var(--text-muted)] opacity-50" />
@@ -443,7 +378,8 @@ export function SettingsDataPage() {
 							onChange={(event) => {
 								const file = event.target.files?.[0];
 								event.target.value = "";
-								if (file) void handleImportFile(() => copyPickedFileToTemp(file));
+								if (!file) setReadProgress(null);
+								if (file) void handleImportFile((report) => copyPickedFileToTemp(file, (bytesDone, bytesTotal) => report({ stage: "copying", bytesDone, bytesTotal })));
 							}}
 						/>
 
@@ -451,7 +387,7 @@ export function SettingsDataPage() {
 							<ShieldCheck className="mt-0.5 h-3.5 w-3.5 shrink-0 text-[var(--text-muted)]" />
 							<p className="text-xs leading-relaxed text-[var(--text-muted)]">
 								{t("data_backup.backup_note", {
-									defaultValue: "Exports are tied to your profile — a file can only be imported back into the same account it came from.",
+									defaultValue: "A backup can also be imported into a different profile, e.g. after a ban: chats, albums, and drawer media are moved over to it.",
 								})}
 							</p>
 						</div>
@@ -464,7 +400,7 @@ export function SettingsDataPage() {
 						<p className="mb-2 px-1 text-xs font-semibold uppercase tracking-widest text-[var(--text-muted)]">
 							{t("data_backup.media_storage", { defaultValue: "Media Storage" })}
 						</p>
-						<div className="native-card overflow-hidden divide-y divide-[var(--border)]">
+						<div className="native-group">
 							<div
 								id="data-storage-used"
 								className={`flex items-center justify-between gap-4 px-4 py-3.5 ${highlightId === "data-storage-used" ? "animate-settings-highlight" : ""}`}
@@ -494,78 +430,16 @@ export function SettingsDataPage() {
 									{t("data_backup.delete_all", { defaultValue: "Delete all" })}
 								</RowActionPill>
 							</div>
-						</div>
-					</div>
 
-					{/* Saved Phrases */}
-					<div>
-						<p className="mb-2 px-1 text-xs font-semibold uppercase tracking-widest text-[var(--text-muted)]">
-							{t("data_backup.phrases_section", { defaultValue: "Saved Phrases" })}
-						</p>
-						<div className="native-card overflow-hidden divide-y divide-[var(--border)]">
-							<button
-								id="data-phrases-export"
-								type="button"
-								onClick={() => void handleExportPhrasesTxt()}
-								disabled={savedPhrases.length === 0 || isExportingPhrases}
-								className={`flex w-full items-center gap-3 px-4 py-3.5 text-left transition-colors ${savedPhrases.length === 0 ? "opacity-50" : "hover:bg-[var(--surface-2)] active:bg-[var(--surface-2)]"} ${highlightId === "data-phrases-export" ? "animate-settings-highlight" : ""}`}
-							>
-								<div className="shrink-0 rounded-2xl bg-teal-500/15 p-2.5 text-teal-400">
-									<MessageSquareQuoteFilled className="h-5 w-5" />
-								</div>
-								<div className="min-w-0 flex-1">
-									<p className="text-sm font-semibold leading-snug">
-										{t("data_backup.phrases_export", { defaultValue: "Export .txt" })}
-									</p>
-									<p className="mt-0.5 text-xs leading-snug text-[var(--text-muted)]">
-										{t("data_backup.phrases_export_desc", {
-											defaultValue: "Save your saved phrases as a plain text file, one per line.",
-										})}
-									</p>
-								</div>
-								{isExportingPhrases ? (
-									<Loader2 className="h-4 w-4 shrink-0 animate-spin text-[var(--text-muted)]" />
-								) : (
-									<Download className="h-4 w-4 shrink-0 text-[var(--text-muted)] opacity-50" />
-								)}
-							</button>
-
-							<button
-								id="data-phrases-import"
-								type="button"
-								onClick={() => phrasesInputRef.current?.click()}
-								disabled={isImportingPhrases}
-								className={`flex w-full items-center gap-3 px-4 py-3.5 text-left transition-colors ${isImportingPhrases ? "opacity-50" : "hover:bg-[var(--surface-2)] active:bg-[var(--surface-2)]"} ${highlightId === "data-phrases-import" ? "animate-settings-highlight" : ""}`}
-							>
-								<div className="shrink-0 rounded-2xl bg-violet-500/15 p-2.5 text-violet-400">
-									<Upload className="h-5 w-5" />
-								</div>
-								<div className="min-w-0 flex-1">
-									<p className="text-sm font-semibold leading-snug">
-										{isImportingPhrases
-											? t("data_backup.phrases_importing", { defaultValue: "Importing…" })
-											: t("data_backup.phrases_import", { defaultValue: "Import .txt" })}
-									</p>
-									<p className="mt-0.5 text-xs leading-snug text-[var(--text-muted)]">
-										{t("data_backup.phrases_import_desc", {
-											defaultValue: "One phrase per line — replaces the current list.",
-										})}
-									</p>
-								</div>
-								{isImportingPhrases ? (
-									<Loader2 className="h-4 w-4 shrink-0 animate-spin text-[var(--text-muted)]" />
-								) : (
-									<Upload className="h-4 w-4 shrink-0 text-[var(--text-muted)] opacity-50" />
-								)}
-							</button>
+							<div className="flex items-start gap-2.5 px-4 py-3">
+								<Info className="mt-0.5 h-3.5 w-3.5 shrink-0 text-[var(--text-muted)]" />
+								<p className="text-xs leading-relaxed text-[var(--text-muted)]">
+									{t("data_backup.storage_note", {
+										defaultValue: "Photos and videos you saved to your device from the app. Your chats and the app's cache aren't counted, and files you added to the same album or folder yourself aren't touched.",
+									})}
+								</p>
+							</div>
 						</div>
-						<input
-							ref={phrasesInputRef}
-							type="file"
-							accept=".txt,text/plain"
-							className="hidden"
-							onChange={(event) => void handleImportPhrasesFile(event)}
-						/>
 					</div>
 
 					{/* Encounters */}
@@ -573,13 +447,13 @@ export function SettingsDataPage() {
 						<p className="mb-2 px-1 text-xs font-semibold uppercase tracking-widest text-[var(--text-muted)]">
 							{t("data_backup.encounters_section", { defaultValue: "Sexual Encounters" })}
 						</p>
-						<div className="native-card overflow-hidden divide-y divide-[var(--border)]">
+						<div className="native-group">
 							<button
 								id="data-encounters-export"
 								type="button"
 								onClick={() => void handleExportEncountersIcs()}
 								disabled={isExportingEncounters}
-								className={`flex w-full items-center gap-3 px-4 py-3.5 text-left transition-colors ${isExportingEncounters ? "opacity-50" : "hover:bg-[var(--surface-2)] active:bg-[var(--surface-2)]"} ${highlightId === "data-encounters-export" ? "animate-settings-highlight" : ""}`}
+								className={`flex w-full items-center gap-3 px-4 py-3.5 text-start transition-colors ${isExportingEncounters ? "opacity-50" : "hover-fill"} ${highlightId === "data-encounters-export" ? "animate-settings-highlight" : ""}`}
 							>
 								<div className="shrink-0 rounded-2xl bg-teal-500/15 p-2.5 text-teal-400">
 									<CalendarDaysFilled className="h-5 w-5" />
@@ -609,7 +483,7 @@ export function SettingsDataPage() {
 					<p className="mb-2 px-1 text-xs font-semibold uppercase tracking-widest text-[var(--text-muted)]">
 						{t("data_backup.danger_zone", { defaultValue: "Danger Zone" })}
 					</p>
-					<div className="native-card overflow-hidden divide-y divide-[var(--border)]">
+					<div className="native-group">
 						<div
 							id="data-reset-all"
 							className={`flex items-center justify-between gap-4 px-4 py-3.5 ${highlightId === "data-reset-all" ? "animate-settings-highlight" : ""}`}
@@ -666,76 +540,70 @@ export function SettingsDataPage() {
 				onCancel={() => setShowResetConfirm(false)}
 			/>
 
-			{showExportCategoryPicker && (
-				<BottomSheet
-					onClose={() => setShowExportCategoryPicker(false)}
-					closeRef={exportSheetCloseRef}
+			{showExportSheet && userId != null && (
+				<BackupExportSheet
+					profileId={userId}
+					dbFileName={chatDb.getActiveChatDbFileName()}
+					categories={BACKUP_CATEGORY_IDS}
 					isDesktop={isDesktop}
-					isProcessing={isExporting}
+					onClose={() => setShowExportSheet(false)}
+				/>
+			)}
+
+			{showLocalBackups && localBackups && (
+				<BottomSheet
+					onClose={() => setShowLocalBackups(false)}
+					isDesktop={isDesktop}
+					isProcessing={isImporting}
 					panelClassName="max-h-[82dvh]"
 				>
-					<div className="flex items-center justify-between px-4 pb-3">
-						<p className="text-sm font-semibold text-[var(--text)]">
-							{t("data_backup.export_categories_title", { defaultValue: "What do you want to export?" })}
-						</p>
-						<SheetCloseButton disabled={isExporting} />
-					</div>
-					<div className="min-h-0 flex-1 overflow-y-auto pb-4" data-lenis-prevent>
-						<BackupCategoryPicker categories={BACKUP_CATEGORY_IDS} selected={exportCategories} onToggle={toggleExportCategory} />
-						<div className="px-4 pt-4">
-							<p className="mb-2 text-xs font-semibold uppercase tracking-widest text-[var(--text-muted)]">
-								{t("data_backup.export_destination_title", { defaultValue: "Save to" })}
+					<div className="flex items-center justify-between gap-3 px-4 pb-3">
+						<div className="min-w-0">
+							<p className="text-sm font-semibold text-[var(--text)]">
+								{t("local_backups.sheet_title", { defaultValue: "Choose a backup" })}
 							</p>
-							<div className="flex flex-wrap gap-2">
-								<Chip selected={exportDestination === "downloads"} disabled={isExporting} onClick={() => setExportDestination("downloads")}>
-									{isIos()
-										? t("data_backup.export_destination_device", { defaultValue: "This device" })
-										: t("data_backup.export_destination_downloads", { defaultValue: "Downloads" })}
-								</Chip>
-								<Chip selected={exportDestination === "picker"} disabled={isExporting} onClick={() => setExportDestination("picker")}>
-									{t("data_backup.export_destination_picker", { defaultValue: "Choose location…" })}
-								</Chip>
-							</div>
-							<p className="mt-2 text-xs leading-relaxed text-[var(--text-muted)]">
-								{exportDestination === "downloads"
-									? isIos()
-										? t("data_backup.export_destination_device_hint_ios", {
-												defaultValue: "Saved in the Files app under On My iPhone/iPad → Free Grind.",
-											})
-										: t("data_backup.export_destination_downloads_hint", { defaultValue: "Saved to Downloads/FreeGrind on this device." })
-									: isAndroid() || isIos()
-										? t("data_backup.export_destination_picker_hint", {
-												defaultValue: "Pick any folder or cloud storage, e.g. Google Drive (requires the Drive app).",
-											})
-										: t("data_backup.export_destination_picker_hint_desktop", {
-												defaultValue: "Pick any folder, e.g. one synced by Google Drive for desktop.",
-											})}
+							<p className="mt-0.5 text-xs leading-snug text-[var(--text-muted)]">
+								{t("local_backups.sheet_desc", { defaultValue: "These backups were found in Downloads/FreeGrind on this device." })}
 							</p>
 						</div>
+						<SheetCloseButton disabled={isImporting} />
 					</div>
-					<BackupProgressBar kind="export" active={isExporting} />
+					<div className="min-h-0 flex-1 overflow-y-auto px-4 pb-4" data-lenis-prevent>
+						<LocalBackupList
+							backups={localBackups}
+							currentUserId={userId}
+							disabled={isImporting}
+							busyPath={selectedLocalPath}
+							busyProgress={readProgress}
+							onSelect={(backup) => {
+								// The sheet stays open, with the status in the picked row, until the
+								// backup is read; then the category sheet takes over.
+								setSelectedLocalPath(backup.path);
+								void handleImportFile(async () => backup.path).finally(() => {
+									setSelectedLocalPath(null);
+									setShowLocalBackups(false);
+								});
+							}}
+						/>
+					</div>
+					{pickingOtherFile && readProgress ? <BackupReadStatus progress={readProgress} className="px-4 pb-3" /> : null}
 					<div className={`flex shrink-0 gap-2.5 px-4 pb-4 ${SHEET_FOOTER_FADE_CLASS}`}>
-						<SheetClose
-							disabled={isExporting}
-							className={sheetButtonClass("secondary")}
-						>
-							{t("common.cancel", { defaultValue: "Cancel" })}
-						</SheetClose>
 						<button
 							type="button"
 							onClick={() => {
-								void (async () => {
-									const success = await handleExport();
-									if (success) {
-										exportSheetCloseRef.current?.();
-									}
-								})();
+								// Stays open with the status below until the file is read; then the
+								// category sheet takes over.
+								setPickingOtherFile(true);
+								void openBackupPicker().finally(() => {
+									setPickingOtherFile(false);
+									setShowLocalBackups(false);
+								});
 							}}
-							disabled={isExporting || exportCategories.size === 0}
-							className={sheetButtonClass()}
+							disabled={isImporting}
+							className={sheetButtonClass("secondary")}
 						>
-							{isExporting ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
-							<span>{t("data_backup.export_confirm", { defaultValue: "Export" })}</span>
+							{pickingOtherFile && readProgress ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileUpFilled className="h-4 w-4" />}
+							<span>{t("local_backups.choose_other", { defaultValue: "Choose another file…" })}</span>
 						</button>
 					</div>
 				</BottomSheet>
@@ -743,38 +611,43 @@ export function SettingsDataPage() {
 
 			{pendingImport && (
 				<BottomSheet onClose={handleCancelImport} isDesktop={isDesktop} isProcessing={isImporting} panelClassName="max-h-[82dvh]">
-					<div className="flex items-center justify-between px-4 pb-3">
-						<p className="text-sm font-semibold text-[var(--text)]">
-							{t("data_backup.import_categories_title", { defaultValue: "What do you want to restore?" })}
-						</p>
-						<SheetCloseButton disabled={isImporting} />
-					</div>
-					<div className="min-h-0 flex-1 overflow-y-auto pb-4" data-lenis-prevent>
-						<p className="mb-3 px-4 text-xs leading-relaxed text-[var(--text-muted)]">
-							{t("data_backup.import_categories_desc", {
-								defaultValue: "Only categories present in this file can be restored.",
-							})}
-						</p>
-						<BackupCategoryPicker categories={pendingImport.categories} selected={pendingImport.selected} onToggle={toggleImportCategory} />
-					</div>
-					<BackupProgressBar kind="import" active={isImporting} />
-					<div className={`flex shrink-0 gap-2.5 px-4 pb-4 ${SHEET_FOOTER_FADE_CLASS}`}>
-						<SheetClose
-							disabled={isImporting}
-							className={sheetButtonClass("secondary")}
-						>
-							{t("common.cancel", { defaultValue: "Cancel" })}
-						</SheetClose>
-						<button
-							type="button"
-							onClick={() => void handleConfirmImport()}
-							disabled={isImporting || pendingImport.selected.size === 0}
-							className={sheetButtonClass()}
-						>
-							{isImporting ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
-							<span>{t("data_backup.import_confirm", { defaultValue: "Restore" })}</span>
-						</button>
-					</div>
+					{isImporting ? (
+						<BackupProgressView kind="import" />
+					) : (
+						<>
+							<div className="flex items-center justify-between gap-3 px-4 pb-3">
+								<div className="min-w-0">
+									<p className="text-sm font-semibold text-[var(--text)]">
+										{t("data_backup.import_categories_title", { defaultValue: "What do you want to restore?" })}
+									</p>
+									<p className="mt-0.5 text-xs leading-snug text-[var(--text-muted)]">
+										{t("data_backup.import_categories_desc", { defaultValue: "Only categories present in this file can be restored." })}
+									</p>
+								</div>
+								<SheetCloseButton disabled={isImporting} />
+							</div>
+							<div className="min-h-0 flex-1 overflow-y-auto pb-4" data-lenis-prevent>
+								<BackupCategoryPicker categories={pendingImport.categories} selected={pendingImport.selected} onToggle={toggleImportCategory} />
+							</div>
+							<div className={`flex shrink-0 gap-2.5 px-4 pb-4 ${SHEET_FOOTER_FADE_CLASS}`}>
+								<SheetClose
+									disabled={isImporting}
+									className={sheetButtonClass("secondary")}
+								>
+									{t("common.cancel", { defaultValue: "Cancel" })}
+								</SheetClose>
+								<button
+									type="button"
+									onClick={() => void handleConfirmImport()}
+									disabled={isImporting || pendingImport.selected.size === 0}
+									className={sheetButtonClass()}
+								>
+									{isImporting ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+									<span>{t("data_backup.import_confirm", { defaultValue: "Restore" })}</span>
+								</button>
+							</div>
+						</>
+					)}
 				</BottomSheet>
 			)}
 		</section>

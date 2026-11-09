@@ -2,22 +2,22 @@ import { Loader2, Plus } from "lucide-react";
 import { ImagesFilled } from "../../../components/icons/FilledIcons";
 import {
 	DRAWER_PRIMARY_BUTTON_CLASS,
-	DrawerActionButton,
-	DrawerActionBar,
+	DrawerAddButton,
+	DrawerAddTile,
 	DrawerBody,
 	DrawerEmptyState,
 	DrawerFooter,
 	DrawerGrid,
 	DrawerHeader,
 	DrawerMediaPreview,
+	DRAWER_TILE_LOADING,
 	DrawerMediaTile,
 	useDrawerMediaPreview,
 } from "../chat/drawerUi";
-import { useCallback, useState, type MutableRefObject } from "react";
+import { useCallback, useMemo, useState, type MutableRefObject } from "react";
 import { useTranslation } from "react-i18next";
-import toast from "react-hot-toast";
 import { BottomSheet } from "../../../components/ui/bottom-sheet";
-import { getCachedMediaUri, getDrawerMediaKey } from "../../../services/mediaStore";
+import { getDrawerMediaKey, getDrawerMediaSrc } from "../../../services/mediaStore";
 import type { DrawerMedia } from "../chat/ChatDrawerPanel";
 import { useDrawerMediaDelete } from "../chat/useDrawerMediaDelete";
 import { useDrawerUploadQueue } from "../chat/useDrawerUploadQueue";
@@ -30,7 +30,16 @@ interface AlbumDrawerPickerSheetProps {
 	onClose: () => void;
 	onConfirm: (mediaIds: number[]) => void | Promise<void>;
 	isSubmitting: boolean;
+	/** Instead of "Add to Album (n)" on the confirm button. */
+	confirmLabel?: string;
+	/** Instead of "Uploading" on the confirm button while submitting. */
+	submittingLabel?: string;
+	/** False takes photos only: no video uploads into the drawer from here. */
+	allowVideo?: boolean;
+	/** Free items in the album; Infinity without a limit. */
 	remainingSlots: number;
+	/** Free videos in the album (the plan's videos per album); Infinity without a limit. */
+	remainingVideoSlots: number;
 	isDesktop: boolean;
 	/** Animated close for the parent to call once the confirm action succeeded. */
 	closeRef?: MutableRefObject<(() => void) | null>;
@@ -44,7 +53,11 @@ export function AlbumDrawerPickerSheet({
 	onClose,
 	onConfirm,
 	isSubmitting,
+	confirmLabel,
+	submittingLabel,
+	allowVideo = true,
 	remainingSlots,
+	remainingVideoSlots,
 	isDesktop,
 	closeRef,
 }: AlbumDrawerPickerSheetProps) {
@@ -52,42 +65,44 @@ export function AlbumDrawerPickerSheet({
 	const { preview: drawerPreview, bind: bindPreview, consumeClick: consumePreviewClick } = useDrawerMediaPreview();
 	const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
 
-	const toggleSelection = useCallback((id: number) => {
+	// What the album still has room for, given a selection: once that's used
+	// up, the media it has no room for are muted (as the chat drawer mutes
+	// what can't join its selection), so they can't be picked.
+	const videoIds = useMemo(
+		() => new Set(media.filter((item) => item.contentType.startsWith("video/")).map((item) => item.id)),
+		[media],
+	);
+	const canAdd = useCallback(
+		(selection: Set<number>, isVideo: boolean) =>
+			selection.size < remainingSlots
+			&& (!isVideo || [...selection].filter((id) => videoIds.has(id)).length < remainingVideoSlots),
+		[remainingSlots, remainingVideoSlots, videoIds],
+	);
+
+	const toggleSelection = useCallback((id: number, isVideo: boolean) => {
 		setSelectedIds((prev) => {
-			if (prev.has(id)) {
-				const next = new Set(prev);
-				next.delete(id);
-				return next;
-			}
-			if (prev.size >= remainingSlots) {
-				toast.error(t("settings_albums.error_album_full", {
-					defaultValue: "Album is full (max {{max}} items).",
-					max: remainingSlots + prev.size,
-				}));
-				return prev;
-			}
 			const next = new Set(prev);
-			next.add(id);
+			if (next.has(id)) next.delete(id);
+			else if (canAdd(prev, isVideo)) next.add(id);
 			return next;
 		});
-	}, [remainingSlots, t]);
+	}, [canAdd]);
 
 	// New uploads land in the drawer and get picked right away, as far as
 	// the album still has room.
 	const reloadMedia = useCallback(async () => { await onLoadMedia(); }, [onLoadMedia]);
-	const selectUploaded = useCallback((uploaded: { mediaId: number }[]) => {
+	const selectUploaded = useCallback((uploaded: { mediaId: number; isVideo: boolean }[]) => {
 		setSelectedIds((prev) => {
 			const next = new Set(prev);
-			for (const { mediaId } of uploaded) {
-				if (next.size >= remainingSlots) break;
-				next.add(mediaId);
+			for (const { mediaId, isVideo } of uploaded) {
+				if (canAdd(next, isVideo)) next.add(mediaId);
 			}
 			return next;
 		});
-	}, [remainingSlots]);
+	}, [canAdd]);
 	// Videos too: the page uploads those to the album directly, since the
 	// by-id endpoint doesn't add them (see AlbumEditorSheet handleAddFromDrawer).
-	const upload = useDrawerUploadQueue({ onReloadMedia: reloadMedia, onUploaded: selectUploaded });
+	const upload = useDrawerUploadQueue({ onReloadMedia: reloadMedia, onUploaded: selectUploaded, allowVideo });
 	const isBusy = upload.isUploading || isSubmitting;
 
 	const removeDeleted = useCallback(async (mediaId: number) => {
@@ -128,40 +143,52 @@ export function AlbumDrawerPickerSheet({
 			{upload.step ?? (
 			<>
 			<DrawerBody
+				skeletonKey="album-drawer-picker"
 				isDesktop={isDesktop}
-				isLoading={isLoading && media.length === 0}
+				isLoading={isLoading && media.length === 0 && !upload.isUploading}
 				error={media.length === 0 ? error : null}
 				onRetry={() => void onLoadMedia()}
-				empty={media.length === 0 ? (
+				empty={media.length === 0 && !upload.isUploading ? (
 					<DrawerEmptyState
 						icon={<ImagesFilled className="h-5 w-5" />}
 						title={t("settings_albums.drawer_empty", { defaultValue: "No media in your drawer yet." })}
 						hint={t("chat_drawer.empty_hint", { defaultValue: "Take a photo or video, or upload one from your device." })}
 					>
-						<div className="grid w-full max-w-sm grid-cols-3 gap-2">
-							{upload.actions.map((action) => (
-								<DrawerActionButton key={action.key} icon={action.icon} label={action.label} onClick={action.onClick} disabled={isBusy} />
-							))}
-						</div>
+						<DrawerAddButton
+							label={t("chat_drawer.add_media", { defaultValue: "Add media" })}
+							actions={upload.actions}
+							isDesktop={isDesktop}
+							disabled={isBusy}
+						/>
 					</DrawerEmptyState>
 				) : undefined}
 			>
 				<DrawerGrid isDesktop={isDesktop}>
-					{/* Add actions as the grid's first row, like the chat drawer. */}
-					<DrawerActionBar actions={upload.actions} disabled={isBusy} />
+					{/* The add tile first, like the chat drawer. */}
+					<DrawerAddTile
+						label={t("chat_drawer.add_media", { defaultValue: "Add media" })}
+						actions={upload.actions}
+						isDesktop={isDesktop}
+						disabled={isBusy}
+					/>
+					{upload.uploadTiles}
 					{media.map((item) => {
 						const isVideo = item.contentType.startsWith("video/");
-						const mediaSrc = getCachedMediaUri(getDrawerMediaKey(item.id)) ?? item.url;
+						const mediaSrc = getDrawerMediaSrc(item);
+						const isSelected = selectedIds.has(item.id);
 						return (
 							<DrawerMediaTile
 								key={item.id}
-								src={mediaSrc}
+								src={mediaSrc ?? item.url}
 								isVideo={isVideo}
+								posterKey={getDrawerMediaKey(item.id)}
+								placeholder={mediaSrc == null ? DRAWER_TILE_LOADING : undefined}
 								takenOnGrindr={item.takenOnGrindr}
 								alt={t("chat_drawer.media_alt")}
-								selected={selectedIds.has(item.id)}
-								onSelect={() => toggleSelection(item.id)}
-								previewProps={bindPreview({ src: mediaSrc, isVideo })}
+								selected={isSelected}
+								muted={!isSelected && !canAdd(selectedIds, isVideo)}
+								onSelect={() => toggleSelection(item.id, isVideo)}
+								previewProps={bindPreview({ src: mediaSrc ?? item.url, isVideo })}
 								consumePreviewClick={consumePreviewClick}
 								busy={deletion.deletingId === item.id}
 								// Hidden on selected tiles, like in the collection editor.
@@ -189,8 +216,8 @@ export function AlbumDrawerPickerSheet({
 						)}
 						<span>
 							{isSubmitting
-								? t("settings_albums.uploading")
-								: `${t("settings_albums.add_to_album_button", { defaultValue: "Add to Album" })} (${selectedIds.size})`}
+								? submittingLabel ?? t("settings_albums.uploading")
+								: confirmLabel ?? `${t("settings_albums.add_to_album_button", { defaultValue: "Add to Album" })} (${selectedIds.size})`}
 						</span>
 					</button>
 				</DrawerFooter>

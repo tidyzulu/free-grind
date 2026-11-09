@@ -1,3 +1,6 @@
+import type { UploadProgress } from "../services/stagedVideoUpload";
+import type { VideoEdit } from "../services/videoEdit";
+
 export interface RestResponse {
 	status: number;
 	json: () => unknown;
@@ -74,7 +77,24 @@ export interface SharedConversationImage {
 
 export interface UploadChatMediaParams {
 	multipart: MultipartUpload;
-	options: { looping: boolean; takenOnGrindr: boolean; durationSeconds?: number };
+	/** `length`: audio/video duration in milliseconds, as the API documents it. */
+	options: { looping: boolean; takenOnGrindr: boolean; length?: number };
+}
+
+/**
+ * `lengthMs`: the webview's reading, sent only when the file has no duration
+ * of its own. `edit`: the cut and portrait conversion (see videoEdit);
+ * `onLandscapeKept` runs when this device can't turn the video portrait and
+ * it goes out landscape.
+ */
+export interface UploadChatVideoParams {
+	file: File;
+	looping: boolean;
+	lengthMs?: number;
+	edit?: VideoEdit | null;
+	onLandscapeKept?: () => void;
+	/** Where the upload is, as it goes (see UploadProgress). */
+	onProgress?: (progress: UploadProgress) => void;
 }
 
 export interface UploadChatMediaResponse {
@@ -82,15 +102,6 @@ export interface UploadChatMediaResponse {
 	mediaHash: string | null;
 	url: string | null;
 	expiresAt: number | null;
-}
-
-export interface UploadAlbumContentParams {
-	albumId: number | string;
-	multipart: MultipartUpload;
-}
-
-export interface UploadAlbumContentResponse {
-	contentId: number;
 }
 
 export interface SharedAlbumProfile {

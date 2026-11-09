@@ -1,23 +1,33 @@
 import { MapPinFilled } from "../../../components/icons/FilledIcons";
-import { Album, Ban, Copy, Download, Eye, History, Hourglass, ImagePlay, Images, Languages, Loader2, Lock, MessageCircleQuestion, MessageSquarePlus, Mic, MoreVertical, PhoneOff, Play, Repeat2, Reply, ShieldCheck, Trash2, Undo2, Video, VideoOff, ImageOff } from "lucide-react";
+import { Album, Ban, CircleAlert, Copy, Download, Eye, History, Hourglass, ImagePlay, Images, Languages, Loader2, Lock, MessageCircleQuestion, MessageSquarePlus, Mic, MoreVertical, PhoneOff, Play, Repeat2, Reply, RotateCw, ShieldCheck, Trash2, Undo2, Video, VideoOff, ImageOff } from "lucide-react";
+import { sentMediaEcho } from "./sentMediaEchoes";
 import { TakenOnGrindrBadge } from "./TakenOnGrindrBadge";
 import { createPortal } from "react-dom";
 import { MapLocationPreview } from "../gridpage/components/MapLocationPreview";
 import { ConfirmDialog } from "../../../components/ui/confirm-dialog";
 import { PromptDialog } from "../../../components/ui/prompt-dialog";
 import { AudioMessagePlayer } from "./AudioMessagePlayer";
+import { MediaUploadOverlay } from "../../../components/ui/progress-ring";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import React, { Fragment, useEffect, useState, useMemo, useCallback, useRef, useLayoutEffect } from "react";
+import React, { Fragment, useEffect, useState, useMemo, useCallback, useRef, useLayoutEffect, useSyncExternalStore } from "react";
 
 import { useTranslation } from "react-i18next";
 import toast from "react-hot-toast";
 import { appLog } from "../../../utils/logger";
 import { isIos, saveMediaToDevice } from "../../../services/saveMedia";
+import { usePreferences } from "../../../contexts/PreferencesContext";
 import { loadSavedPhrases, saveSavedPhrases } from "../../../services/savedPhrases";
 import type { ConversationEntry, Message } from "../../../types/messages";
-import type { AlbumMediaCount, UiMessage } from "../../../types/chat-page";
+import type { AlbumMediaCount, LocalUploadProgress, UiMessage } from "../../../types/chat-page";
 import { useLocalMediaCache } from "../../../hooks/useLocalMediaCache";
 import { getCachedMediaUri, getMessageFallbackMediaKey } from "../../../services/mediaStore";
+import {
+	getMessagePosterKey,
+	getVideoPoster,
+	getVideoPostersVersion,
+	subscribeVideoPosters,
+} from "../../../services/videoPosterStore";
+import { VideoFirstFrame } from "../../../components/VideoFirstFrame";
 import { useAlbumCache } from "../../../hooks/useAlbumCache";
 import {
     ensureAlbumCacheChecked,
@@ -67,6 +77,7 @@ import { haptic } from "../../../utils/haptics";
 import { menuTransitionStyle, usePresence } from "../../../hooks/usePresence";
 import { proxyMediaUrl } from "../../../utils/mediaProxy";
 import { getHeroRectFromElement, type HeroRect } from "../../../components/PhotoViewer";
+import { RightNowRequestBubble } from "./RightNowRequestBubble";
 
 type ChatThreadMessagesProps = {
 	isDesktop: boolean;
@@ -116,6 +127,8 @@ type ChatThreadMessagesProps = {
 	isArchived?: boolean;
 	localNickname?: string | null;
 	messageTranslations: MessageTranslations;
+	/** Progress of an optimistic upload bubble (currently voice messages). */
+	localUploadProgress?: LocalUploadProgress | null;
 };
 
 const KNOWN_REPLY_TYPES = new Set([
@@ -161,13 +174,17 @@ const MISSING_CLICK_WAIT_MS = 120;
 
 function MediaBadge({ icon, label }: { icon: React.ReactNode; label: React.ReactNode }) {
 	return (
-		<div className="pointer-events-none absolute left-2 top-2 z-20 inline-flex items-center gap-1.5 rounded-full bg-black/50 py-1 pl-1.5 pr-2.5 text-[11px] font-semibold text-white shadow-[0_2px_8px_rgba(0,0,0,0.3)] backdrop-blur-md">
+		<div className="pointer-events-none absolute start-2 top-2 z-20 inline-flex items-center gap-1.5 rounded-full bg-black/50 py-1 ps-1.5 pe-2.5 text-[11px] font-semibold text-white shadow-[0_2px_8px_rgba(0,0,0,0.3)] backdrop-blur-md">
 			{icon}
 			{label}
 		</div>
 	);
 }
 
+/**
+ * Centered upload ring over an optimistic image/video tile; with a `label`
+ * (a video's phase, see UploadProgress) that and the percentage under it.
+ */
 function AlbumExpirationCountdown({ expiresAt, isOnce, t, className = "mt-1" }: { expiresAt: number; isOnce?: boolean; t: any; className?: string }) {
 	const [timeLeft, setTimeLeft] = useState<number>(expiresAt - Date.now());
 
@@ -210,7 +227,7 @@ function AlbumExpirationCountdown({ expiresAt, isOnce, t, className = "mt-1" }: 
 				`}
 			</style>
 			<div className={`flex items-center ${className}`}>
-				<span className="inline-flex items-center gap-1.5 rounded-full bg-black/50 py-1 pl-1.5 pr-2.5 text-[11px] font-semibold tracking-wide text-[var(--accent)] shadow-[0_2px_8px_rgba(0,0,0,0.3)] backdrop-blur-md uppercase">
+				<span className="inline-flex items-center gap-1.5 rounded-full bg-black/50 py-1 ps-1.5 pe-2.5 text-[11px] font-semibold tracking-wide text-[var(--accent)] shadow-[0_2px_8px_rgba(0,0,0,0.3)] backdrop-blur-md uppercase">
 					<Hourglass className="h-3 w-3 animate-hourglass-rotate" />
 					<span>
 						{isOnce ? t("chat.expiration.once") : `${parts.join(" ")} ${t("chat.expiration.remaining")}`}
@@ -309,7 +326,7 @@ function MessageContextMenu({
 		<div
 			ref={menuRef}
 			style={{ top: position.top, left: position.left, ...menuTransitionStyle(visible, "top left") }}
-			className="fixed z-[70] flex min-w-[200px] flex-col gap-1 rounded-lg border border-[var(--border)] bg-[var(--surface)] p-2 shadow-2xl"
+			className="fixed z-[70] flex min-w-[200px] flex-col gap-1 rounded-lg menu-surface p-2"
 		>
 			{actions.map((action) => (
 				<Fragment key={action.key}>
@@ -321,10 +338,10 @@ function MessageContextMenu({
 							onClose();
 							action.onClick();
 						}}
-						className={`flex w-full items-center gap-2 rounded-sm px-2 py-2 text-left text-sm transition disabled:cursor-default disabled:opacity-50 ${
+						className={`flex w-full items-center gap-2 rounded-sm px-2 py-2 text-start text-sm transition disabled:cursor-default disabled:opacity-50 ${
 							action.danger
-								? "text-red-500 hover:bg-red-500/10"
-								: "text-[var(--text)] hover:bg-[var(--surface-2)]"
+								? "text-red-500 hover:bg-red-500/10 active:bg-red-500/15"
+								: "text-[var(--text)] hover-fill"
 						}`}
 					>
 						{action.icon}
@@ -336,6 +353,13 @@ function MessageContextMenu({
 		document.body,
 	);
 }
+
+/**
+ * Photo and video bubbles (not GIFs) all have this size, portrait 3:4, so a
+ * bubble takes its final room before its media has loaded and nothing jumps
+ * when it does; the media is cropped to fill it (the viewer shows it whole).
+ */
+const MEDIA_BUBBLE_SIZE = "aspect-[3/4] w-60 sm:w-64";
 
 export function ChatThreadMessages({
 	isDesktop,
@@ -380,6 +404,7 @@ export function ChatThreadMessages({
 	isArchived = false,
 	localNickname = null,
 	messageTranslations,
+	localUploadProgress = null,
 }: ChatThreadMessagesProps) {
 	const { t } = useTranslation();
 	useLocalMediaCache();
@@ -471,6 +496,10 @@ export function ChatThreadMessages({
 		prevReactionCountsRef.current.clear();
 		reactionButtonRefs.current.clear();
 	}, [selectedConversation.data.conversationId]);
+
+	// Stored first-frame stills of videos (see videoPosterStore) — subscribed
+	// so bubbles drop their spinner once a lookup lands.
+	useSyncExternalStore(subscribeVideoPosters, getVideoPostersVersion);
 
 	const handleCopy = useCallback(async (message: UiMessage) => {
 		const location = getMessageLocation(message);
@@ -583,12 +612,36 @@ export function ChatThreadMessages({
 		startX: number;
 		startY: number;
 		armed: boolean;
+		/** +1: this message is swiped right to reply, -1: left. */
+		sign: 1 | -1;
+		/** Set once the finger has moved far enough to tell a swipe from a scroll. */
+		locked: boolean;
 	} | null>(null);
 	const SWIPE_REPLY_THRESHOLD = 55;
+	// Movement before the gesture is classified as swipe or scroll.
+	const SWIPE_LOCK_DISTANCE = 10;
+	// A swipe has to be clearly more horizontal than vertical (~34° off the
+	// horizontal at most), so a diagonal scroll doesn't drag the bubble along.
+	const SWIPE_LOCK_RATIO = 1.5;
 	const SWIPE_REPLY_MAX_DRAG = 80;
 	// iOS's back gesture starts at the screen's left edge and drags right —
-	// the same direction as swipe-to-reply. Leave that strip to the system.
+	// the same direction as a rightward swipe-to-reply. Leave that strip to the system.
 	const IOS_BACK_EDGE_WIDTH = 30;
+	const { swipeToReplyDirection } = usePreferences();
+	// +1: swipe right to reply, -1: swipe left. "outward" swipes each bubble
+	// toward its own side (the partner's left, ours right), "inward" toward
+	// the middle (the partner's right, ours left).
+	const swipeSignFor = useCallback(
+		(message: UiMessage): 1 | -1 => {
+			if (swipeToReplyDirection === "left") return -1;
+			if (swipeToReplyDirection === "outward" || swipeToReplyDirection === "inward") {
+				const mine = userId != null && Number(message.senderId) === Number(userId);
+				return mine === (swipeToReplyDirection === "outward") ? 1 : -1;
+			}
+			return 1;
+		},
+		[swipeToReplyDirection, userId],
+	);
 	const onIos = useMemo(() => isIos(), []);
 	const swipeElRef = useRef(new Map<string, HTMLDivElement>());
 	const swipeIconRef = useRef(new Map<string, HTMLDivElement>());
@@ -614,11 +667,12 @@ export function ChatThreadMessages({
 	const handleMobileTouchStart = useCallback(
 		(event: React.TouchEvent<HTMLDivElement>, message: UiMessage) => {
 			startMessageLongPress(message.messageId);
+			const sign = swipeSignFor(message);
 			if (
 				isDesktop ||
 				isArchived ||
 				event.touches.length !== 1 ||
-				(onIos && event.touches[0].clientX < IOS_BACK_EDGE_WIDTH) ||
+				(onIos && sign > 0 && event.touches[0].clientX < IOS_BACK_EDGE_WIDTH) ||
 				isLocalClientMessageId(message.messageId) ||
 				isLocalHistoryMessage(message)
 			) {
@@ -632,9 +686,11 @@ export function ChatThreadMessages({
 				startX: touch.clientX,
 				startY: touch.clientY,
 				armed: false,
+				sign,
+				locked: false,
 			};
 		},
-		[isArchived, isDesktop, onIos, startMessageLongPress],
+		[isArchived, isDesktop, onIos, startMessageLongPress, swipeSignFor],
 	);
 
 	const handleMobileTouchMove = useCallback(
@@ -648,14 +704,25 @@ export function ChatThreadMessages({
 				return;
 			}
 			const touch = event.touches[0];
-			const dx = Math.min(touch.clientX - state.startX, SWIPE_REPLY_MAX_DRAG);
+			// Distance travelled in the reply direction (negative = the other way).
+			const rawDx = (touch.clientX - state.startX) * state.sign;
 			const dy = Math.abs(touch.clientY - state.startY);
-			if (dy >= 40 && !state.armed) return;
+			if (!state.locked) {
+				if (Math.hypot(rawDx, dy) < SWIPE_LOCK_DISTANCE) return;
+				// Decide once per gesture: a scroll (or a swipe the other way)
+				// never turns into a reply swipe, however the finger drifts later.
+				if (rawDx <= 0 || rawDx < dy * SWIPE_LOCK_RATIO) {
+					swipeStateRef.current = null;
+					return;
+				}
+				state.locked = true;
+			}
+			const dx = Math.min(rawDx, SWIPE_REPLY_MAX_DRAG);
 			const el = swipeElRef.current.get(state.messageId);
 			const icon = swipeIconRef.current.get(state.messageId);
 			if (el) {
 				el.style.transition = "none";
-				el.style.transform = `translateX(${Math.max(dx, 0)}px)`;
+				el.style.transform = `translateX(${Math.max(dx, 0) * state.sign}px)`;
 			}
 			const isArmed = dx > SWIPE_REPLY_THRESHOLD;
 			if (icon) {
@@ -1015,13 +1082,68 @@ export function ChatThreadMessages({
 	// grow the browser may already have clamped scrollTop. Content that lands
 	// without a scroll (incoming message while reading history, media finishing
 	// loading) also refreshes it, otherwise the next keyboard toggle would jump.
+	//
+	// Backgrounding the app or locking the device (Android especially) resizes
+	// or collapses the WebView while the page is hidden and then restores it in
+	// several steps after it comes back. Treating those as keyboard toggles —
+	// or letting the clamped scroll positions they produce trigger an older
+	// page load — throws the reader somewhere up the history. So the position
+	// is frozen while hidden and restored for a short settle window after the
+	// page is visible again, until the reader touches the list themselves.
+	const suspendedRef = useRef(false);
 	useEffect(() => {
 		const container = threadScrollContainerRef.current;
 		if (!container || typeof ResizeObserver === "undefined") return;
 		const readDistance = () => Math.max(0, container.scrollHeight - container.scrollTop - container.clientHeight);
 		let distanceFromEnd = readDistance();
 		let previousHeight = container.clientHeight;
+		let saved: { atEnd: boolean; scrollTop: number } | null = null;
+		let settleTimer: number | undefined;
+		let settleFrame: number | undefined;
+		const restore = () => {
+			if (!saved) return;
+			container.scrollTop = saved.atEnd ? container.scrollHeight : saved.scrollTop;
+			previousHeight = container.clientHeight;
+			distanceFromEnd = readDistance();
+		};
+		const endSettle = () => {
+			window.clearTimeout(settleTimer);
+			if (settleFrame !== undefined) window.cancelAnimationFrame(settleFrame);
+			settleTimer = undefined;
+			settleFrame = undefined;
+			saved = null;
+			suspendedRef.current = false;
+			previousHeight = container.clientHeight;
+			distanceFromEnd = readDistance();
+		};
+		const onVisibilityChange = () => {
+			if (document.visibilityState === "hidden") {
+				window.clearTimeout(settleTimer);
+				if (settleFrame !== undefined) window.cancelAnimationFrame(settleFrame);
+				// Keep the snapshot from the first hide if a settle window was
+				// still running — the position at that point may already be off.
+				if (!saved) {
+					saved = { atEnd: distanceFromEnd < 80, scrollTop: container.scrollTop };
+				}
+				suspendedRef.current = true;
+				return;
+			}
+			if (!saved) return;
+			restore();
+			// Re-apply every frame for a moment: the WebView regains its full
+			// size (and the content re-lays out) only after it's visible again.
+			const tick = () => {
+				restore();
+				settleFrame = window.requestAnimationFrame(tick);
+			};
+			settleFrame = window.requestAnimationFrame(tick);
+			settleTimer = window.setTimeout(endSettle, 700);
+		};
+		const onUserInteraction = () => {
+			if (saved && document.visibilityState === "visible") endSettle();
+		};
 		const onScroll = () => {
+			if (suspendedRef.current) return;
 			distanceFromEnd = readDistance();
 		};
 		const contentObserver = new MutationObserver(onScroll);
@@ -1031,14 +1153,29 @@ export function ChatThreadMessages({
 		const observer = new ResizeObserver(() => {
 			const height = container.clientHeight;
 			if (height === previousHeight) return;
+			if (suspendedRef.current) {
+				if (document.visibilityState === "visible") restore();
+				return;
+			}
 			previousHeight = height;
 			container.scrollTop = container.scrollHeight - height - distanceFromEnd;
 			distanceFromEnd = readDistance();
 		});
 		container.addEventListener("scroll", onScroll, { passive: true });
+		container.addEventListener("touchstart", onUserInteraction, { passive: true });
+		container.addEventListener("wheel", onUserInteraction, { passive: true });
+		container.addEventListener("pointerdown", onUserInteraction);
+		document.addEventListener("visibilitychange", onVisibilityChange);
 		observer.observe(container);
 		return () => {
+			window.clearTimeout(settleTimer);
+			if (settleFrame !== undefined) window.cancelAnimationFrame(settleFrame);
+			suspendedRef.current = false;
+			document.removeEventListener("visibilitychange", onVisibilityChange);
 			container.removeEventListener("scroll", onScroll);
+			container.removeEventListener("touchstart", onUserInteraction);
+			container.removeEventListener("wheel", onUserInteraction);
+			container.removeEventListener("pointerdown", onUserInteraction);
 			container.removeEventListener("load", onScroll, true);
 			container.removeEventListener("loadedmetadata", onScroll, true);
 			contentObserver.disconnect();
@@ -1046,10 +1183,20 @@ export function ChatThreadMessages({
 		};
 	}, [threadScrollContainerRef]);
 
+	// Scroll events produced by the hide/resume resize must not count as the
+	// reader reaching the top (which would load and prepend an older page).
+	const onThreadScroll = useCallback(
+		(event: React.UIEvent<HTMLDivElement>) => {
+			if (suspendedRef.current || document.hidden) return;
+			handleThreadScroll(event);
+		},
+		[handleThreadScroll],
+	);
+
 	return (
 		<div
 			ref={threadScrollContainerRef}
-			onScroll={handleThreadScroll}
+			onScroll={onThreadScroll}
 			data-lenis-prevent
 			className="flex flex-1 flex-col overflow-x-hidden overflow-y-auto"
 			style={bottomInset > 0 || topInset > 0 ? { paddingBottom: bottomInset, paddingTop: topInset } : undefined}
@@ -1129,6 +1276,18 @@ export function ChatThreadMessages({
                         );
                     }
 
+                    if (message.type === "SystemRestored") {
+                        return (
+                            <Fragment key={message.messageId}>
+                                {renderEventPill(
+                                    <History className="h-3.5 w-3.5 shrink-0" />,
+                                    t("chat.system.restored", { defaultValue: "Restored from backup" }),
+                                    message.timestamp,
+                                )}
+                            </Fragment>
+                        );
+                    }
+
                     if (message.type === "VideoCall") {
                         const body = message.body as Record<string, unknown> | null;
                         const isSuccessful =
@@ -1153,6 +1312,13 @@ export function ChatThreadMessages({
                         userId != null && Number(message.senderId) === Number(userId);
                     const failed = message.clientState === "failed";
                     const pending = message.clientState === "pending";
+                    const uploadProgress = localUploadProgress?.messageId === message.messageId ? localUploadProgress.progress : null;
+                    const uploadPhase = localUploadProgress?.messageId === message.messageId ? localUploadProgress.phase : undefined;
+                    const uploadPhaseLabel = uploadPhase
+                        ? t(`chat.upload_phase.${uploadPhase}`, {
+                              defaultValue: { preparing: "Preparing", converting: "Converting", finishing: "Finishing", uploading: "Uploading" }[uploadPhase],
+                          })
+                        : undefined;
                     // Every message in an archived conversation is local-only by
                     // definition (the whole thread is gone from the API) — singling
                     // out individual messages with the badge/dimming is redundant
@@ -1227,7 +1393,9 @@ export function ChatThreadMessages({
                         getMessageAlbumCoverUrl(message);
                     const albumMediaCount =
                         albumId != null
-                            ? (ownAlbumMediaCountMap?.get(albumId) ?? getCachedAlbumMediaCount(albumId))
+                            // Your own album counts only what it holds now (live);
+                            // the local cache also counts items deleted since.
+                            ? (ownAlbumMediaCountMap?.get(albumId) ?? (mine ? null : getCachedAlbumMediaCount(albumId)))
                             : null;
                     const albumName =
                         albumId != null
@@ -1276,9 +1444,14 @@ export function ChatThreadMessages({
                         ? getCachedMediaUri(replyToMsgCaptureTarget.mediaKey)
                         : null;
                     const replyImageUrl = cachedReplyImageUri ?? (replyToMsg ? getMessageImageUrl(replyToMsg) : null);
-                    const cachedReplyVideoUri = replyToMsgCaptureTarget?.kind === "video"
-                        ? getCachedMediaUri(replyToMsgCaptureTarget.mediaKey)
+                    // Like the bubble's own lookup: the primary key can miss although
+                    // the bytes are stored under the message-id copy.
+                    const fallbackReplyMediaUri = replyToMsgId
+                        ? getCachedMediaUri(getMessageFallbackMediaKey(replyToMsgId))
                         : null;
+                    const cachedReplyVideoUri = (replyToMsgCaptureTarget?.kind === "video"
+                        ? getCachedMediaUri(replyToMsgCaptureTarget.mediaKey)
+                        : null) ?? (fallbackReplyMediaUri?.startsWith("data:video/") ? fallbackReplyMediaUri : null);
                     const replyVideoUrl = replyIsVideo
                         ? (cachedReplyVideoUri ?? (replyToMsg ? getMessageVideoUrl(replyToMsg) : null))
                         : null;
@@ -1337,7 +1510,25 @@ export function ChatThreadMessages({
                         return (replyAlbumId != null ? getCachedAlbumCoverUri(replyAlbumId) : null)
                             ?? getMessageAlbumCoverUrl(src);
                     })();
-                    const replyThumbUrl = replyAlbumCoverUrl
+                    // A reply to a profile-photo reply quotes that message (its text),
+                    // as the chat shows it, not the photo it was about.
+                    const repliesToPhotoReply =
+                        (replyToMsg?.type ?? replyToMsgRef?.type ?? replyPreviewRaw?.type) === "ProfilePhotoReply";
+                    const photoReplyBody = (replyToMsg?.body
+                        ?? (message.replyToMessage as Record<string, unknown> | null | undefined)?.body) as Record<string, unknown> | null | undefined;
+                    const photoReplyText = repliesToPhotoReply && typeof photoReplyBody?.photoContentReply === "string"
+                        && photoReplyBody.photoContentReply.trim().length > 0
+                        ? photoReplyBody.photoContentReply.trim()
+                        : null;
+                    const replyIsGaymoji = (replyToMsg?.type ?? replyToMsgRef?.type ?? replyPreviewRaw?.type) === "Gaymoji"
+                        || replyPreviewRaw?.chat1Type === "gaymoji";
+                    // A Gaymoji's hash lives on the chat CDN, not the thumb endpoint.
+                    const replyGaymojiUrl = replyIsGaymoji
+                        ? (replyToMsg ? getGaymojiUrl(replyToMsg) : null)
+                            ?? (message.replyToMessage ? getGaymojiUrl(message.replyToMessage as unknown as UiMessage) : null)
+                            ?? (replyImageHash ? getGaymojiUrl({ type: "Gaymoji", body: { imageHash: replyImageHash } } as unknown as UiMessage) : null)
+                        : null;
+                    const replyThumbUrl = repliesToPhotoReply ? null : replyIsGaymoji ? replyGaymojiUrl : replyAlbumCoverUrl
                         ?? replyImageUrl
                         ?? cachedReplyHashUri
                         ?? (replyImageHash ? getThumbImageUrl(replyImageHash, "320x320") : null)
@@ -1372,8 +1563,9 @@ export function ChatThreadMessages({
                     const replyTargetType = replyToMsg?.type ?? replyToMsgRef?.type;
                     const isReplyTargetUnsupported =
                         replyTargetType != null && !KNOWN_REPLY_TYPES.has(replyTargetType);
-                    const replyDescription =
-                        message.type === "AlbumContentReply" || replyTargetType === "AlbumContentReply"
+                    const replyDescription = repliesToPhotoReply
+                        ? photoReplyText ?? t("chat.thread.profile_photo")
+                        : message.type === "AlbumContentReply" || replyTargetType === "AlbumContentReply"
                             ? t("chat.thread.album_image")
                             : replyTargetType === "AlbumContentReaction"
                                 ? t("chat.thread.reacted_to_image")
@@ -1387,6 +1579,8 @@ export function ChatThreadMessages({
                                             ? t("chat.thread.shared_video")
                                             : replyTargetType === "Giphy"
                                                 ? t("chat.thread.shared_gif")
+                                            : replyIsGaymoji
+                                                ? t("chat.preview.sent_gaymoji")
                                                 : isReplyTargetUnsupported
                                                     ? t("chat.thread.unsupported_message", { defaultValue: "Unsupported message" })
                                                     : t("chat.thread.shared_image");
@@ -1396,7 +1590,7 @@ export function ChatThreadMessages({
                                 ? t("chat.thread.replied_to_myself")
                                 : t("chat.thread.replied_to_you", { defaultValue: "Replied to you" })
                             : replySenderId != null && Number(replySenderId) === Number(message.senderId)
-                                ? t("chat.thread.replied_to_myself")
+                                ? t("chat.thread.replied_to_themselves", { defaultValue: "Replied to themselves" })
                                 : t("chat.thread.replied_to_name", {
                                         name: localNickname || selectedConversation?.data.name || t("common.unknown_display_name"),
                                     })
@@ -1435,7 +1629,7 @@ export function ChatThreadMessages({
                         Boolean(audioUrl) && messageText === t("chat.thread.shared_audio");
                     const isMediaOnlyBubble =
                         isImageOnlyBubble || isVideoOnlyBubble || isAlbumOnlyBubble || isLocationOnlyBubble || isAlbumReactionBubble;
-                    const tailCorner = mine ? "rounded-br-[3px]" : "rounded-bl-[3px]";
+                    const tailCorner = mine ? "rounded-ee-[3px]" : "rounded-es-[3px]";
                     const shouldBlurIncomingMedia =
                         blurIncomingMedia &&
                         message.type !== "Giphy" &&
@@ -1448,8 +1642,8 @@ export function ChatThreadMessages({
                         selectedThreadMessageMatches[activeThreadSearchIndex]
                             ?.messageId === message.messageId;
                     const fireButtonClass = mine
-                        ? "absolute -left-2 -top-2"
-                        : "absolute -right-2 -top-2";
+                        ? "absolute -start-2 -top-2"
+                        : "absolute -end-2 -top-2";
                     const reactionEmoji = getReactionEmoji(message.reactions[0]?.reactionType ?? 1);
                     const flameOutline = "drop-shadow(1px 0 0 var(--surface)) drop-shadow(-1px 0 0 var(--surface)) drop-shadow(0 1px 0 var(--surface)) drop-shadow(0 -1px 0 var(--surface))";
                     const multiReaction = message.reactions.length >= 2;
@@ -1523,7 +1717,7 @@ export function ChatThreadMessages({
                         (!isLatestShare || !msgBody?.isViewable);
 
                     return (
-                    <Fragment key={message.messageId}>
+                    <Fragment key={sentMediaEcho(message.messageId)?.key ?? message.messageId}>
                         <div
                             data-message-id={message.messageId}
                             ref={(element) => {
@@ -1547,7 +1741,7 @@ export function ChatThreadMessages({
                         >
                             <div
                                 ref={(el) => { if (el) swipeIconRef.current.set(message.messageId, el); else swipeIconRef.current.delete(message.messageId); }}
-                                className="pointer-events-none absolute left-2 top-1/2 flex h-7 w-7 items-center justify-center rounded-full bg-[var(--surface-3)]"
+                                className={`pointer-events-none absolute ${swipeSignFor(message) > 0 ? "start-2" : "end-2"} top-1/2 flex h-7 w-7 items-center justify-center rounded-full bg-[var(--surface-3)]`}
                                 style={{ opacity: 0, transform: "translateY(-50%) scale(0.5)" }}
                             >
                                 <Reply className="h-4 w-4 text-[var(--text-muted)]" />
@@ -1572,20 +1766,22 @@ export function ChatThreadMessages({
                                     }}
                                     className={`relative group/bubble w-full rounded-2xl text-base no-touch-callout ${
                                         isMediaOnlyBubble && hasReply
-                                            ? `p-0 ${mine ? "rounded-br-[3px]" : "rounded-bl-[3px]"}`
+                                            ? `p-0 ${mine ? "rounded-ee-[3px]" : "rounded-es-[3px]"}`
                                             : isMediaOnlyBubble
                                                 ? "bg-transparent p-0"
                                                 : `px-3 py-2 ${
                                                     mine
-                                                        ? "bg-[var(--accent)] text-[var(--accent-contrast)] rounded-br-[3px]"
-                                                        : "bg-[var(--surface-2)] text-[var(--text)] rounded-bl-[3px]"
+                                                        ? "bg-[var(--accent)] text-[var(--accent-contrast)] rounded-ee-[3px]"
+                                                        : "bg-[var(--surface-2)] text-[var(--text)] rounded-es-[3px]"
                                                 }`
                                     } ${isActiveSearchMatch ? "ring-2 ring-[var(--accent)]" : ""} ${highlightedMessageId === message.messageId ? (mine ? "animate-jump-highlight-mine" : "animate-jump-highlight-other") : ""} ${(localOnly || isCachedExpiredAlbum) ? "opacity-50" : ""}`}
                                 >
-                                    <div className={isMediaOnlyBubble && hasReply ? `overflow-hidden rounded-2xl ${mine ? "rounded-br-[3px]" : "rounded-bl-[3px]"}` : "contents"}>
+                                    <div className={isMediaOnlyBubble && hasReply ? `overflow-hidden rounded-2xl ${mine ? "rounded-ee-[3px]" : "rounded-es-[3px]"}` : "contents"}>
                                     {message.type !== "ProfilePhotoReply" && (replyText || replyThumbUrl || replyVideoUrl || replyIsAudio || hasReply) ? (
                                         <div className={isMediaOnlyBubble && hasReply
-                                            ? `relative w-full p-3 ${mine ? "bg-[var(--accent)] text-[var(--accent-contrast)]" : "bg-[var(--surface-2)] text-[var(--text)]"}`
+                                            // Takes the media's width rather than setting it: a long
+                                            // quote would otherwise widen the bubble past the map/photo.
+                                            ? `relative ${message.type === "Giphy" ? "w-full" : "w-0 min-w-full"} p-3 ${mine ? "bg-[var(--accent)] text-[var(--accent-contrast)]" : "bg-[var(--surface-2)] text-[var(--text)]"}`
                                             : "contents"
                                         }>
                                         <div
@@ -1608,38 +1804,39 @@ export function ChatThreadMessages({
                                             }}
                                             className={`relative flex overflow-hidden text-xs ${replyToMsgId || ownAlbumContentTarget ? "cursor-pointer active:opacity-70" : ""} ${
                                             isMediaOnlyBubble && hasReply
-                                                ? `rounded-[6px] ${mine ? "bg-black/20" : "bg-black/[0.08]"}`
+                                                ? `rounded-[6px] ${mine ? "bg-black/15" : "bg-black/[0.06]"}`
                                                 : isMediaOnlyBubble
-                                                ? `mx-3 mt-3 mb-3 rounded-[6px] ${mine ? "bg-black/20" : "bg-black/[0.08]"}`
-                                                : `mt-1 mb-2.5 rounded-[6px] ${mine ? "bg-black/20" : "bg-black/[0.08]"}`
+                                                ? `mx-3 mt-3 mb-3 rounded-[6px] ${mine ? "bg-black/15" : "bg-black/[0.06]"}`
+                                                : `mt-1 mb-2 rounded-[6px] ${mine ? "bg-black/15" : "bg-black/[0.06]"}`
                                         }`}>
-                                            <div className={`absolute left-0 top-0 h-full w-[3px] shrink-0 ${
-                                                mine ? "bg-white/60" : "bg-[var(--accent)]/50"
+                                            <div className={`absolute start-0 top-0 h-full w-[3px] shrink-0 ${
+                                                mine ? "bg-white/75" : "bg-[var(--accent)]"
                                             }`} />
-                                            <div className="min-w-0 flex-1 py-[13px] pl-[13px] pr-2.5">
-                                                <p className="mb-0.5 font-semibold opacity-60 truncate">{replyLabel}</p>
-                                                <p className="line-clamp-2 break-words opacity-80">{replyText ?? replyDescription}</p>
+                                            <div className="min-w-0 flex-1 self-center py-2 ps-3 pe-2.5">
+                                                <p className={`mb-0.5 truncate font-semibold ${mine ? "opacity-90" : "text-[var(--accent)]"}`}>{replyLabel}</p>
+                                                <p className="line-clamp-2 break-words text-[13px] leading-snug opacity-75">{replyText ?? replyDescription}</p>
                                             </div>
                                             {replyThumbUrl ? (
-                                                <div className="relative w-14 shrink-0 self-stretch overflow-hidden">
+                                                <div className={`relative my-1.5 me-1.5 h-10 w-10 shrink-0 self-center overflow-hidden rounded-[6px] ${replyIsGaymoji ? "" : "bg-black/20"}`}>
                                                     <img
                                                         src={proxyMediaUrl(replyThumbUrl)}
                                                         alt=""
-                                                        className={`absolute inset-0 h-full w-full object-cover [clip-path:inset(0)]${blurIncomingMedia && (replyToMsg?.type ?? replyToMsgRef?.type) !== "Giphy" ? " blur-md transition" : ""}`}
+                                                        className={`absolute inset-0 h-full w-full ${replyIsGaymoji ? "object-contain" : "object-cover"} [clip-path:inset(0)]${blurIncomingMedia && (replyToMsg?.type ?? replyToMsgRef?.type) !== "Giphy" ? " blur-md transition" : ""}`}
                                                     />
                                                 </div>
                                             ) : replyVideoUrl ? (
-                                                <div className="relative w-14 shrink-0 self-stretch overflow-hidden bg-black">
-                                                    <div className="js-video-spinner pointer-events-none absolute inset-0 flex items-center justify-center">
+                                                <div className="relative my-1.5 me-1.5 h-10 w-10 shrink-0 self-center overflow-hidden rounded-[6px] bg-black">
+                                                    <div className="js-video-spinner pointer-events-none absolute inset-0 flex animate-delayed-appear items-center justify-center">
                                                         <Loader2 className="h-3.5 w-3.5 animate-spin text-white/60" />
                                                     </div>
-                                                    <video
-                                                        muted
-                                                        preload="metadata"
-                                                        src={proxyMediaUrl(replyVideoUrl, { as: "video" })}
-                                                        onLoadedMetadata={(e) => { (e.currentTarget as HTMLVideoElement).currentTime = 0.001; }}
-                                                        onSeeked={(e) => {
-                                                            const el = e.currentTarget;
+                                                    <VideoFirstFrame
+                                                        src={replyVideoUrl}
+                                                        // Same still as the quoted message's own bubble.
+                                                        posterKey={replyToMsgId ? getMessagePosterKey(replyToMsgId) : null}
+                                                        conversationId={selectedConversation.data.conversationId}
+                                                        // The quoted bubble is in this thread and captures it itself.
+                                                        waitForCapture={replyToMsg != null}
+                                                        onReady={(el) => {
                                                             el.style.opacity = "1";
                                                             const parent = el.parentElement;
                                                             const spinner = parent?.querySelector<HTMLElement>(".js-video-spinner");
@@ -1654,14 +1851,14 @@ export function ChatThreadMessages({
                                                     </div>
                                                 </div>
                                             ) : replyIsAudio ? (
-                                                <div className={`flex w-14 shrink-0 items-center justify-end py-2.5 pr-3 ${mine ? "opacity-80" : "opacity-60"}`}>
+                                                <div className={`flex w-14 shrink-0 items-center justify-end py-2.5 pe-3 ${mine ? "opacity-80" : "opacity-60"}`}>
                                                     <div className="flex flex-col items-center gap-1">
                                                         <Mic className="h-4 w-4" />
                                                         <span className="text-[10px] opacity-80">{replyAudioDuration ?? "0:00"}</span>
                                                     </div>
                                                 </div>
                                             ) : replyLocation ? (
-                                                <div className="relative w-14 shrink-0 self-stretch overflow-hidden bg-[var(--surface-2)]">
+                                                <div className="relative my-1.5 me-1.5 h-10 w-10 shrink-0 self-center overflow-hidden rounded-[6px] bg-[var(--surface-2)]">
                                                     <MapLocationPreview lat={replyLocation.lat} lon={replyLocation.lon} zoom={14} marker={false} className="pointer-events-none absolute inset-0" />
                                                     {/* A small pin with its tip on the centered spot (the map's own is too big here). */}
                                                     <MapPinFilled className="pointer-events-none absolute left-1/2 top-1/2 h-4 w-4 -translate-x-1/2 -translate-y-[85%] text-[var(--accent)] drop-shadow" />
@@ -1716,13 +1913,14 @@ export function ChatThreadMessages({
                                             <img
                                                 src={proxyMediaUrl(imageUrl)}
                                                 alt={t("chat.thread.shared_alt")}
-                                                className={`${message.type === "Giphy" && hasReply ? "max-h-96 w-full object-cover" : isImageOnlyBubble ? "max-h-80 w-full object-cover" : "max-h-64 w-full object-cover"} ${PRIVACY_BLUR_TRANSITION_CLASS} ${mediaBlurClassName}`}
+                                                className={`${message.type === "Giphy" ? (hasReply ? "max-h-96 w-full object-cover" : isImageOnlyBubble ? "max-h-80 w-full object-cover" : "max-h-64 w-full object-cover") : `${MEDIA_BUBBLE_SIZE} bg-[var(--surface-2)] object-cover`} ${PRIVACY_BLUR_TRANSITION_CLASS} ${mediaBlurClassName}`}
                                             />
                                             {isExpiringImage ? (
                                                 <MediaBadge icon={<Eye className="h-3.5 w-3.5" />} label={t("chat.attachments.view_once")} />
                                             ) : message.type === "Giphy" ? (
                                                 <MediaBadge icon={<ImagePlay className="h-3.5 w-3.5" />} label="GIF" />
                                             ) : null}
+                                            {uploadProgress != null ? <MediaUploadOverlay progress={uploadProgress} /> : null}
                                             {messageTakenOnGrindr ? (
                                                 <>
                                                     <style>{`
@@ -1731,7 +1929,7 @@ export function ChatThreadMessages({
                                                     `}</style>
                                                     {/* Image-only bubbles render it in the footer row, level with the time. */}
                                                     {!isImageOnlyBubble ? (
-                                                        <div className="absolute bottom-1.5 left-2.5 z-10">
+                                                        <div className="absolute bottom-1.5 start-2.5 z-10">
                                                             <TakenOnGrindrBadge
                                                                 label={imageCreatedAt != null ? formatTakenOnGrindrTime(imageCreatedAt, nowTimestamp, t) : null}
                                                             />
@@ -1910,7 +2108,7 @@ export function ChatThreadMessages({
                                         ) : null}
 
                                         {isExpiredImage ? (
-                                            <div className={`relative flex items-center justify-center overflow-hidden bg-[var(--surface-2)] ${isImageOnlyBubble ? `w-full ${hasReply ? "" : `rounded-2xl ${tailCorner}`}` : "mb-2 rounded-xl border border-black/10"}`} style={{ minHeight: "12rem", minWidth: "12rem" }}>
+                                            <div className={`relative flex items-center justify-center overflow-hidden bg-[var(--surface-2)] ${MEDIA_BUBBLE_SIZE} ${isImageOnlyBubble ? (hasReply ? "" : `rounded-2xl ${tailCorner}`) : "mb-2 rounded-xl border border-black/10"}`}>
                                                 <div className="flex flex-col items-center gap-1.5 text-[var(--text-muted)]">
                                                     <ImageOff className="h-6 w-6" />
                                                     <span className="text-xs font-medium">{t("chat.thread.image_expired")}</span>
@@ -1924,7 +2122,7 @@ export function ChatThreadMessages({
                                         ) : null}
 
                                         {isExpiredVideo ? (
-                                            <div className={`relative flex items-center justify-center overflow-hidden bg-[var(--surface-2)] ${isVideoOnlyBubble ? `w-full ${hasReply ? "" : `rounded-2xl ${tailCorner}`}` : "mb-2 rounded-xl border border-black/10"}`} style={{ minHeight: "12rem", minWidth: "16rem" }}>
+                                            <div className={`relative flex items-center justify-center overflow-hidden bg-[var(--surface-2)] ${MEDIA_BUBBLE_SIZE} ${isVideoOnlyBubble ? (hasReply ? "" : `rounded-2xl ${tailCorner}`) : "mb-2 rounded-xl border border-black/10"}`}>
                                                 <div className="flex flex-col items-center gap-1.5 text-[var(--text-muted)]">
                                                     <VideoOff className="h-6 w-6" />
                                                     <span className="text-xs font-medium">{t("chat.thread.video_expired")}</span>
@@ -1941,13 +2139,21 @@ export function ChatThreadMessages({
                                             const videoMaxViews = typeof msgBody?.maxViews === "number" ? msgBody.maxViews : 2147483647;
                                             // Unlimited videos are sent with MAX_VIDEO_VIEWS, older ones with 2147483647.
                                             const isLimitedVideo = videoMaxViews < MAX_VIDEO_VIEWS;
+                                            // While uploading, and after until the video's own first
+                                            // frame is there: the still of what was sent, which also
+                                            // holds the bubble's size (see sentMediaEchoes).
+                                            const localPoster = message.localPoster ?? sentMediaEcho(message.messageId)?.poster;
+                                            const posterKey = getMessagePosterKey(message.messageId);
+                                            // A still captured earlier and already in memory shows right
+                                            // away — no spinner, play badge visible from the start.
+                                            const hasStoredPoster = !localPoster && Boolean(getVideoPoster(posterKey));
                                             return (
                                                 <div
                                                     role="button"
                                                     tabIndex={0}
-                                                    className={`group/media relative block overflow-hidden bg-black ${
+                                                    className={`group/media relative block overflow-hidden bg-black ${MEDIA_BUBBLE_SIZE} ${
                                                         isVideoOnlyBubble
-                                                            ? `w-full ${hasReply ? "" : `rounded-2xl ${tailCorner}`}`
+                                                            ? hasReply ? "" : `rounded-2xl ${tailCorner}`
                                                             : `mb-2 rounded-xl border border-black/10 ${shouldBlurIncomingMedia ? "cursor-pointer" : ""}`
                                                     }`}
                                                     onMouseEnter={() => handleMediaMouseEnter(message.messageId)}
@@ -1974,25 +2180,61 @@ export function ChatThreadMessages({
                                                     })}
                                                     onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") e.currentTarget.click(); }}
                                                 >
-                                                    <div className="js-video-spinner pointer-events-none absolute inset-0 flex items-center justify-center">
-                                                        <Loader2 className="h-5 w-5 animate-spin text-white/60" />
-                                                    </div>
-                                                    <video
-                                                        preload="metadata"
-                                                        muted
-                                                        src={proxyMediaUrl(videoUrl, { as: "video" })}
-                                                        onLoadedMetadata={(e) => { (e.currentTarget as HTMLVideoElement).currentTime = 0.001; }}
-                                                        onSeeked={(e) => {
-                                                            const el = e.currentTarget;
-                                                            el.style.opacity = "1";
-                                                            const parent = el.parentElement;
-                                                            const spinner = parent?.querySelector<HTMLElement>(".js-video-spinner");
-                                                            if (spinner) spinner.style.display = "none";
-                                                            const badge = parent?.querySelector<HTMLElement>(".js-video-play-badge");
-                                                            if (badge) badge.style.opacity = "1";
-                                                        }}
-                                                        className={`w-full object-cover opacity-0 ${PRIVACY_BLUR_TRANSITION_CLASS} ${isVideoOnlyBubble ? "max-h-80" : "max-h-64"} ${mediaBlurClassName}`}
-                                                    />
+                                                    {hasStoredPoster ? null : (
+                                                        <div className="js-video-spinner pointer-events-none absolute inset-0 flex animate-delayed-appear items-center justify-center">
+                                                            <Loader2 className="h-5 w-5 animate-spin text-white/60" />
+                                                        </div>
+                                                    )}
+                                                    {(() => {
+                                                        const poster = localPoster;
+                                                        if (!poster) return (
+                                                            <VideoFirstFrame
+                                                                src={videoUrl}
+                                                                posterKey={posterKey}
+                                                                conversationId={selectedConversation.data.conversationId}
+                                                                capture={!pending && !failed && !isLocalClientMessageId(message.messageId)}
+                                                                onReady={(el) => {
+                                                                    el.style.opacity = "1";
+                                                                    const parent = el.parentElement;
+                                                                    const spinner = parent?.querySelector<HTMLElement>(".js-video-spinner");
+                                                                    if (spinner) spinner.style.display = "none";
+                                                                    const badge = parent?.querySelector<HTMLElement>(".js-video-play-badge");
+                                                                    if (badge) badge.style.opacity = "1";
+                                                                }}
+                                                                className={`h-full w-full object-cover ${hasStoredPoster ? "" : "opacity-0"} ${PRIVACY_BLUR_TRANSITION_CLASS} ${mediaBlurClassName}`}
+                                                            />
+                                                        );
+                                                        return (
+                                                            <>
+                                                                <img
+                                                                    src={poster}
+                                                                    alt=""
+                                                                    onLoad={(e) => {
+                                                                        const spinner = e.currentTarget.parentElement?.querySelector<HTMLElement>(".js-video-spinner");
+                                                                        if (spinner) spinner.style.display = "none";
+                                                                    }}
+                                                                    className="h-full w-full object-cover"
+                                                                />
+                                                                {!pending && !failed && (
+                                                                    <video
+                                                                        preload="metadata"
+                                                                        muted
+                                                                        src={proxyMediaUrl(videoUrl, { as: "video" })}
+                                                                        // A new source (the cached copy, say) fades in again over the still.
+                                                                        onLoadStart={(e) => { e.currentTarget.style.opacity = "0"; }}
+                                                                        onLoadedMetadata={(e) => { (e.currentTarget as HTMLVideoElement).currentTime = 0.001; }}
+                                                                        onSeeked={(e) => {
+                                                                            const el = e.currentTarget;
+                                                                            el.style.opacity = "1";
+                                                                            const badge = el.parentElement?.querySelector<HTMLElement>(".js-video-play-badge");
+                                                                            if (badge) badge.style.opacity = "1";
+                                                                        }}
+                                                                        className="absolute inset-0 h-full w-full object-cover opacity-0 transition-opacity duration-200"
+                                                                    />
+                                                                )}
+                                                            </>
+                                                        );
+                                                    })()}
                                                     {isLimitedVideo && (
                                                         videoMaxViews === 1 ? (
                                                             <MediaBadge icon={<Eye className="h-3.5 w-3.5" />} label={t("chat.attachments.view_once")} />
@@ -2001,12 +2243,13 @@ export function ChatThreadMessages({
                                                         )
                                                     )}
                                                     <div
-                                                        className={`js-video-play-badge pointer-events-none absolute inset-0 flex items-center justify-center opacity-0 transition-opacity duration-200`}
+                                                        className={`js-video-play-badge pointer-events-none absolute inset-0 flex items-center justify-center ${hasStoredPoster ? "" : "opacity-0"} transition-opacity duration-200`}
                                                     >
                                                         <div className="flex h-10 w-10 items-center justify-center rounded-full bg-black/60 backdrop-blur-sm transition group-hover/media:bg-black/80">
                                                             <Play className="h-5 w-5 fill-white text-white" />
                                                         </div>
                                                     </div>
+                                                    {uploadProgress != null ? <MediaUploadOverlay progress={uploadProgress} label={uploadPhaseLabel} /> : null}
                                                     {isVideoOnlyBubble && (
                                                         <div className="absolute inset-x-0 bottom-0 flex flex-col bg-gradient-to-t from-black/80 via-black/40 to-transparent px-3 py-2 text-white">
                                                             <div className="flex items-center justify-between gap-2 text-[10px]">
@@ -2054,6 +2297,7 @@ export function ChatThreadMessages({
                                                     messageId={message.messageId}
                                                     mine={mine}
                                                     durationHint={audioDurationHint}
+                                                    uploadProgress={uploadProgress ?? undefined}
                                                 />
                                             </div>
                                         );
@@ -2068,14 +2312,11 @@ export function ChatThreadMessages({
                                         const rxPreviewUrl = rxCachedThumbUri
                                             ?? (typeof rxBody?.previewUrl === "string" ? rxBody.previewUrl : null);
                                         const rxAlbumId = typeof rxBody?.albumId === "number" ? rxBody.albumId : null;
-                                        const rxLabel = mine
-                                            ? t("chat.preview.tapped_album_photo_theirs")
-                                            : t("chat.preview.tapped_album_photo_yours");
                                         return (
                                             <>
                                                 <button
                                                     type="button"
-                                                    className={`group/media relative block overflow-hidden rounded-2xl ${tailCorner} ${isDesktop ? "w-full" : "w-36"}`}
+                                                    className={`group/media relative block overflow-hidden rounded-2xl bg-[var(--surface-2)] ${tailCorner} ${MEDIA_BUBBLE_SIZE}`}
                                                     onClick={(event) => {
                                                         event.stopPropagation();
                                                         if (!rxAlbumId) return;
@@ -2084,14 +2325,25 @@ export function ChatThreadMessages({
                                                         // side did NOT send the reaction/reply message.
                                                         if (isDesktop) { void openAlbumViewerById(rxAlbumId, !mine, rxTarget?.contentId); return; }
                                                         if (messageLongPressTriggeredRef.current) { messageLongPressTriggeredRef.current = false; return; }
+                                                        if (shouldBlurIncomingMedia && rxPreviewUrl) {
+                                                            revealMediaMessage(message.messageId);
+                                                            lastTapRef.current = null;
+                                                            return;
+                                                        }
                                                         scheduleMobileTap(message, () => void openAlbumViewerById(rxAlbumId, !mine, rxTarget?.contentId));
                                                     }}
+                                                    onMouseEnter={() => handleMediaMouseEnter(message.messageId)}
+                                                    onMouseLeave={() => handleMediaMouseLeave(message.messageId)}
                                                 >
                                                     {rxPreviewUrl ? (
-                                                        <img src={proxyMediaUrl(rxPreviewUrl)} alt="" className="aspect-square w-full object-cover" />
-                                                    ) : (
-                                                        <div className="h-48 w-full bg-[var(--surface-2)]" />
-                                                    )}
+                                                        <img src={proxyMediaUrl(rxPreviewUrl)} alt="" className={`h-full w-full object-cover ${PRIVACY_BLUR_TRANSITION_CLASS} ${mediaBlurClassName}`} />
+                                                    ) : null}
+                                                    {/* What the bubble is, in the badge photos and videos use; the
+                                                        bubble's corner stays for reactions to this message itself. */}
+                                                    <MediaBadge
+                                                        icon={<span className="text-[13px] leading-none">{getReactionEmoji(1)}</span>}
+                                                        label={t("chat.thread.album_tap", { defaultValue: "Album tap" })}
+                                                    />
                                                     <div className="absolute inset-x-0 bottom-0 flex flex-col bg-gradient-to-t from-black/80 via-black/40 to-transparent px-3 py-2 text-white">
                                                         <div className="flex items-center justify-between gap-2 text-[10px]">
                                                             <div className="flex items-center opacity-90">
@@ -2111,7 +2363,6 @@ export function ChatThreadMessages({
                                                         </div>
                                                     </div>
                                                 </button>
-                                                <p className={`mt-1 text-xs opacity-60 ${mine ? "text-right" : "text-left"}`}>{rxLabel}</p>
                                             </>
                                         );
                                     })() : null}
@@ -2139,10 +2390,10 @@ export function ChatThreadMessages({
                                                 }
                                                 scheduleMobileTap(message, doOpen);
                                             }}
-                                            className={`block overflow-hidden ${isLocationOnlyBubble && hasReply ? "" : `rounded-2xl ${tailCorner}`} text-left transition hover:brightness-110`}
+                                            className={`block overflow-hidden ${isLocationOnlyBubble && hasReply ? "" : `rounded-2xl ${tailCorner}`} text-start transition hover:brightness-110`}
                                         >
                                             <div className="relative">
-                                                <MapLocationPreview lat={location.lat} lon={location.lon} className="h-48 w-48 pointer-events-none" />
+                                                <MapLocationPreview lat={location.lat} lon={location.lon} className={`h-48 pointer-events-none ${isLocationOnlyBubble && hasReply ? "w-64 sm:w-72" : "w-48"}`} />
                                                 {isLocationOnlyBubble ? (
                                                     <div className="absolute inset-x-0 bottom-0 flex flex-col bg-gradient-to-t from-black/80 via-black/40 to-transparent px-3 py-2 text-white">
                                                         <div className="flex items-center justify-between gap-2 text-[10px]">
@@ -2241,8 +2492,8 @@ export function ChatThreadMessages({
                                                 } : undefined}
                                                 className={`relative mb-2.5 mt-1 flex overflow-hidden rounded-[6px] text-xs ${fullPhotoUrl ? "cursor-pointer active:opacity-70" : ""} ${mine ? "bg-black/20" : "bg-black/[0.08]"}`}
                                             >
-                                                <div className={`absolute left-0 top-0 h-full w-[3px] shrink-0 ${mine ? "bg-white/60" : "bg-[var(--accent)]/50"}`} />
-                                                <div className="min-w-0 flex-1 py-[13px] pl-[13px] pr-2.5">
+                                                <div className={`absolute start-0 top-0 h-full w-[3px] shrink-0 ${mine ? "bg-white/60" : "bg-[var(--accent)]/50"}`} />
+                                                <div className="min-w-0 flex-1 py-[13px] ps-[13px] pe-2.5">
                                                     <p className="mb-0.5 font-semibold opacity-60 truncate">{mine
                                                         ? t("chat.thread.replied_to_name", {
                                                                 name: localNickname || selectedConversation.data.name || t("common.unknown_display_name"),
@@ -2267,7 +2518,9 @@ export function ChatThreadMessages({
                                     {!isMediaOnlyBubble && !isAudioOnlyBubble && !gaymojiUrl
                                     && !(imageUrl && (messageText === t("chat.thread.shared_image") || messageText === t("chat.thread.shared_gif")))
                                     && !((videoUrl || isExpiredVideo) && messageText === t("chat.thread.shared_video")) ? (
-                                        isUnsupportedMessage ? (
+                                        message.type === "RightNowRequest" ? (
+                                            <RightNowRequestBubble body={message.body} mine={mine} />
+                                        ) : isUnsupportedMessage ? (
                                             <div className={`relative mt-1 flex items-center gap-2.5 overflow-hidden rounded-[6px] p-[13px] text-xs ${mine ? "bg-black/20" : "bg-black/[0.08]"}`}>
                                                 <MessageCircleQuestion className="h-4 w-4 shrink-0 opacity-70" />
                                                 <div className="min-w-0 flex-1">
@@ -2290,13 +2543,14 @@ export function ChatThreadMessages({
                                             </div>
                                         ) : (
                                             <>
-                                                <p className="whitespace-pre-wrap break-words select-text">
+                                                {/* Selectable on desktop only: on touch, selection would fight the long-press menu. */}
+                                                <p className={`whitespace-pre-wrap break-words ${isDesktop ? "select-text" : ""}`}>
                                                     {renderTextWithLinks(displayText, mine, (url) => requestOpenLink(url))}
                                                 </p>
                                                 {translatedText ? (
                                                     <div className="mt-1.5 flex items-start gap-1.5 text-[0.9em] opacity-70">
                                                         <Languages className="mt-[0.2em] h-[1em] w-[1em] shrink-0" aria-hidden="true" />
-                                                        <p className="min-w-0 whitespace-pre-wrap break-words select-text">
+                                                        <p className={`min-w-0 whitespace-pre-wrap break-words ${isDesktop ? "select-text" : ""}`}>
                                                             {renderTextWithLinks(translatedText, mine, (url) => requestOpenLink(url))}
                                                         </p>
                                                     </div>
@@ -2318,7 +2572,7 @@ export function ChatThreadMessages({
                                                 ref={(el) => { if (el) reactionButtonRefs.current.set(message.messageId, el); else reactionButtonRefs.current.delete(message.messageId); }}
                                                 onClick={() => void handleReact(message)}
                                                 className={`${hasOtherReaction ? "group/rxn " : ""}text-lg inline-flex ${fireButtonClass} absolute z-10 transition-opacity ${
-                                                    message.reactions.length > 0 || isAlbumReactionBubble ? "opacity-100" : "opacity-0 hover:opacity-25"
+                                                    message.reactions.length > 0 ? "opacity-100" : "opacity-0 hover:opacity-25"
                                                 }`}
                                             >
                                                 {hasOtherReaction ? (
@@ -2334,7 +2588,7 @@ export function ChatThreadMessages({
                                             <span
                                                 ref={(el) => { if (el) reactionButtonRefs.current.set(message.messageId, el); else reactionButtonRefs.current.delete(message.messageId); }}
                                                 className={`text-lg inline-flex pointer-events-none ${fireButtonClass} absolute z-10 transition-opacity ${
-                                                message.reactions.length > 0 || isAlbumReactionBubble ? "opacity-100" : "opacity-0"
+                                                message.reactions.length > 0 ? "opacity-100" : "opacity-0"
                                             }`}>
                                                 {reactionContent}
                                             </span>
@@ -2373,13 +2627,21 @@ export function ChatThreadMessages({
                                     ) : null}
 
                                     {failed ? (
-                                        <button
-                                            type="button"
-                                            onClick={(event) => { event.stopPropagation(); handleRetry(message); }}
-                                            className="mt-1 rounded-lg bg-[color-mix(in_srgb,var(--surface)_72%,transparent)] px-2 py-1 text-[11px] font-semibold"
-                                        >
-                                            {t("chat.retry")}
-                                        </button>
+                                        // Under the bubble, on its side: what went wrong and the way out, hard to miss.
+                                        <div className={`mt-1.5 flex w-full items-center gap-2 ${mine ? "justify-end" : "justify-start"}`}>
+                                            <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-red-400">
+                                                <CircleAlert className="h-3.5 w-3.5" />
+                                                {t("chat.not_sent", { defaultValue: "Not sent" })}
+                                            </span>
+                                            <button
+                                                type="button"
+                                                onClick={(event) => { event.stopPropagation(); handleRetry(message); }}
+                                                className="inline-flex items-center gap-1.5 rounded-full bg-red-500 px-3 py-1.5 text-xs font-semibold text-white shadow-sm transition active:scale-95 hover:bg-red-600"
+                                            >
+                                                <RotateCw className="h-3.5 w-3.5" strokeWidth={2.5} />
+                                                {t("chat.retry")}
+                                            </button>
+                                        </div>
                                     ) : null}
                                 </div>
 
@@ -2387,7 +2649,7 @@ export function ChatThreadMessages({
                                     // Absolutely positioned so a long label ("Read yesterday") doesn't widen the bubble column.
                                     <div className="relative h-5 w-full">
                                         <span
-                                            className="absolute right-1 top-1 whitespace-nowrap text-[8px] font-medium uppercase tracking-wider text-[var(--text-muted)] opacity-80"
+                                            className="absolute end-1 top-1 whitespace-nowrap text-[8px] font-medium uppercase tracking-wider text-[var(--text-muted)] opacity-80"
                                             title={
                                                 threadLastReadTimestamp != null && message.timestamp <= threadLastReadTimestamp
                                                     ? t("chat.read_at", { time: formatFullDateTime(threadLastReadTimestamp) })
@@ -2412,7 +2674,7 @@ export function ChatThreadMessages({
             </div>
             {isPartnerTyping && (
                 <div className="flex items-end gap-2 px-4 py-1">
-                    <div className="flex items-center gap-1 rounded-2xl rounded-bl-sm bg-[var(--surface-2)] px-3 py-2.5">
+                    <div className="flex items-center gap-1 rounded-2xl rounded-es-sm bg-[var(--surface-2)] px-3 py-2.5">
                         <span className="h-2 w-2 animate-bounce rounded-full bg-[var(--text-muted)]" style={{ animationDelay: "0ms" }} />
                         <span className="h-2 w-2 animate-bounce rounded-full bg-[var(--text-muted)]" style={{ animationDelay: "160ms" }} />
                         <span className="h-2 w-2 animate-bounce rounded-full bg-[var(--text-muted)]" style={{ animationDelay: "320ms" }} />
@@ -2445,6 +2707,7 @@ export function ChatThreadMessages({
 			<PromptDialog
 				isOpen={banWordPrompt !== null}
 				title={t("chat.actions.ban_word", { defaultValue: "Add forbidden keyword" })}
+				rows={6}
 				message={t("chat.actions.ban_word_prompt", {
 					defaultValue: "Trim this message down to the specific keyword you want to ban:",
 				})}

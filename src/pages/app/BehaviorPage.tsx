@@ -1,13 +1,14 @@
 import { useState } from "react";
-import { ArrowDownWideNarrow, Ban, CornerDownLeft, ExternalLink, MoveHorizontal, SwitchCamera, Video } from "lucide-react";
+import { ArrowDownWideNarrow, ArrowLeft, ArrowRight, Ban, CornerDownLeft, ExternalLink, FoldHorizontal, MoveHorizontal, Reply, SwitchCamera, UnfoldHorizontal, Video } from "lucide-react";
 import { useDesktopBreakpoint } from "../../hooks/useDesktopBreakpoint";
-import { FlameFilled, ImagesFilled, LayoutGridFilled, MapPinFilled, SunFilled, TimerFilled, Trash2Filled } from "../../components/icons/FilledIcons";
+import { FlameFilled, ImagesFilled, LayoutGridFilled, MapPinFilled, MessageSquareQuoteFilled, SunFilled, TimerFilled, Trash2Filled } from "../../components/icons/FilledIcons";
 import { PageHeader } from "../../components/PageHeader";
 import { ToggleRow } from "../../components/ui/toggle-row";
 import { RightNowIcon } from "../../components/icons/RightNowIcon";
 import { SelectRow } from "../../components/ui/select-row";
 import { useTranslation } from "react-i18next";
 import { usePreferences } from "../../contexts/PreferencesContext";
+import { useIsFreeTier } from "../../services/assignmentsStore";
 import { useSettingsHighlight } from "../../hooks/useSettingsHighlight";
 import { getTapEmoji, tapLabel } from "./interest/interestUtils";
 import { isAndroid, isIos } from "../../services/saveMedia";
@@ -37,6 +38,8 @@ export function BehaviorPage() {
 	const { t } = useTranslation();
 	const highlightId = useSettingsHighlight();
 	const isDesktop = useDesktopBreakpoint();
+	const isFreeTier = useIsFreeTier();
+	const canSendExpiringAlbums = !isFreeTier;
 	const {
 		defaultExpiringPhotos,
 		defaultAlbumExpirationType,
@@ -48,7 +51,9 @@ export function BehaviorPage() {
 		doubleTapTapType,
 		doubleTapAction,
 		chatRowSwipeActions,
-		mobileEnterToSend,
+		enterToSend,
+		savedPhraseSendGesture,
+		swipeToReplyDirection,
 		startCallsWithCameraOn,
 		defaultCallCamera,
 		setPreferences,
@@ -77,53 +82,56 @@ export function BehaviorPage() {
 			/>
 
 			<div className="grid gap-6">
-				<div className="native-card overflow-hidden divide-y divide-[var(--border)]">
-					<ToggleRow
-						id="behavior-confirm-block"
-						highlighted={highlightId === "behavior-confirm-block"}
-						icon={<Ban className="h-5 w-5" />}
-						iconClass="bg-red-500/15 text-red-400"
-						label={t("customizability.confirm_before_block")}
-						description={t("customizability.confirm_before_block_desc")}
-						checked={confirmBeforeBlock}
-						onChange={(checked) => {
-							setConfirmBeforeBlock(checked);
-							window.localStorage.setItem(SKIP_BLOCK_CONFIRM_KEY, String(!checked));
-						}}
-					/>
-					<ToggleRow
-						id="behavior-confirm-delete-conversation"
-						highlighted={highlightId === "behavior-confirm-delete-conversation"}
-						icon={<Trash2Filled className="h-5 w-5" />}
-						iconClass="bg-red-500/15 text-red-400"
-						label={t("customizability.confirm_before_delete_conversation")}
-						description={t("customizability.confirm_before_delete_conversation_desc")}
-						checked={confirmBeforeDeleteConversation}
-						onChange={(checked) => {
-							setConfirmBeforeDeleteConversation(checked);
-							window.localStorage.setItem(SKIP_DELETE_CONVERSATION_CONFIRM_KEY, String(!checked));
-						}}
-					/>
-					<ToggleRow
-						id="behavior-confirm-open-link"
-						highlighted={highlightId === "behavior-confirm-open-link"}
-						icon={<ExternalLink className="h-5 w-5" />}
-						iconClass="bg-red-500/15 text-red-400"
-						label={t("customizability.confirm_before_open_link", { defaultValue: "Ask before opening links" })}
-						description={t("customizability.confirm_before_open_link_desc", {
-							defaultValue: "Show a confirmation before opening a link tapped inside a chat message.",
-						})}
-						checked={confirmBeforeOpenLink}
-						onChange={(checked) => {
-							setConfirmBeforeOpenLink(checked);
-							window.localStorage.setItem(SKIP_LINK_OPEN_CONFIRM_KEY, String(!checked));
-						}}
-					/>
+				<div>
+					<p className="mb-2 px-1 text-xs font-semibold uppercase tracking-widest text-[var(--text-muted)]">{t("behavior.confirmations", { defaultValue: "Confirmations" })}</p>
+					<div className="native-group">
+						<ToggleRow
+							id="behavior-confirm-block"
+							highlighted={highlightId === "behavior-confirm-block"}
+							icon={<Ban className="h-5 w-5" />}
+							iconClass="bg-red-500/15 text-red-400"
+							label={t("customizability.confirm_before_block")}
+							description={t("customizability.confirm_before_block_desc")}
+							checked={confirmBeforeBlock}
+							onChange={(checked) => {
+								setConfirmBeforeBlock(checked);
+								window.localStorage.setItem(SKIP_BLOCK_CONFIRM_KEY, String(!checked));
+							}}
+						/>
+						<ToggleRow
+							id="behavior-confirm-delete-conversation"
+							highlighted={highlightId === "behavior-confirm-delete-conversation"}
+							icon={<Trash2Filled className="h-5 w-5" />}
+							iconClass="bg-red-500/15 text-red-400"
+							label={t("customizability.confirm_before_delete_conversation")}
+							description={t("customizability.confirm_before_delete_conversation_desc")}
+							checked={confirmBeforeDeleteConversation}
+							onChange={(checked) => {
+								setConfirmBeforeDeleteConversation(checked);
+								window.localStorage.setItem(SKIP_DELETE_CONVERSATION_CONFIRM_KEY, String(!checked));
+							}}
+						/>
+						<ToggleRow
+							id="behavior-confirm-open-link"
+							highlighted={highlightId === "behavior-confirm-open-link"}
+							icon={<ExternalLink className="h-5 w-5" />}
+							iconClass="bg-red-500/15 text-red-400"
+							label={t("customizability.confirm_before_open_link", { defaultValue: "Ask before opening links" })}
+							description={t("customizability.confirm_before_open_link_desc", {
+								defaultValue: "Show a confirmation before opening a link tapped inside a chat message.",
+							})}
+							checked={confirmBeforeOpenLink}
+							onChange={(checked) => {
+								setConfirmBeforeOpenLink(checked);
+								window.localStorage.setItem(SKIP_LINK_OPEN_CONFIRM_KEY, String(!checked));
+							}}
+						/>
+					</div>
 				</div>
 
 				<div>
 					<p className="mb-2 px-1 text-xs font-semibold uppercase tracking-widest text-[var(--text-muted)]">{t("behavior.chats")}</p>
-					<div className="native-card overflow-hidden divide-y divide-[var(--border)]">
+					<div className="native-group">
 						<ToggleRow
 							id="behavior-chat-row-swipe-actions"
 							highlighted={highlightId === "behavior-chat-row-swipe-actions"}
@@ -134,25 +142,117 @@ export function BehaviorPage() {
 							checked={chatRowSwipeActions}
 							onChange={(checked) => void setPreferences({ chatRowSwipeActions: checked })}
 						/>
-						{/* Enter always sends on desktop, so this only matters on mobile. */}
-						{!isDesktop && <ToggleRow
-							id="behavior-mobile-enter-to-send"
-							highlighted={highlightId === "behavior-mobile-enter-to-send"}
+						<ToggleRow
+							id="behavior-enter-to-send"
+							highlighted={highlightId === "behavior-enter-to-send"}
 							icon={<CornerDownLeft className="h-5 w-5" />}
 							iconClass="bg-sky-500/15 text-sky-400"
-							label={t("behavior.mobile_enter_to_send", { defaultValue: "Enter to Send on Mobile" })}
-							description={t("behavior.mobile_enter_to_send_desc", {
-								defaultValue: "The Enter key on your phone's keyboard sends the message instead of starting a new line.",
+							label={t("behavior.enter_to_send", { defaultValue: "Enter to Send" })}
+							description={t("behavior.enter_to_send_desc", {
+								defaultValue: "The Enter key sends the message instead of starting a new line. Shift+Enter always starts a new line.",
 							})}
-							checked={mobileEnterToSend}
-							onChange={(checked) => void setPreferences({ mobileEnterToSend: checked })}
+							checked={enterToSend}
+							onChange={(checked) => void setPreferences({ enterToSend: checked })}
+						/>
+						<SelectRow
+							id="behavior-saved-phrase-send-gesture"
+							highlighted={highlightId === "behavior-saved-phrase-send-gesture"}
+							icon={<MessageSquareQuoteFilled className="h-5 w-5" />}
+							iconClass="bg-sky-500/15 text-sky-400"
+							label={t("behavior.saved_phrase_send_gesture", { defaultValue: "Send Saved Phrases Instantly" })}
+							description={t("behavior.saved_phrase_send_gesture_desc", {
+								defaultValue: "Choose whether a tap or a long press on a saved phrase sends it right away. The other gesture puts it into the text field.",
+							})}
+							value={savedPhraseSendGesture}
+							onChange={(option) => void setPreferences({ savedPhraseSendGesture: option })}
+							options={[
+								{ value: "off", label: t("behavior.saved_phrase_send_off", { defaultValue: "Off" }) },
+								{ value: "tap", label: t("behavior.saved_phrase_send_tap", { defaultValue: "Tap" }) },
+								{ value: "longPress", label: t("behavior.saved_phrase_send_long_press", { defaultValue: "Long Press" }) },
+							]}
+						/>
+						{/* Swipe-to-reply is a touch gesture, so it only exists on mobile. */}
+						{!isDesktop && <SelectRow
+							id="behavior-swipe-to-reply-direction"
+							highlighted={highlightId === "behavior-swipe-to-reply-direction"}
+							icon={<Reply className="h-5 w-5" />}
+							iconClass="bg-sky-500/15 text-sky-400"
+							label={t("behavior.swipe_to_reply_direction", { defaultValue: "Swipe to Reply" })}
+							description={t("behavior.swipe_to_reply_direction_desc", {
+								defaultValue: "Choose which direction you swipe a message to reply to it.",
+							})}
+							value={swipeToReplyDirection}
+							onChange={(option) => void setPreferences({ swipeToReplyDirection: option })}
+							options={[
+								{ value: "right", icon: ArrowRight, iconClassName: "bg-sky-500/15 text-sky-400", label: t("behavior.swipe_to_reply_right", { defaultValue: "Right" }) },
+								{ value: "left", icon: ArrowLeft, iconClassName: "bg-sky-500/15 text-sky-400", label: t("behavior.swipe_to_reply_left", { defaultValue: "Left" }) },
+								{ value: "outward", icon: UnfoldHorizontal, iconClassName: "bg-sky-500/15 text-sky-400", label: t("behavior.swipe_to_reply_outward", { defaultValue: "Theirs Left, Mine Right" }) },
+								{ value: "inward", icon: FoldHorizontal, iconClassName: "bg-sky-500/15 text-sky-400", label: t("behavior.swipe_to_reply_inward", { defaultValue: "Mine Left, Theirs Right" }) },
+							]}
 						/>}
 					</div>
 				</div>
 
 				<div>
+					<p className="mb-2 px-1 text-xs font-semibold uppercase tracking-widest text-[var(--text-muted)]">{t("behavior.photos_albums", { defaultValue: "Photos & Albums" })}</p>
+					<div className="native-group">
+						<ToggleRow
+							id="behavior-default-expiring-photos"
+							highlighted={highlightId === "behavior-default-expiring-photos"}
+							icon={<TimerFilled className="h-5 w-5" />}
+							iconClass="bg-violet-500/15 text-violet-400"
+							label={t("behavior.default_expiring_photos")}
+							iconBadge={isFreeTier ? (
+								<span className="flex h-4 w-4 items-center justify-center rounded-full bg-amber-500 text-[10px] font-extrabold leading-none text-black ring-2 ring-[var(--card-bg,var(--surface))]">
+									!
+								</span>
+							) : undefined}
+							description={isFreeTier ? (
+								<>
+									{t("behavior.default_expiring_photos_desc")}
+									<span className="mt-1 block text-amber-500">{t("behavior.default_expiring_photos_free_warning")}</span>
+								</>
+							) : t("behavior.default_expiring_photos_desc")}
+							checked={defaultExpiringPhotos}
+							onChange={(checked) => void setPreferences({ defaultExpiringPhotos: checked })}
+						/>
+						{canSendExpiringAlbums && <SelectRow
+							id="behavior-default-album-expiration"
+							highlighted={highlightId === "behavior-default-album-expiration"}
+							icon={<ImagesFilled className="h-5 w-5" />}
+							iconClass="bg-violet-500/15 text-violet-400"
+							label={t("behavior.default_album_expiration")}
+							description={t("behavior.default_album_expiration_desc")}
+							value={defaultAlbumExpirationType}
+							onChange={(option) => void setPreferences({ defaultAlbumExpirationType: option })}
+							options={ALBUM_EXPIRATION_OPTIONS.map((option) => ({ value: option, label: albumExpirationLabels[option] }))}
+						/>}
+						<ToggleRow
+							id="behavior-open-album-as-bottom-sheet"
+							highlighted={highlightId === "behavior-open-album-as-bottom-sheet"}
+							icon={<LayoutGridFilled className="h-5 w-5" />}
+							iconClass="bg-violet-500/15 text-violet-400"
+							label={t("behavior.open_album_as_bottom_sheet")}
+							description={t("behavior.open_album_as_bottom_sheet_desc")}
+							checked={openAlbumAsBottomSheet}
+							onChange={(checked) => void setPreferences({ openAlbumAsBottomSheet: checked })}
+						/>
+						<ToggleRow
+							id="behavior-sort-drawer-media-by-frequency"
+							highlighted={highlightId === "behavior-sort-drawer-media-by-frequency"}
+							icon={<ArrowDownWideNarrow className="h-5 w-5" />}
+							iconClass="bg-violet-500/15 text-violet-400"
+							label={t("behavior.sort_drawer_media_by_frequency")}
+							description={t("behavior.sort_drawer_media_by_frequency_desc")}
+							checked={sortDrawerMediaByFrequency}
+							onChange={(checked) => void setPreferences({ sortDrawerMediaByFrequency: checked })}
+						/>
+					</div>
+				</div>
+
+				<div>
 					<p className="mb-2 px-1 text-xs font-semibold uppercase tracking-widest text-[var(--text-muted)]">{t("behavior.video_calls", { defaultValue: "Video Calls" })}</p>
-					<div className="native-card overflow-hidden divide-y divide-[var(--border)]">
+					<div className="native-group">
 						<ToggleRow
 							id="behavior-start-calls-with-camera-on"
 							highlighted={highlightId === "behavior-start-calls-with-camera-on"}
@@ -185,67 +285,8 @@ export function BehaviorPage() {
 				</div>
 
 				<div>
-					<p className="mb-2 px-1 text-xs font-semibold uppercase tracking-widest text-[var(--text-muted)]">{t("behavior.disappearing_media")}</p>
-					<div className="native-card overflow-hidden divide-y divide-[var(--border)]">
-						<ToggleRow
-							id="behavior-default-expiring-photos"
-							highlighted={highlightId === "behavior-default-expiring-photos"}
-							icon={<TimerFilled className="h-5 w-5" />}
-							iconClass="bg-violet-500/15 text-violet-400"
-							label={t("behavior.default_expiring_photos")}
-							description={t("behavior.default_expiring_photos_desc")}
-							checked={defaultExpiringPhotos}
-							onChange={(checked) => void setPreferences({ defaultExpiringPhotos: checked })}
-						/>
-						<SelectRow
-							id="behavior-default-album-expiration"
-							highlighted={highlightId === "behavior-default-album-expiration"}
-							icon={<ImagesFilled className="h-5 w-5" />}
-							iconClass="bg-violet-500/15 text-violet-400"
-							label={t("behavior.default_album_expiration")}
-							description={t("behavior.default_album_expiration_desc")}
-							value={defaultAlbumExpirationType}
-							onChange={(option) => void setPreferences({ defaultAlbumExpirationType: option })}
-							options={ALBUM_EXPIRATION_OPTIONS.map((option) => ({ value: option, label: albumExpirationLabels[option] }))}
-						/>
-					</div>
-				</div>
-
-				<div>
-					<p className="mb-2 px-1 text-xs font-semibold uppercase tracking-widest text-[var(--text-muted)]">{t("behavior.album_viewing")}</p>
-					<div className="native-card overflow-hidden divide-y divide-[var(--border)]">
-						<ToggleRow
-							id="behavior-open-album-as-bottom-sheet"
-							highlighted={highlightId === "behavior-open-album-as-bottom-sheet"}
-							icon={<LayoutGridFilled className="h-5 w-5" />}
-							iconClass="bg-violet-500/15 text-violet-400"
-							label={t("behavior.open_album_as_bottom_sheet")}
-							description={t("behavior.open_album_as_bottom_sheet_desc")}
-							checked={openAlbumAsBottomSheet}
-							onChange={(checked) => void setPreferences({ openAlbumAsBottomSheet: checked })}
-						/>
-					</div>
-				</div>
-
-				<div>
-					<p className="mb-2 px-1 text-xs font-semibold uppercase tracking-widest text-[var(--text-muted)]">{t("behavior.media_drawer")}</p>
-					<div className="native-card overflow-hidden divide-y divide-[var(--border)]">
-						<ToggleRow
-							id="behavior-sort-drawer-media-by-frequency"
-							highlighted={highlightId === "behavior-sort-drawer-media-by-frequency"}
-							icon={<ArrowDownWideNarrow className="h-5 w-5" />}
-							iconClass="bg-violet-500/15 text-violet-400"
-							label={t("behavior.sort_drawer_media_by_frequency")}
-							description={t("behavior.sort_drawer_media_by_frequency_desc")}
-							checked={sortDrawerMediaByFrequency}
-							onChange={(checked) => void setPreferences({ sortDrawerMediaByFrequency: checked })}
-						/>
-					</div>
-				</div>
-
-				<div>
-					<p className="mb-2 px-1 text-xs font-semibold uppercase tracking-widest text-[var(--text-muted)]">{t("behavior.grid", { defaultValue: "Grid" })}</p>
-					<div className="native-card overflow-hidden divide-y divide-[var(--border)]">
+					<p className="mb-2 px-1 text-xs font-semibold uppercase tracking-widest text-[var(--text-muted)]">{t("behavior.browsing", { defaultValue: "Browsing" })}</p>
+					<div className="native-group">
 						<SelectRow
 							id="behavior-double-tap-tap-type"
 							highlighted={highlightId === "behavior-double-tap-tap-type"}
@@ -271,12 +312,6 @@ export function BehaviorPage() {
 								{ value: "chat", label: `💬 ${t("behavior.double_tap_open_chat", { defaultValue: "Open Chat" })}` },
 							]}
 						/>
-					</div>
-				</div>
-
-				<div>
-					<p className="mb-2 px-1 text-xs font-semibold uppercase tracking-widest text-[var(--text-muted)]">{t("behavior.location")}</p>
-					<div className="native-card overflow-hidden divide-y divide-[var(--border)]">
 						<ToggleRow
 							id="behavior-auto-focus-location-search"
 							highlighted={highlightId === "behavior-auto-focus-location-search"}
@@ -287,12 +322,6 @@ export function BehaviorPage() {
 							checked={autoFocusLocationSearch}
 							onChange={(checked) => void setPreferences({ autoFocusLocationSearch: checked })}
 						/>
-					</div>
-				</div>
-
-				<div>
-					<p className="mb-2 px-1 text-xs font-semibold uppercase tracking-widest text-[var(--text-muted)]">{t("right_now.title")}</p>
-					<div className="native-card overflow-hidden divide-y divide-[var(--border)]">
 						<ToggleRow
 							id="behavior-auto-focus-right-now-text"
 							highlighted={highlightId === "behavior-auto-focus-right-now-text"}
@@ -311,7 +340,7 @@ export function BehaviorPage() {
 				{isKeepScreenOnSupported && (
 					<div>
 						<p className="mb-2 px-1 text-xs font-semibold uppercase tracking-widest text-[var(--text-muted)]">{t("behavior.display")}</p>
-						<div className="native-card overflow-hidden divide-y divide-[var(--border)]">
+						<div className="native-group">
 							<ToggleRow
 								id="behavior-keep-screen-on"
 								highlighted={highlightId === "behavior-keep-screen-on"}

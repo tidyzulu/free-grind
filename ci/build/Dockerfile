@@ -18,10 +18,11 @@ RUN echo "deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/$
 	&& echo "deb [check-valid-until=no] http://snapshot.debian.org/archive/debian-security/${SNAPSHOT} bookworm-security main" >> /etc/apt/sources.list \
 	&& rm -f /etc/apt/sources.list.d/debian.sources
 
-RUN apt-get -qq -o Acquire::Check-Valid-Until=false -o Acquire::Retries=5 update \
-	&& DEBIAN_FRONTEND=noninteractive apt-get -qq install -y --no-install-recommends \
-		ca-certificates curl git unzip xz-utils file \
-	&& rm -rf /var/lib/apt/lists/*
+# Retries the snapshot downloads through its outages.
+COPY apt-install.sh /usr/local/bin/apt-install
+
+RUN sh /usr/local/bin/apt-install \
+		ca-certificates curl git unzip xz-utils file
 
 ARG NODE_VERSION
 # node-v24.21.0-linux-x64.tar.xz from https://nodejs.org/dist/v24.21.0/SHASUMS256.txt
@@ -29,7 +30,7 @@ ARG NODE_SHA256=fd8e59d5a511510f6a298afb548f18c7d2b1be404d8b4a27d94fbe49f56cb2d6
 # vite has to run under Node, not Bun's built-in node: Bun's JavaScriptCore
 # hashes chunks differently, so the frontend wouldn't match an official build.
 RUN : "${NODE_VERSION:?pass --build-arg NODE_VERSION (ci/build/run.sh does)}" \
-	&& curl -fsSL --retry 3 -o /tmp/node.txz "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz" \
+	&& curl -fsSL --retry 3 --retry-all-errors --connect-timeout 30 --max-time 900 -o /tmp/node.txz "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz" \
 	&& { echo "${NODE_SHA256}  /tmp/node.txz" | sha256sum -c - \
 		|| { echo "Node ${NODE_VERSION} doesn't match NODE_SHA256 in ci/build/Dockerfile" >&2; exit 1; }; } \
 	&& tar -xJf /tmp/node.txz -C /opt && mv "/opt/node-v${NODE_VERSION}-linux-x64" /opt/node && rm /tmp/node.txz
@@ -39,7 +40,7 @@ ARG BUN_VERSION
 # bun-linux-x64.zip from https://github.com/oven-sh/bun/releases/download/bun-v1.3.14/SHASUMS256.txt
 ARG BUN_SHA256=951ee2aee855f08595aeec6225226a298d3fea83a3dcd6465c09cbccdf7e848f
 RUN : "${BUN_VERSION:?pass --build-arg BUN_VERSION (ci/build/run.sh does)}" \
-	&& curl -fsSL --retry 3 -o /tmp/bun.zip "https://github.com/oven-sh/bun/releases/download/bun-v${BUN_VERSION}/bun-linux-x64.zip" \
+	&& curl -fsSL --retry 3 --retry-all-errors --connect-timeout 30 --max-time 900 -o /tmp/bun.zip "https://github.com/oven-sh/bun/releases/download/bun-v${BUN_VERSION}/bun-linux-x64.zip" \
 	&& { echo "${BUN_SHA256}  /tmp/bun.zip" | sha256sum -c - \
 		|| { echo "Bun ${BUN_VERSION} doesn't match BUN_SHA256 in ci/build/Dockerfile" >&2; exit 1; }; } \
 	&& unzip -q /tmp/bun.zip -d /opt && mv /opt/bun-linux-x64 /opt/bun && ln -s bun /opt/bun/bunx && rm /tmp/bun.zip
@@ -53,17 +54,15 @@ FROM base AS frontend
 # --- Shared by the Rust builds ------------------------------------------------
 FROM base AS rust
 
-RUN apt-get -qq -o Acquire::Check-Valid-Until=false -o Acquire::Retries=5 update \
-	&& DEBIAN_FRONTEND=noninteractive apt-get -qq install -y --no-install-recommends \
-		build-essential clang libclang-dev pkg-config cmake ninja-build perl \
-	&& rm -rf /var/lib/apt/lists/*
+RUN sh /usr/local/bin/apt-install \
+		build-essential clang libclang-dev pkg-config cmake ninja-build perl
 
 ARG RUST_VERSION
 # rustup-init 1.28.2; rustup itself verifies every toolchain component it downloads.
 ARG RUSTUP_INIT_SHA256=20a06e644b0d9bd2fbdbfd52d42540bdde820ea7df86e92e533c073da0cdd43c
 ENV RUSTUP_HOME=/opt/rustup CARGO_HOME=/opt/cargo
 RUN : "${RUST_VERSION:?pass --build-arg RUST_VERSION (ci/build/run.sh does)}" \
-	&& curl -fsSL --retry 3 -o /tmp/rustup-init https://static.rust-lang.org/rustup/archive/1.28.2/x86_64-unknown-linux-gnu/rustup-init \
+	&& curl -fsSL --retry 3 --retry-all-errors --connect-timeout 30 --max-time 900 -o /tmp/rustup-init https://static.rust-lang.org/rustup/archive/1.28.2/x86_64-unknown-linux-gnu/rustup-init \
 	&& echo "${RUSTUP_INIT_SHA256}  /tmp/rustup-init" | sha256sum -c - \
 	&& chmod +x /tmp/rustup-init \
 	&& /tmp/rustup-init -y --no-modify-path --profile minimal --default-toolchain "${RUST_VERSION}" \
@@ -74,20 +73,18 @@ ENV PATH=/opt/cargo/bin:$PATH
 # --- Linux .deb / .rpm / .AppImage --------------------------------------------
 FROM rust AS linux
 
-RUN apt-get -qq -o Acquire::Check-Valid-Until=false -o Acquire::Retries=5 update \
-	&& DEBIAN_FRONTEND=noninteractive apt-get -qq install -y --no-install-recommends \
+RUN sh /usr/local/bin/apt-install \
 		libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev libxdo-dev libssl-dev \
 		libayatana-appindicator3-dev librsvg2-dev \
 		libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
-		binutils dpkg-dev rpm squashfs-tools \
-	&& rm -rf /var/lib/apt/lists/*
+		binutils dpkg-dev rpm squashfs-tools
 
 # tauri's AppImage bundler downloads linuxdeploy's "continuous" build on every
 # run, which can't be pinned; ci/build/linux.sh assembles the AppImage itself
 # around this runtime instead.
 ARG APPIMAGE_RUNTIME_TAG=20251108
 ARG APPIMAGE_RUNTIME_SHA256=2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d
-RUN curl -fsSL --retry 3 -o /opt/appimage-runtime \
+RUN curl -fsSL --retry 3 --retry-all-errors --connect-timeout 30 --max-time 900 -o /opt/appimage-runtime \
 		"https://github.com/AppImage/type2-runtime/releases/download/${APPIMAGE_RUNTIME_TAG}/runtime-x86_64" \
 	&& echo "${APPIMAGE_RUNTIME_SHA256}  /opt/appimage-runtime" | sha256sum -c - \
 	&& chmod 0644 /opt/appimage-runtime
@@ -97,10 +94,8 @@ FROM rust AS windows
 
 # clang-cl and lld-link stand in for MSVC's cl.exe and link.exe; nasm builds
 # BoringSSL's assembly; makensis builds the installer.
-RUN apt-get -qq -o Acquire::Check-Valid-Until=false -o Acquire::Retries=5 update \
-	&& DEBIAN_FRONTEND=noninteractive apt-get -qq install -y --no-install-recommends \
+RUN sh /usr/local/bin/apt-install \
 		clang-19 lld-19 llvm-19 nasm scons zlib1g-dev \
-	&& rm -rf /var/lib/apt/lists/* \
 	&& ln -s /usr/lib/llvm-19/bin/clang /usr/local/bin/clang-cl \
 	&& for tool in lld-link llvm-rc llvm-lib llvm-ar; do \
 		ln -s "/usr/lib/llvm-19/bin/$tool" "/usr/local/bin/$tool"; \
@@ -116,9 +111,9 @@ RUN apt-get -qq -o Acquire::Check-Valid-Until=false -o Acquire::Retries=5 update
 # the official source. VERSION is set because it ends up in the installer.
 ARG NSIS_ZIP_SHA256=c7d27f780ddb6cffb4730138cd1591e841f4b7edb155856901cdf5f214394fa1
 ARG NSIS_SRC_SHA256=19e72062676ebdc67c11dc032ba80b979cdbffd3886c60b04bb442cdd401ff4b
-RUN curl -fsSL --retry 3 -o /tmp/nsis.zip https://github.com/tauri-apps/binary-releases/releases/download/nsis-3.11/nsis-3.11.zip \
+RUN curl -fsSL --retry 3 --retry-all-errors --connect-timeout 30 --max-time 900 -o /tmp/nsis.zip https://github.com/tauri-apps/binary-releases/releases/download/nsis-3.11/nsis-3.11.zip \
 	&& echo "${NSIS_ZIP_SHA256}  /tmp/nsis.zip" | sha256sum -c - \
-	&& curl -fsSL --retry 3 -o /tmp/nsis-src.tar.bz2 "https://downloads.sourceforge.net/project/nsis/NSIS%203/3.11/nsis-3.11-src.tar.bz2" \
+	&& curl -fsSL --retry 3 --retry-all-errors --connect-timeout 30 --max-time 900 -o /tmp/nsis-src.tar.bz2 "https://downloads.sourceforge.net/project/nsis/NSIS%203/3.11/nsis-3.11-src.tar.bz2" \
 	&& echo "${NSIS_SRC_SHA256}  /tmp/nsis-src.tar.bz2" | sha256sum -c - \
 	&& unzip -q /tmp/nsis.zip -d /opt && mv /opt/nsis-3.11 /opt/nsis \
 	&& rm -rf /opt/nsis/Bin /opt/nsis/Docs /opt/nsis/Examples /opt/nsis/*.exe /opt/nsis/*.chm \
@@ -152,7 +147,7 @@ RUN rustup target add aarch64-linux-android
 # Temurin 21.0.12.1+1
 ARG JDK_URL=https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.12.1%2B1/OpenJDK21U-jdk_x64_linux_hotspot_21.0.12.1_1.tar.gz
 ARG JDK_SHA256=ce79869e1307ed8ee1e2baa86a412b1eb5b75d10a01006d788a6f968bcfaee94
-RUN curl -fsSL --retry 3 -o /tmp/jdk.tgz "$JDK_URL" \
+RUN curl -fsSL --retry 3 --retry-all-errors --connect-timeout 30 --max-time 900 -o /tmp/jdk.tgz "$JDK_URL" \
 	&& echo "${JDK_SHA256}  /tmp/jdk.tgz" | sha256sum -c - \
 	&& mkdir /opt/jdk && tar -xzf /tmp/jdk.tgz -C /opt/jdk --strip-components=1 && rm /tmp/jdk.tgz
 ENV JAVA_HOME=/opt/jdk PATH=/opt/jdk/bin:$PATH
@@ -165,7 +160,7 @@ ARG ANDROID_NDK=29.0.14206865
 ARG CMDLINE_TOOLS_BUILD=16111833
 ARG CMDLINE_TOOLS_SHA256=0877a1d048fe4a24efe2eff536ca4223f7adeb58648bb81909d33c446918cfa8
 ENV ANDROID_HOME=/opt/android-sdk ANDROID_SDK_ROOT=/opt/android-sdk
-RUN curl -fsSL --retry 3 -o /tmp/clt.zip "https://dl.google.com/android/repository/commandlinetools-linux-${CMDLINE_TOOLS_BUILD}_latest.zip" \
+RUN curl -fsSL --retry 3 --retry-all-errors --connect-timeout 30 --max-time 900 -o /tmp/clt.zip "https://dl.google.com/android/repository/commandlinetools-linux-${CMDLINE_TOOLS_BUILD}_latest.zip" \
 	&& echo "${CMDLINE_TOOLS_SHA256}  /tmp/clt.zip" | sha256sum -c - \
 	&& mkdir -p "$ANDROID_HOME/cmdline-tools" && unzip -q /tmp/clt.zip -d "$ANDROID_HOME/cmdline-tools" \
 	&& mv "$ANDROID_HOME/cmdline-tools/cmdline-tools" "$ANDROID_HOME/cmdline-tools/latest" && rm /tmp/clt.zip \

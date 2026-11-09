@@ -5,6 +5,7 @@ export function ToggleRow({
 	description,
 	icon,
 	iconClass,
+	iconBadge,
 	activeColor,
 	activeThumbColor,
 	dense,
@@ -16,9 +17,11 @@ export function ToggleRow({
 	checked: boolean;
 	onChange: (checked: boolean) => void;
 	label: string;
-	description?: string;
+	description?: React.ReactNode;
 	icon?: React.ReactNode;
 	iconClass?: string;
+	/** Small marker pinned to the icon's bottom-right corner, e.g. a warning. */
+	iconBadge?: React.ReactNode;
 	activeColor?: string;
 	activeThumbColor?: string;
 	dense?: boolean;
@@ -39,13 +42,16 @@ export function ToggleRow({
 			id={id}
 			className={
 				(hasIcon
-					? `flex cursor-pointer items-start gap-3 ${padding} transition-colors hover:bg-[var(--surface-2)]`
+					? `flex cursor-pointer items-start gap-3 ${padding} transition-colors hover-fill`
 					: `flex min-h-14 cursor-pointer justify-between gap-4 ${padding} ${description ? "items-start" : "items-center"}`) +
 				(highlighted ? " animate-settings-highlight" : "")
 			}
 		>
 			{hasIcon && (
-				<div className={`shrink-0 rounded-2xl p-2.5 ${iconClass ?? ""}`}>{icon}</div>
+				<div className={`relative shrink-0 rounded-2xl p-2.5 ${iconClass ?? ""}`}>
+					{icon}
+					{iconBadge && <span className="absolute -bottom-0.5 -end-0.5 flex">{iconBadge}</span>}
+				</div>
 			)}
 			<span className={hasIcon ? "min-w-0 flex-1" : ""}>
 				<span className={labelClassName ?? `block text-sm ${hasIcon ? "font-semibold leading-snug" : "font-medium"}`}>
@@ -72,7 +78,7 @@ export function ToggleRow({
 					className="peer absolute inset-0 z-10 m-0 cursor-pointer opacity-0"
 				/>
 				<span className="absolute inset-0 rounded-full border border-[var(--border)] bg-[var(--surface)] transition-colors peer-checked:border-transparent peer-checked:bg-[var(--toggle-active)]" />
-				<span className="absolute left-1 h-5 w-5 rounded-full bg-[var(--text)] transition-transform peer-checked:translate-x-5 peer-checked:bg-[var(--toggle-thumb-active)]" />
+				<span className="absolute start-1 h-5 w-5 rounded-full bg-[var(--text)] transition-transform peer-checked:translate-x-5 rtl:peer-checked:-translate-x-5 peer-checked:bg-[var(--toggle-thumb-active)]" />
 			</span>
 		</label>
 	);

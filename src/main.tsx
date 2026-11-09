@@ -1,3 +1,4 @@
+import { loadServerConfig } from "./services/serverConfig";
 import React from "react";
 import ReactDOM from "react-dom/client";
 import { BrowserRouter } from "react-router-dom";
@@ -5,10 +6,9 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import "@fontsource-variable/inter/index.css";
 import App from "./App";
 import ManagerApp from "./ManagerApp";
-import "./i18n";
+import i18n, { isFirstLanguageStart } from "./i18n";
 import { markHotswapStartupReady, startupCheckForUpdate } from "./services/hotswap";
 import { initChatContactIndex } from "./services/chatContactIndex";
-import { initChatDb } from "./services/chatDb";
 import { isTauri } from "@tauri-apps/api/core";
 import { appLog } from "./utils/logger";
 import { DEFAULT_GC_TIME_MS } from "./config/ui-constants";
@@ -18,9 +18,22 @@ import { installGlobalCrashHandlers } from "./utils/crashOverlay";
 import { installTouchUiClass } from "./hooks/useDesktopBreakpoint";
 import { getRuntimeContext } from "./services/runtimeContext";
 import { startPushEventLog } from "./services/pushEventLog";
+import { installNativeSafeArea } from "./services/safeAreaBridge";
+import { installAppLocaleSync } from "./services/appLocaleBridge";
+import { applySystemLanguage } from "./services/systemLanguage";
+import { installApiLocaleSync } from "./services/apiLocale";
+import { installDocumentDirectionSync } from "./services/documentDirection";
 import "./index.css";
 
 installGlobalCrashHandlers();
+installNativeSafeArea();
+// First start follows the OS language; Android 13+ always follows its
+// per-app language setting.
+if (!installAppLocaleSync(i18n, isFirstLanguageStart) && isFirstLanguageStart) {
+	void applySystemLanguage(i18n);
+}
+installApiLocaleSync(i18n);
+installDocumentDirectionSync(i18n);
 installTouchUiClass();
 startPushEventLog();
 
@@ -48,12 +61,18 @@ void (async () => {
 		}
 
 		if (isTauri()) {
+			// Media URLs and the paywall bypass depend on the backend (official
+			// or self-hosted): know it before the first render.
+			await loadServerConfig().catch((err) => {
+				appLog.warn("[server] failed to load server config:", err);
+			});
 			void initChatContactIndex().catch((err) => {
 				appLog.warn("[chat-index] failed to initialize:", err);
 			});
-			void initChatDb().catch((err) => {
-				appLog.warn("[chat-db] failed to initialize:", err);
-			});
+			// No eager chatDb open here: before login it would open the legacy
+			// pre-account file, which AuthContext's setActiveChatDbUser then has
+			// to wait for, close and replace with the account's own file — a
+			// whole extra open (seconds on slow devices) in front of settingsReady.
 		}
 	}
 

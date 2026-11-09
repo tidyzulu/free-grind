@@ -25,7 +25,7 @@ import {
 	SmsVerificationRequiredError,
 } from "./auth-context";
 import { appLog } from "../utils/logger";
-import { setActiveChatDbUser, migrateLegacySettingsIfNeeded } from "../services/chatDb";
+import { setActiveChatDbUser } from "../services/chatDb";
 import { setActiveChatContactIndexAccount } from "../services/chatContactIndex";
 import { setActiveInterestStoreUser } from "../services/interestViewsStore";
 import { clearAllCaches } from "../pages/app/gridpage/cache";
@@ -35,14 +35,54 @@ import { loadPrivacyCache } from "../utils/privacy";
 import { loadAutoTranslateCache } from "../utils/autoTranslate";
 import { loadSeenCache } from "../services/seenStore";
 import { runInboxSync } from "../services/inboxSync";
+import { runRestoredDrawerUpload } from "../services/restoredDrawerMedia";
+import { runRestoredOwnAlbums, startOwnAlbumsSync } from "../services/ownAlbums";
+import { syncOwnProfile } from "../services/ownProfilePhotos";
+import { runRestoredBlocklist, syncOwnBlocklist } from "../services/ownBlocklist";
+import { runRestoredFavorites } from "../services/restoredFavorites";
 import { runTapsAutomationSync } from "../services/tapsSync";
 import { syncSavedPhrasesFromServer } from "../services/savedPhrases";
 import { mintRecaptchaToken, RecaptchaError, type RecaptchaFailure } from "../services/recaptcha";
+import { isCustomServer } from "../services/serverConfig";
 import { restoreStrandedLocation } from "../services/entitlementBypass";
+import i18n from "../i18n";
 
 const AUTH_USER_ID_STORAGE_KEY = "fg-user-id";
 const PUSH_TOKEN_STORAGE_KEY = "fg-fcm-token";
 const PUSH_TOKEN_SYNCED_STORAGE_KEY = "fg-fcm-token-synced";
+
+// A hard ban clears the session (grindr.rs drops it on the ban response), so
+// without this a restart lands on the sign-in page as if the user had signed
+// out. Kept until the ban screen is left via sign-out or another sign-in.
+const BAN_STATUS_STORAGE_KEY = "fg-ban-status";
+
+type BanStatus = Extract<AccountStatus, { kind: "banned" }>;
+
+function readStoredBan(): BanStatus | null {
+	try {
+		const raw = window.localStorage.getItem(BAN_STATUS_STORAGE_KEY);
+		if (!raw) return null;
+		const stored = JSON.parse(raw) as { info?: unknown; profileId?: unknown };
+		const info = banInfoSchema.safeParse(stored.info);
+		if (!info.success) return null;
+		const profileId = typeof stored.profileId === "number" && Number.isSafeInteger(stored.profileId) ? stored.profileId : null;
+		return { kind: "banned", info: info.data, profileId };
+	} catch {
+		return null;
+	}
+}
+
+function writeStoredBan(status: AccountStatus) {
+	try {
+		if (status?.kind === "banned") {
+			window.localStorage.setItem(BAN_STATUS_STORAGE_KEY, JSON.stringify({ info: status.info, profileId: status.profileId }));
+		} else {
+			window.localStorage.removeItem(BAN_STATUS_STORAGE_KEY);
+		}
+	} catch {
+		// Storage unavailable: the ban screen just won't survive a restart.
+	}
+}
 
 /** The FCM token Android handed over, cached or still waiting on window. */
 function cachedPushToken(): string | null {
@@ -133,7 +173,10 @@ type AuthAction =
 function authReducer(state: AuthState, action: AuthAction): AuthState {
 	switch (action.type) {
 		case "SET_USER":
-			return { ...state, userId: action.payload, error: null, tokenExpired: false, accountStatus: null };
+			// Login/switch results carry the profile id as a string at runtime
+			// (callMethod doesn't run the response schemas' coercion), which then
+			// broke every i64 command argument, e.g. the backup's ownerUserId.
+			return { ...state, userId: Number(action.payload), error: null, tokenExpired: false, accountStatus: null };
 		case "CLEAR_USER":
 			return { ...state, userId: null, tokenExpired: false, accountStatus: null };
 		case "SET_LOADING":
@@ -177,6 +220,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 		currentUserIdRef.current = state.userId;
 	}, [state.userId]);
 
+	// Read once before the persist effect below can clear it: checkAuth only
+	// resolves after that effect's first run.
+	const bootBanRef = useRef<BanStatus | null | undefined>(undefined);
+	if (bootBanRef.current === undefined) {
+		bootBanRef.current = readStoredBan();
+	}
+	const bootDoneRef = useRef(false);
+	useEffect(() => {
+		// Don't wipe the stored ban while the launch auth check is still running.
+		if (!bootDoneRef.current) return;
+		writeStoredBan(state.accountStatus);
+	}, [state.accountStatus]);
+
 	const refreshSavedAccounts = async () => {
 		try {
 			const accounts = await callMethod("list_saved_accounts");
@@ -200,15 +256,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 	// A hard login/refresh rejection — the account is banned outright (no
 	// session was established) or Grindr is rate-limiting attempts. Returns
 	// whether the error was one of these, so callers can skip their normal
-	// generic-error toast.
-	const handleAccountBlock = (error: unknown): boolean => {
+	// generic-error toast. `profileId` is the account signed into, when known;
+	// otherwise the one the ban response names. The ban screen needs it to
+	// offer a backup of that profile's local data.
+	const handleAccountBlock = (error: unknown, profileId: number | null = null): boolean => {
 		const ban = asBanned(error);
 		if (ban) {
-			dispatch({ type: "SET_ACCOUNT_STATUS", payload: { kind: "banned", info: ban } });
+			const fromResponse = ban.profileId ? Number(ban.profileId) : NaN;
+			const banned = profileId ?? (Number.isSafeInteger(fromResponse) && fromResponse > 0 ? fromResponse : null);
+			dispatch({ type: "SET_ACCOUNT_STATUS", payload: { kind: "banned", info: ban, profileId: banned } });
 			return true;
 		}
 		if (asAppError(error)?.kind === "RateLimited") {
-			toast.error("Too many attempts. Please try again later.");
+			toast.error(i18n.t("auth.toasts.rate_limited"));
 			return true;
 		}
 		return false;
@@ -219,8 +279,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 			appLog.debug("[Auth] checkAuth: starting");
 			dispatch({ type: "SET_LOADING", payload: true });
 			const result = await callMethod("auth_state");
+			// From here on accountStatus changes are persisted again.
+			const bootBan = bootBanRef.current;
+			bootBanRef.current = null;
+			bootDoneRef.current = true;
 			if (result !== null) {
 				appLog.info("[Auth] checkAuth: active session found");
+				// A live session means no hard ban (anymore): drop a stored one.
+				writeStoredBan(null);
 				dispatch({ type: "SET_USER", payload: result });
 				void refreshSavedAccounts();
 				// Resumed from a persisted session (not a fresh login result), so
@@ -235,6 +301,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 			} else {
 				appLog.info("[Auth] checkAuth: no active session");
 				dispatch({ type: "CLEAR_USER" });
+				// The session was dropped by a ban, not a sign-out: show the ban screen again.
+				if (bootBan) {
+					appLog.info("[Auth] checkAuth: restoring ban screen from last run");
+					dispatch({ type: "SET_ACCOUNT_STATUS", payload: bootBan });
+				}
 			}
 		} catch (error) {
 			const appError = asAppError(error);
@@ -249,8 +320,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 				});
 			}
 		} finally {
+			bootDoneRef.current = true;
 			dispatch({ type: "SET_LOADING", payload: false });
 		}
+	};
+
+	/** The saved account signed into with this email before, if any: the fallback
+	 * for a ban response that doesn't name the profile. */
+	const savedProfileIdForEmail = (email: string): number | null => {
+		const normalized = email.trim().toLowerCase();
+		const account = savedAccounts.find((saved) => saved.email.trim().toLowerCase() === normalized);
+		const id = account ? Number(account.profileId) : NaN;
+		return Number.isSafeInteger(id) && id > 0 ? id : null;
 	};
 
 	const login = async (email: string, password: string, { keepDevice }: LoginOptions = {}) => {
@@ -284,7 +365,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 			dispatch({ type: "SET_USER", payload: result.profileId });
 			void refreshSavedAccounts();
 			if (!showRestriction(result.restriction)) {
-				toast.success("Login successful");
+				toast.success(i18n.t("auth.toasts.login_success"));
 			}
 		} catch (error) {
 			// Not a failure to report: the page switches to SMS verification.
@@ -295,7 +376,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 				appLog.info("[Auth] login: SMS verification required");
 				throw new SmsVerificationRequiredError(verification.profileId, { endpoint, body: verification.body });
 			}
-			if (handleAccountBlock(error)) {
+			if (handleAccountBlock(error, savedProfileIdForEmail(email))) {
 				throw error;
 			}
 			if (error instanceof RecaptchaError) {
@@ -331,7 +412,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 			dispatch({ type: "SET_USER", payload: result.profileId });
 			void refreshSavedAccounts();
 			if (!showRestriction(result.restriction)) {
-				toast.success("Google login successful");
+				toast.success(i18n.t("auth.toasts.google_login_success"));
 			}
 		} catch (error) {
 			if (handleAccountBlock(error)) {
@@ -362,7 +443,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 			dispatch({ type: "SET_USER", payload: result.profileId });
 			void refreshSavedAccounts();
 			if (!showRestriction(result.restriction)) {
-				toast.success("Google login successful");
+				toast.success(i18n.t("auth.toasts.google_login_success"));
 			}
 		} catch (error) {
 			if (handleAccountBlock(error)) {
@@ -396,7 +477,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 			dispatch({ type: "SET_USER", payload: result.profileId });
 			void refreshSavedAccounts();
 			if (!showRestriction(result.restriction)) {
-				toast.success("Login successful");
+				toast.success(i18n.t("auth.toasts.login_success"));
 			}
 		} catch (error) {
 			if (handleAccountBlock(error)) {
@@ -429,7 +510,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 			dispatch({ type: "SET_USER", payload: result.profileId });
 			void refreshSavedAccounts();
 			if (!showRestriction(result.restriction)) {
-				toast.success("Facebook login successful");
+				toast.success(i18n.t("auth.toasts.facebook_login_success"));
 			}
 		} catch (error) {
 			if (handleAccountBlock(error)) {
@@ -461,8 +542,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 			dispatch({ type: "SET_LOADING", payload: true });
 			dispatch({ type: "SET_ERROR", payload: null });
 
-			// Sign-up is Android-only: rejects with a RecaptchaError elsewhere.
-			const captchaToken = await mintRecaptchaToken("sign_up");
+			// Official servers: sign-up is Android-only (rejects with a RecaptchaError
+			// elsewhere). A self-hosted server needs no reCAPTCHA token.
+			const captchaToken = isCustomServer() ? "" : await mintRecaptchaToken("sign_up");
 			const profileId = await callMethod("create_account", {
 				email,
 				password,
@@ -471,7 +553,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 				pushToken: cachedPushToken(),
 			});
 			appLog.info("[Auth] signUp: account created", { profileId });
-			toast.success("Account created");
+			toast.success(i18n.t("auth.toasts.account_created"));
 		} catch (error) {
 			if (error instanceof RecaptchaError) {
 				appLog.warn("[Auth] signUp: reCAPTCHA token unavailable", { reason: error.reason, detail: error.detail });
@@ -523,7 +605,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 			await restoreStrandedLocation();
 			await callMethod("logout");
 			dispatch({ type: "CLEAR_USER" });
-			toast.success("Logged out");
+			toast.success(i18n.t("auth.toasts.logged_out"));
 		} catch (error) {
 			const appError = asAppError(error);
 			const message = appError?.prettyMessage || "Logout failed";
@@ -548,10 +630,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 			dispatch({ type: "SET_USER", payload: result.profileId });
 			void refreshSavedAccounts();
 			if (!showRestriction(result.restriction)) {
-				toast.success("Switched account");
+				toast.success(i18n.t("auth.toasts.switched_account"));
 			}
 		} catch (error) {
-			if (handleAccountBlock(error)) {
+			if (handleAccountBlock(error, Number(profileId))) {
 				throw error;
 			}
 			const appError = asAppError(error);
@@ -611,10 +693,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 		setActiveChatContactIndexAccount(state.userId);
 
 		void (async () => {
+			const startedAt = performance.now();
 			await setActiveChatDbUser(state.userId);
-			if (state.userId != null) {
-				await migrateLegacySettingsIfNeeded(state.userId);
-			}
+			const chatDbMs = performance.now() - startedAt;
 
 			// Fire-and-forget: throttled background sync of the chat list and
 			// each changed conversation's latest messages, run on every profile
@@ -652,15 +733,65 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 				// way, and safe to start before the automation cache below finishes
 				// loading (runAutomationRulesForSender no-ops until it has).
 				void runTapsAutomationSync(apiFunctions, () => currentUserIdRef.current === userId);
+				// Fire-and-forget: slowly re-uploads drawer media restored from
+				// another profile's backup (see restoredDrawerMedia.ts) — guarded the
+				// same way, since the api uploads into whichever profile is active.
+				// Restored own albums follow (ownAlbums.ts), after the drawer so the
+				// two never upload at the same time.
+				void (async () => {
+					const isCurrent = () => currentUserIdRef.current === userId;
+					await runRestoredDrawerUpload(apiFunctions, isCurrent);
+					await runRestoredOwnAlbums(apiFunctions, isCurrent);
+				})();
+				// Fire-and-forget: records the own albums, content included, so a
+				// backup still has them once a ban locks the account out — every few
+				// hours on start and shortly after each change to them (ownAlbums.ts).
+				startOwnAlbumsSync(apiFunctions, userId, () => currentUserIdRef.current === userId);
+				// Fire-and-forget: records this profile's own details and photos
+				// locally so a backup still has them once the account can't read its
+				// profile anymore, e.g. after a ban (see ownProfilePhotos.ts).
+				void syncOwnProfile(apiFunctions, userId, () => currentUserIdRef.current === userId);
+				// Fire-and-forget, same idea for the block list: recorded for later
+				// backups, and a restored one blocked again bit by bit (ownBlocklist.ts).
+				// Restored favorites follow the same way (restoredFavorites.ts), after the
+				// blocks so the two never hit the server at the same time.
+				void (async () => {
+					const isCurrent = () => currentUserIdRef.current === userId;
+					await runRestoredBlocklist(apiFunctions, userId, isCurrent);
+					await syncOwnBlocklist(apiFunctions, isCurrent);
+					await runRestoredFavorites(apiFunctions, userId, isCurrent);
+				})();
 			}
 
+			const cacheMs: Record<string, number> = {};
+			const timed = async (name: string, load: () => Promise<void>) => {
+				const loadStartedAt = performance.now();
+				await load();
+				cacheMs[name] = Math.round(performance.now() - loadStartedAt);
+			};
 			await Promise.all([
-				loadAutomationCache(),
-				loadAutomationRulesCache(),
-				loadPrivacyCache(),
-				loadAutoTranslateCache(),
-				loadSeenCache(),
+				timed("automation", loadAutomationCache),
+				timed("automationRules", loadAutomationRulesCache),
+				timed("privacy", loadPrivacyCache),
+				timed("autoTranslate", loadAutoTranslateCache),
+				timed("seen", loadSeenCache),
 			]);
+			// Location, filters and so the whole grid wait on settingsReady — a
+			// slow start shows up as a long skeleton. Logged as a warning so it
+			// lands in issue reports (release keeps warn/error only).
+			// On the launch run, also catch a fast open that only started late
+			// (auth check slow), not just a slow one.
+			const totalMs = performance.now() - startedAt;
+			const isLaunchRun = previousUserId === undefined;
+			if (totalMs > 3_000 || (isLaunchRun && performance.now() > 5_000)) {
+				appLog.warn("[Auth] slow settings ready", {
+					sinceLaunchMs: Math.round(performance.now()),
+					startedSinceLaunchMs: Math.round(startedAt),
+					totalMs: Math.round(totalMs),
+					chatDbMs: Math.round(chatDbMs),
+					cacheMs,
+				});
+			}
 			dispatch({ type: "SET_SETTINGS_READY", payload: true });
 		})();
 	}, [state.userId, state.isLoading, queryClient, apiFunctions]);
@@ -696,7 +827,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 					appLog.warn("[Auth] auth:banned event with unexpected payload", event.payload);
 					return;
 				}
-				dispatch({ type: "SET_ACCOUNT_STATUS", payload: { kind: "banned", info: parsed.data } });
+				dispatch({
+					type: "SET_ACCOUNT_STATUS",
+					payload: { kind: "banned", info: parsed.data, profileId: currentUserIdRef.current },
+				});
 			}),
 			listen<unknown>("auth:restriction", (event) => {
 				const parsed = restrictionSchema.safeParse(event.payload);

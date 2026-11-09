@@ -15,7 +15,10 @@ import { decodeGeohash, encodeGeohash } from "../../utils/geohash";
 import { type GeocodeResult, type SelectedLocation } from "./GridPage.types";
 import { LocationChip, SavedLocationChip } from "./gridpage/components/LocationChips";
 import { MAP_SHEET_HINT_CLASS, MAP_SHEET_ICON_BUTTON_CLASS, MapSheetLayout, MapSheetQuickPicks, MapSheetSearch, mapSheetProps } from "./gridpage/components/MapSheetLayout";
-import { MapLocationPicker } from "./gridpage/components/MapLocationPicker";
+import { MapLocationPicker, type MapViewport } from "./gridpage/components/MapLocationPicker";
+import type { MapPlace } from "./gridpage/components/mapOverlays";
+import { useExploreHeatmap, useExploreLocations } from "../../hooks/queries/useExploreHeatmapQueries";
+import type { ExploreLocation as ExplorePlace } from "../../services/api/exploreHeatmapMethods";
 import { useLocationSearch } from "./gridpage/hooks/useLocationSearch";
 import {
 	getCityFromAddress,
@@ -35,6 +38,7 @@ import {
 	useVisitingMode,
 } from "../../hooks/queries/useProfileQueries";
 import { VISITING_MODES, getVisitingModeTranslationKey, type VisitingMode } from "../../types/visiting";
+import { confirmAgeVerificationRegion } from "../../services/ageVerificationGuard";
 
 export type ExploreLocation = { geohash: string; label: string } | null;
 
@@ -64,15 +68,55 @@ function geohashCenter(geohash: string): { lat: number; lon: number } | null {
 	}
 }
 
+type LocationTab = "set" | "explore";
+
+/** Zoomed out further than this, cities are shown instead of their neighbourhoods. */
+const NEIGHBOURHOOD_MIN_ZOOM = 10;
+
+/**
+ * Turns the curated explore locations into map markers: cities while zoomed
+ * out, their neighbourhoods once zoomed in. A city without any neighbourhood
+ * stays visible at every zoom, so there's always something to tap.
+ */
+function toMapPlaces(locations: ExplorePlace[]): MapPlace[] {
+	const citiesWithNeighbourhoods = new Set(
+		locations.filter((location) => location.type !== "City" && location.parentId != null).map((location) => location.parentId),
+	);
+	return locations.map((location) => {
+		const isCity = location.type === "City";
+		return {
+			id: location.id,
+			lat: location.lat,
+			lon: location.lon,
+			label: location.name,
+			icon: isCity ? location.nameDecoration ?? "📍" : "🏳️‍🌈",
+			highlight: !isCity,
+			...(isCity
+				? citiesWithNeighbourhoods.has(location.id)
+					? { maxZoom: NEIGHBOURHOOD_MIN_ZOOM }
+					: {}
+				: { minZoom: NEIGHBOURHOOD_MIN_ZOOM }),
+		};
+	});
+}
+
 export function LocationOverlay({ onClose, isDesktop, ...props }: LocationOverlayProps) {
+	// Which of the two ways to pick a location is active: "set" changes the
+	// real geohash (visible to others, persisted). "explore" browses a
+	// different area via /v7/search's exploreGeoHash without touching it —
+	// see GridPage's exploreLocation state for why this stays out of
+	// preferences. Defaults to whichever is already in effect. Lives here so
+	// the whole sheet, not just its content, takes the explore accent.
+	const [activeTab, setActiveTab] = useState<LocationTab>(props.exploreLocation ? "explore" : "set");
 	return (
 		<BottomSheet
 			onClose={onClose}
 			isDesktop={isDesktop}
 			bg="bg-[color-mix(in_srgb,var(--surface)_92%,black_8%)]"
+			accentColor={activeTab === "explore" ? EXPLORE_COLOR : undefined}
 			{...mapSheetProps(isDesktop)}
 		>
-			<LocationSheetContent isDesktop={isDesktop} {...props} />
+			<LocationSheetContent isDesktop={isDesktop} activeTab={activeTab} setActiveTab={setActiveTab} {...props} />
 		</BottomSheet>
 	);
 }
@@ -81,17 +125,13 @@ function LocationSheetContent({
 	exploreLocation,
 	onSetExploreLocation,
 	isDesktop,
-}: Omit<LocationOverlayProps, "onClose">) {
+	activeTab,
+	setActiveTab,
+}: Omit<LocationOverlayProps, "onClose"> & { activeTab: LocationTab; setActiveTab: (tab: LocationTab) => void }) {
 	const { t } = useTranslation();
 	const close = useBottomSheetClose();
 	const { setPreferences, geohash, locationName, useAutoLocation, autoFocusLocationSearch } = usePreferences();
 
-	// Which of the two ways to pick a location is active: "set" changes the
-	// real geohash (visible to others, persisted). "explore" browses a
-	// different area via /v7/search's exploreGeoHash without touching it —
-	// see GridPage's exploreLocation state for why this stays out of
-	// preferences. Defaults to whichever is already in effect.
-	const [activeTab, setActiveTab] = useState<"set" | "explore">(exploreLocation ? "explore" : "set");
 	const isExploreTab = activeTab === "explore";
 	const tabColor = isExploreTab ? EXPLORE_COLOR : "var(--accent)";
 	const tabContrast = isExploreTab ? "#fff" : "var(--accent-contrast)";
@@ -110,6 +150,17 @@ function LocationSheetContent({
 	useEffect(() => {
 		void loadSavedLocations().then(setSavedLocations);
 	}, []);
+
+	// Curated cities/neighbourhoods on the map, plus — in the explore tab only —
+	// a heatmap of where people actually are, before picking a spot.
+	const [mapViewport, setMapViewport] = useState<MapViewport | null>(null);
+	const { data: exploreLocations } = useExploreLocations();
+	const { points: heatmapPoints } = useExploreHeatmap(mapViewport, isExploreTab);
+	const mapPlaces = useMemo(() => (exploreLocations ? toMapPlaces(exploreLocations) : undefined), [exploreLocations]);
+	const exploreLocationsById = useMemo(
+		() => new Map((exploreLocations ?? []).map((location) => [location.id, location])),
+		[exploreLocations],
+	);
 
 	// Home location + visiting mode are account-wide profile settings (not
 	// grid-browsing preferences like geohash above), but they're both about
@@ -200,6 +251,7 @@ function LocationSheetContent({
 	const saveAndClose = async (lat: number, lon: number, label: string, isAuto = false) => {
 		setIsSaving(true);
 		try {
+			if (!(await confirmAgeVerificationRegion(lat, lon, geohash))) return;
 			await setPreferences({ geohash: encodeGeohash(lat, lon), locationName: label, useAutoLocation: isAuto });
 			// Setting your real location while still "exploring" elsewhere would
 			// leave the grid showing a place you just moved away from — end
@@ -269,6 +321,21 @@ function LocationSheetContent({
 
 	const pinLocation = (lat: number, lon: number, label: string) => {
 		setSelectedLocation({ lat, lon, label, city: null });
+		setIsNamingLocation(false);
+	};
+
+	// Tapping a city/neighbourhood marker pins it under its own name
+	// ("Capitol Hill, Seattle") rather than a reverse-geocoded street address.
+	const handlePlaceClick = (place: MapPlace) => {
+		const location = exploreLocationsById.get(Number(place.id));
+		const parent = location?.parentId != null ? exploreLocationsById.get(location.parentId) : undefined;
+		const city = location?.type === "City" ? location.name : parent?.name ?? null;
+		setSelectedLocation({
+			lat: place.lat,
+			lon: place.lon,
+			label: parent ? `${place.label}, ${parent.name}` : place.label,
+			city,
+		});
 		setIsNamingLocation(false);
 	};
 
@@ -394,15 +461,10 @@ function LocationSheetContent({
 
 			{/* Set vs. Explore: "set" changes your real, visible location;
 			    "explore" only changes what you browse — see confirmExplore.
-			    Explore gets its own color (EXPLORE_COLOR) everywhere, kept
-			    distinct from the app's --accent used for "set". */}
-			{/* Override only for explore: setting --accent to var(--accent) would be a
-			    self-referencing custom property, which CSS treats as invalid. */}
-			<div
-				className="mb-3 shrink-0"
-				style={isExploreTab ? ({ "--accent": EXPLORE_COLOR, "--accent-contrast": "#fff" } as React.CSSProperties) : undefined}
-			>
-				<SlidingTabs<"set" | "explore">
+			    Explore gets its own color (EXPLORE_COLOR) everywhere — the
+			    sheet's accent is swapped for it, see LocationOverlay. */}
+			<div className="mb-3 shrink-0">
+				<SlidingTabs<LocationTab>
 					value={activeTab}
 					onChange={(tab) => {
 						setActiveTab(tab);
@@ -448,8 +510,11 @@ function LocationSheetContent({
 							className="h-full w-full"
 							defaultZoom={11}
 							initialCenter={initialCenter}
-							pinColor={isExploreTab ? EXPLORE_COLOR : undefined}
-							modifierWheelZoom
+							accentColor={isExploreTab ? EXPLORE_COLOR : undefined}
+							heatmapPoints={isExploreTab ? heatmapPoints : undefined}
+							places={mapPlaces}
+							onPlaceClick={handlePlaceClick}
+							onViewportChange={setMapViewport}
 						/>
 					)
 				}

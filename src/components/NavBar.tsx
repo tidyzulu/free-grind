@@ -1,5 +1,20 @@
 import { Flame, MessageCircle, Check, Loader2 } from "lucide-react";
-import { LayoutGridFilled as GridIcon, UserFilled } from "./icons/FilledIcons";
+import {
+	LayoutGridFilled as GridIcon,
+	PumpkinFilled,
+	BatFilled,
+	BleedingHeartFilled,
+	TombstoneFilled,
+	BaubleGridFilled,
+	CandleFilled,
+	MistletoeFilled,
+	SnowflakeChatFilled,
+	RingFilled,
+	WineGlassesFilled,
+	HeartArrowFilled,
+	LoveLetterFilled,
+} from "./icons/FilledIcons";
+import { ProfilePlaceholderIcon } from "./icons/ProfilePlaceholderIcon";
 import toast from "react-hot-toast";
 import { RightNowIcon } from "./icons/RightNowIcon";
 import { useNavigate, useLocation } from "react-router-dom";
@@ -11,6 +26,7 @@ import { useTranslation } from "react-i18next";
 import { useAuth } from "../contexts/useAuth";
 import { useExploreMode } from "../contexts/ExploreModeContext";
 import { useIsRightNowLive } from "../hooks/useIsRightNowLive";
+import { useActiveSeason, type SeasonalOverlayId } from "../hooks/useSeasonalOverlay";
 import {
 	getInterestLastSeen,
 	INTEREST_SEEN_EVENT,
@@ -28,27 +44,59 @@ import { haptic } from "../utils/haptics";
 import { Avatar } from "./ui/avatar";
 import { useMyOwnProfile } from "../hooks/queries/useProfileQueries";
 import { getProfilePhotoHash } from "../pages/app/profile-editor/profileEditorUtils";
+import { useDesktopBreakpoint } from "../hooks/useDesktopBreakpoint";
+import { useSystemNavInset } from "../hooks/useSystemNavInset";
 import { getThumbImageUrl } from "../utils/media";
 import { getSavedAccountProfile } from "../services/savedAccountProfiles";
 import { looksLikeMessageUpdate } from "../utils/messageUpdates";
 
+// Nav icons and tab names (`labels`: the nav.<season>.* keys) swapped in during
+// a seasonal theme (only one is ever active, see useActiveSeason).
+type SeasonalNav = {
+	icons: Record<"browse" | "rightNow" | "interest" | "inbox", typeof GridIcon>;
+	labels: string;
+};
+const HALLOWEEN_NAV: SeasonalNav = {
+	icons: { browse: PumpkinFilled, rightNow: BatFilled, interest: BleedingHeartFilled, inbox: TombstoneFilled },
+	labels: "nav.halloween",
+};
+const CHRISTMAS_NAV: SeasonalNav = {
+	icons: { browse: BaubleGridFilled, rightNow: CandleFilled, interest: MistletoeFilled, inbox: SnowflakeChatFilled },
+	labels: "nav.christmas",
+};
+const VALENTINES_NAV: SeasonalNav = {
+	icons: { browse: RingFilled, rightNow: WineGlassesFilled, interest: HeartArrowFilled, inbox: LoveLetterFilled },
+	labels: "nav.valentines",
+};
+const SEASONAL_NAV: Record<SeasonalOverlayId, SeasonalNav> = { halloween: HALLOWEEN_NAV, christmas: CHRISTMAS_NAV, valentines: VALENTINES_NAV };
+
 // Bottom-nav style options; only offered (and only honoured) in the mobile app.
 export const NAV_SHOW_LABELS_KEY = "fg-nav-show-labels";
+// Bar style: unset/"false" = full width, "true" = floating card, "fade" =
+// floating without a card, on a dark fade instead.
 export const NAV_FLOATING_KEY = "fg-nav-floating";
 export const NAV_STYLE_EVENT = "fg-nav-style-changed";
 
+export type NavBarStyle = "solid" | "floating" | "fade";
+
+export const readNavBarStyle = (): NavBarStyle => {
+	const value = window.localStorage.getItem(NAV_FLOATING_KEY);
+	return value === "fade" ? "fade" : value === "true" ? "floating" : "solid";
+};
+
 const readNavStyle = () => ({
 	showLabels: window.localStorage.getItem(NAV_SHOW_LABELS_KEY) === "true",
-	floating: window.localStorage.getItem(NAV_FLOATING_KEY) === "true",
+	barStyle: readNavBarStyle(),
 });
 
 /**
  * The bottom nav's effective look, kept in sync with the customization page.
  * `fullWidth`: edge-to-edge bar (mobile app default) instead of the floating
  * card desktop/web always use — overlays placed above the nav (e.g. the Right
- * Now map card) need less bottom offset then.
+ * Now map card) need less bottom offset then. `transparent`: floating tabs
+ * without a card, kept readable by a dark fade from the screen edge.
  */
-export function useNavStyle(): { fullWidth: boolean; hideLabels: boolean } {
+export function useNavStyle(): { fullWidth: boolean; hideLabels: boolean; transparent: boolean } {
 	const [isMobilePlatform] = useState(() => isAndroid() || isIos());
 	const [navStyle, setNavStyle] = useState(readNavStyle);
 	useEffect(() => {
@@ -61,7 +109,8 @@ export function useNavStyle(): { fullWidth: boolean; hideLabels: boolean } {
 		hideLabels: isMobilePlatform && !navStyle.showLabels,
 		// Full-width edge-to-edge bar in the mobile app, unless the user opted
 		// into the floating card that desktop/web always use.
-		fullWidth: isMobilePlatform && !navStyle.floating,
+		fullWidth: isMobilePlatform && navStyle.barStyle === "solid",
+		transparent: isMobilePlatform && navStyle.barStyle === "fade",
 	};
 }
 
@@ -117,7 +166,17 @@ export function NavBar() {
 	const { isExploreActive } = useExploreMode();
 	// A live (public) Right Now session takes the grid tab's color over everything, explore included.
 	const isRightNowLive = useIsRightNowLive();
-	const { hideLabels, fullWidth } = useNavStyle();
+	const activeSeason = useActiveSeason();
+	const seasonalNav = activeSeason ? SEASONAL_NAV[activeSeason] : null;
+	const seasonalIcons = seasonalNav?.icons;
+	const navLabel = (key: string, fallback: string) =>
+		seasonalNav ? t(`${seasonalNav.labels}.${key}`, { defaultValue: fallback }) : fallback;
+	const { hideLabels, fullWidth, transparent } = useNavStyle();
+	// Desktop: vertical rail on the left instead of the bottom bar.
+	const rail = useDesktopBreakpoint();
+	// Floating card (not full-width, not the cardless fade): styled like the
+	// native iOS 26 / Material 3 bars, with a selection pill concentric to the capsule.
+	const capsule = !rail && !fullWidth && !transparent;
 
 	const pathRef = useRef(location.pathname);
 	useEffect(() => {
@@ -129,6 +188,8 @@ export function NavBar() {
 	const mutedConversationIdsRef = useRef<Set<string>>(new Set());
 
 	const [activeTab, setActiveTab] = useState("browse");
+	// On Right Now (its tab, or the grid while a session is live) every tab hovers in Right Now's color.
+	const isRightNowPage = activeTab === "right-now" || (activeTab === "browse" && isRightNowLive);
 	const setUnreadCount = useState(0)[1];
 	const [interestUnseen, setInterestUnseen] = useState(false);
 	const [inboxUnseen, setInboxUnseen] = useState(false);
@@ -181,6 +242,26 @@ export function NavBar() {
 		setIsAccountSwitcherOpen(false);
 	}, [location.pathname]);
 
+	// Rail: the switcher sits just right of the profile tab's pill (avatar +
+	// label, highlighted while open), bottom edges level, measured from the tab
+	// itself rather than offset from the rail's edges.
+	const [railSwitcherPos, setRailSwitcherPos] = useState<{ left: number; bottom: number } | null>(null);
+	useLayoutEffect(() => {
+		if (!rail || !isAccountSwitcherOpen) {
+			setRailSwitcherPos(null);
+			return;
+		}
+		const measure = () => {
+			const tab = navRef.current?.querySelector("[data-nav-account-tab]");
+			if (!tab) return;
+			const rect = tab.getBoundingClientRect();
+			setRailSwitcherPos({ left: rect.right + 8, bottom: window.innerHeight - rect.bottom });
+		};
+		measure();
+		window.addEventListener("resize", measure);
+		return () => window.removeEventListener("resize", measure);
+	}, [rail, isAccountSwitcherOpen]);
+
 	const handleSwitchAccount = async (profileId: string) => {
 		setSwitchingProfileId(profileId);
 		try {
@@ -197,29 +278,29 @@ export function NavBar() {
 	const navItems = [
 		{
 			value: "browse",
-			label: t("nav.browse"),
-			icon: GridIcon,
+			label: navLabel("browse", t("nav.browse")),
+			icon: seasonalIcons?.browse ?? GridIcon,
 			path: "/",
 			visible: true, // Mandatory
 		},
 		{
 			value: "right-now",
-			label: t("nav.right_now"),
-			icon: RightNowIcon,
+			label: navLabel("right_now", t("nav.right_now")),
+			icon: seasonalIcons?.rightNow ?? RightNowIcon,
 			path: "/right-now",
 			visible: showRightNow, // Toggleable
 		},
 		{
 			value: "interest",
-			label: t("nav.interest"),
-			icon: Flame,
+			label: navLabel("interest", t("nav.interest")),
+			icon: seasonalIcons?.interest ?? Flame,
 			path: "/interest",
 			visible: showInterest, // Toggleable
 		},
 		{
 			value: "inbox",
-			label: t("nav.inbox"),
-			icon: MessageCircle,
+			label: navLabel("inbox", t("nav.inbox")),
+			icon: seasonalIcons?.inbox ?? MessageCircle,
 			path: "/chat",
 			visible: true, // Mandatory
 		},
@@ -454,12 +535,22 @@ export function NavBar() {
 
 	// Publish the bar's rendered height (safe-area padding included) as
 	// --nav-height, so floating UI (FABs, map cards) can sit right above it
-	// regardless of full-width/floating style or hidden labels.
+	// regardless of full-width/floating style or hidden labels. The desktop
+	// rail takes no bottom space; it flags the root instead (data-nav="rail"),
+	// which sets --nav-rail-width for ProtectedLayout's left offset.
 	const navRef = useRef<HTMLElement>(null);
 	useLayoutEffect(() => {
 		const nav = navRef.current;
 		if (!nav) return;
 		const root = document.documentElement;
+		if (rail) {
+			root.style.setProperty("--nav-height", "0px");
+			root.dataset.nav = "rail";
+			return () => {
+				root.style.removeProperty("--nav-height");
+				delete root.dataset.nav;
+			};
+		}
 		const publish = () => root.style.setProperty("--nav-height", `${nav.offsetHeight}px`);
 		publish();
 		const observer = "ResizeObserver" in window ? new ResizeObserver(publish) : null;
@@ -468,28 +559,13 @@ export function NavBar() {
 			observer?.disconnect();
 			root.style.removeProperty("--nav-height");
 		};
-	}, []);
+	}, [rail]);
 
 	// Floating bar: keep the same gap below it as on its sides, like iOS, and
 	// let it overlap the gesture-handle / home-indicator area. Only a tall
 	// inset (Android 3-button navigation) is kept clear, since the bar would
 	// cover the system buttons there.
-	const [systemNavInset, setSystemNavInset] = useState(0);
-	useLayoutEffect(() => {
-		const probe = document.createElement("div");
-		probe.style.cssText = "position:fixed;visibility:hidden;pointer-events:none;padding-bottom:env(safe-area-inset-bottom,0px)";
-		document.body.appendChild(probe);
-		const measure = () => {
-			const inset = parseFloat(getComputedStyle(probe).paddingBottom) || 0;
-			setSystemNavInset(inset > 40 ? inset : 0);
-		};
-		measure();
-		window.addEventListener("resize", measure);
-		return () => {
-			window.removeEventListener("resize", measure);
-			probe.remove();
-		};
-	}, []);
+	const systemNavInset = useSystemNavInset();
 
 	// Determine the grid column class safely based on exactly how many tabs remain
 	const gridColsClass = 
@@ -497,52 +573,145 @@ export function NavBar() {
 		navItems.length === 3 ? "grid-cols-3" : 
 		navItems.length === 4 ? "grid-cols-4" :
 		"grid-cols-5";
+	const activeTabIndex = navItems.findIndex((item) => item.value === activeTab);
 
 	return (
 		<nav
 			ref={navRef}
 			className={cn(
-				"fixed inset-x-0 bottom-0",
+				rail
+					? // No fill or border: the tabs sit on the page background like the
+						// page headers, so the header glow runs behind them and only the
+						// content is shown as cards. Top padding = the page headers' own
+						// (--header-top), so the first tab lines up with the page title;
+						// bottom padding = the pages' --page-bottom, so the profile tab ends
+						// level with the page content.
+						"fixed inset-y-0 start-0 w-[var(--nav-rail-width)] pt-[var(--header-top)] pb-[var(--page-bottom)]"
+					: "fixed inset-x-0 bottom-0",
 				// While the account switcher is open, lift the bar (and the switcher
 				// inside it) above the pages' floating action buttons (z-[60]).
 				isAccountSwitcherOpen ? "z-[65]" : "z-50",
-				!fullWidth && "px-3 pb-[calc(var(--nav-system-inset)+0.75rem)] md:px-4 md:pb-[calc(var(--nav-system-inset)+1rem)]",
+				!rail && !fullWidth && "px-3 pb-[calc(var(--nav-system-inset)+var(--nav-bottom-gap,0.75rem))] md:px-4 md:pb-[calc(var(--nav-system-inset)+var(--nav-bottom-gap,1rem))]",
 			)}
-			style={{ "--nav-system-inset": `${systemNavInset}px` } as React.CSSProperties}
+			style={
+				{
+					"--nav-system-inset": `${systemNavInset}px`,
+					// 3-button navigation: the system bar is transparent, so sit right on top of
+					// its buttons with no gap instead of the usual 12px.
+					...(systemNavInset > 0 && { "--nav-bottom-gap": "0px" }),
+				} as React.CSSProperties
+			}
 		>
+			{/* Floating styles: a dark fade rising from the screen edge (like the
+			    profile footer actions) sets the bar off from the content. Strong for
+			    the transparent style, where it alone keeps the icons readable; lighter
+			    behind the card. It reaches above the bar without adding to its height
+			    (--nav-height). */}
+			{!rail && !fullWidth && (
+				<div
+					aria-hidden
+					className={cn("pointer-events-none absolute inset-x-0 bottom-0", transparent ? "-top-24" : "-top-12")}
+					style={{
+						background: transparent
+							? "linear-gradient(to top, rgba(0,0,0,1) 0%, rgba(0,0,0,0.95) 45%, rgba(0,0,0,0.7) 72%, transparent 100%)"
+							: "linear-gradient(to top, rgba(0,0,0,0.7) 0%, rgba(0,0,0,0.5) 40%, rgba(0,0,0,0.2) 70%, transparent 100%)",
+					}}
+				/>
+			)}
 			{/* Mobile app: full-width bar that extends under the system navigation
 			    bar (edge-to-edge), with the safe-area inset as inner padding.
-			    Desktop/web: floating rounded card. */}
+			    Floating style: rounded capsule (transparent style: without the card).
+			    Desktop: left rail. */}
 			<div
 				className={cn(
 					"relative",
-					fullWidth
-						? "w-full border-t border-[var(--border)] pt-1.5 pb-[calc(env(safe-area-inset-bottom,0px)+0.375rem)]"
-						: // Capsule shape; extra side padding keeps the outer tabs off the curve.
-							"mx-auto w-full max-w-4xl rounded-full border border-[var(--border)] px-3 py-1.5",
+					rail
+						? "h-full"
+						: fullWidth
+							? cn(
+									"w-full border-t border-[var(--border)] pt-1.5",
+									// 3-button navigation: sit right on the system buttons, no gap.
+									systemNavInset > 0 ? "pb-[var(--safe-area-bottom)]" : "pb-[calc(var(--safe-area-bottom)+0.375rem)]",
+								)
+							: transparent
+								? // Cardless: extra side padding keeps the outer tabs off the curve.
+									"mx-auto w-full max-w-4xl rounded-full px-3 py-1.5"
+								: // Capsule: tight inset so the active tab's pill follows the bar's curve. No outline
+									// on Android, like Material 3 bars (surface + shadow only).
+									cn(
+										"mx-auto w-full max-w-4xl rounded-full p-1",
+										isAndroid()
+											? // M3 level-3 elevation: key + ambient shadow.
+												"shadow-[0_4px_10px_rgba(0,0,0,0.55),0_12px_36px_rgba(0,0,0,0.5)]"
+											: "border border-[var(--border)] shadow-[0_8px_28px_rgba(0,0,0,0.35)]",
+									),
 				)}
-				style={{
-					backgroundColor: "rgba(22, 29, 39, 0.8)",
-					background: "color-mix(in srgb, var(--surface) 80%, transparent)",
-					backdropFilter: "blur(24px)",
-					WebkitBackdropFilter: "blur(24px)",
-				}}
+				style={
+					rail || transparent
+						? undefined
+						: {
+								backgroundColor: "rgba(22, 29, 39, 0.8)",
+								// Android capsule: lighter tonal surface (surface-2), since in dark
+								// themes M3 shows elevation mostly by tone; shadows barely read on black.
+								// Tinted with the page's tab color like Material You's surfaceContainer.
+								background:
+									capsule && isAndroid()
+										? `color-mix(in srgb, color-mix(in srgb, var(--surface-2) 94%, ${
+												isRightNowPage ? "var(--right-now)" : activeTab === "browse" && isExploreActive ? "var(--explore)" : "var(--accent)"
+											}) 92%, transparent)`
+										: "color-mix(in srgb, var(--surface) 80%, transparent)",
+								backdropFilter: "blur(24px) saturate(180%)",
+								WebkitBackdropFilter: "blur(24px) saturate(180%)",
+							}
+				}
 			>
 				<Tabs
 					value={activeTab}
 					onValueChange={handleTabChange}
+					orientation={rail ? "vertical" : "horizontal"}
 					// Keep the tabs at their previous centered width; only the
 					// background spans the full screen on mobile.
-					className={cn(fullWidth && "mx-auto w-full max-w-4xl px-[calc(0.75rem+1px+0.375rem)]")}
+					className={cn(rail ? "h-full" : fullWidth && "mx-auto w-full max-w-4xl px-[calc(0.75rem+1px+0.375rem)]")}
 				>
 					<TabsList
 						className={cn(
-							"grid w-full bg-transparent p-0",
-							gridColsClass,
-							// Mobile app without labels: keep icon size, shrink the bar instead.
-							hideLabels ? "h-12" : "h-16 md:h-[4.1rem]",
+							rail
+								? "flex h-full w-full flex-col items-stretch justify-start gap-1 bg-transparent px-2 py-0"
+								: cn(
+										"grid w-full bg-transparent p-0",
+										gridColsClass,
+										// Mobile app without labels: keep icon size, shrink the bar instead.
+										hideLabels ? "h-12" : capsule ? "h-[3.625rem]" : "h-16 md:h-[4.1rem]",
+									),
+							capsule && "relative",
 						)}
 					>
+						{/* Capsule: one shared selection pill that slides to the active tab.
+						    The columns are equal, so translateX(index × 100%) of a one-column-wide
+						    pill lands on the tab. A single element with a px radius and a permanent
+						    compositor layer (will-change): webviews could drop the radius of an
+						    opacity child while the layer was promoted mid-slide, showing a rectangle. */}
+						{capsule && activeTabIndex >= 0 && (
+							<div
+								aria-hidden
+								className={cn(
+									"pointer-events-none absolute inset-y-0 start-0",
+									"transition-[transform,color] duration-[340ms] ease-[cubic-bezier(0.3,1.25,0.55,1)] motion-reduce:transition-none",
+									activeTab === "right-now" || (activeTab === "browse" && isRightNowLive)
+										? "text-[var(--right-now)]"
+										: activeTab === "browse" && isExploreActive
+											? "text-[var(--explore)]"
+											: "text-[var(--accent)]",
+								)}
+								style={{
+									width: `${100 / navItems.length}%`,
+									transform: `translateX(${activeTabIndex * 100}%)`,
+									willChange: "transform",
+									borderRadius: "9999px",
+									background: "color-mix(in srgb, currentColor 14%, transparent)",
+								}}
+							/>
+						)}
 						{navItems.map((item) => {
 							const Icon = item.icon;
 							const isSwitcherTab = item.value === "settings" && hasAccountSwitcher;
@@ -606,31 +775,53 @@ export function NavBar() {
 									}}
 									className={cn(
 										isSwitcherTab && "select-none [-webkit-touch-callout:none]",
-										"flex h-full flex-col items-center justify-center gap-1 rounded-xl text-[var(--text-muted)] transition-colors duration-150 hover:text-[var(--text)] focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--surface)] md:gap-1.5",
+										"flex h-full flex-col items-center justify-center gap-1 rounded-xl transition-colors duration-150 focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--surface)] md:gap-1.5",
 										// No filled pill (full-width and floating alike), highlight via text color only.
 										"data-[state=active]:bg-transparent data-[state=active]:shadow-none",
+										rail
+											? // Rail: stacked icon + label, tinted pill for the active tab; the
+												// profile tab sits at the bottom like in desktop messengers.
+												cn(
+													"h-auto w-full flex-none px-1 py-2.5 text-[var(--text-muted)] hover-fill hover:text-[var(--text)]",
+													"data-[state=active]:bg-[color-mix(in_srgb,currentColor_12%,transparent)]",
+													item.value === "settings" && "mt-auto",
+												)
+											: transparent
+												? // On the dark fade: light icons with a shadow, in either theme.
+													"text-white/90 drop-shadow-[0_1px_1.5px_rgba(0,0,0,1)] drop-shadow-[0_0_0.8px_rgba(0,0,0,1)] hover:text-white"
+												: "text-[var(--text-muted)] hover:text-[var(--text)]",
+										// Capsule: press shrink like native tab bars; the active pill is drawn
+										// once behind all tabs (above) so it can slide. Positioned to stay above it.
+										capsule &&
+											"relative min-w-0 gap-0.5 rounded-full px-0.5 transition-[color,transform] active:scale-[0.94] md:gap-0.5",
 										item.value === "right-now" || (item.value === "browse" && isRightNowLive)
 											? "focus-visible:ring-[var(--right-now)] data-[state=active]:text-[var(--right-now)]"
 											: item.value === "browse" && isExploreActive
 												? "focus-visible:ring-[var(--explore)] data-[state=active]:text-[var(--explore)]"
 												: "focus-visible:ring-[var(--accent)] data-[state=active]:text-[var(--accent)]",
+										isRightNowPage || item.value === "right-now" || (item.value === "browse" && isRightNowLive)
+											? "[--hover-tint:var(--right-now)]"
+											: item.value === "browse" && isExploreActive && "[--hover-tint:var(--explore)]",
 									)}
 								>
 									{/* Fixed icon-sized slot so the slightly larger avatar overflows evenly
 									    instead of pushing its label below the other tabs' labels. */}
-									<div className="relative flex h-5 w-5 items-center justify-center md:h-[1.2rem] md:w-[1.2rem]">
+									<div className={cn("relative flex items-center justify-center", capsule ? "h-6 w-6" : "h-5 w-5 md:h-[1.2rem] md:w-[1.2rem]")}>
 										{Icon ? (
-											<Icon className="h-5 w-5 fill-current md:h-[1.2rem] md:w-[1.2rem]" />
+											<Icon className={cn("fill-current", capsule ? "h-6 w-6" : "h-5 w-5 md:h-[1.2rem] md:w-[1.2rem]")} />
 										) : !profilePhotoUrl ? (
 											// No profile photo: a user icon that takes the tab's (active) color like the other icons.
-											<UserFilled className="h-5 w-5 md:h-[1.2rem] md:w-[1.2rem]" />
+											<ProfilePlaceholderIcon className={capsule ? "h-6 w-6" : "h-5 w-5 md:h-[1.2rem] md:w-[1.2rem]"} />
 										) : (
 											<Avatar
 												src={profilePhotoUrl}
 												alt={t("browse_page.your_profile_photo")}
 												className={cn(
-													"h-6 w-6 shrink-0 border-0 ring-2 transition-colors md:h-[1.35rem] md:w-[1.35rem]",
-													activeTab !== "settings" && !isAccountSwitcherOpen
+													"shrink-0 border-0 transition-colors",
+													capsule ? "h-[1.625rem] w-[1.625rem] ring-[1.5px]" : "h-6 w-6 ring-2 md:h-[1.35rem] md:w-[1.35rem]",
+													// Capsule: the active tab's pill already marks it, so the ring only
+													// shows while the switcher is open from another tab.
+													(capsule ? activeTab === "settings" || !isAccountSwitcherOpen : activeTab !== "settings" && !isAccountSwitcherOpen)
 														? "ring-transparent"
 														: "ring-[var(--accent)]",
 												)}
@@ -638,11 +829,11 @@ export function NavBar() {
 										)}
 										{(item.value === "inbox" && inboxUnseen) ||
 										(item.value === "interest" && interestUnseen) ? (
-											<span className="absolute -right-1 -top-1 flex h-2 w-2">
+											<span className="absolute -end-1 -top-1 flex h-2 w-2">
 												<span
 													className={cn(
 														"absolute inline-flex h-full w-full animate-ping rounded-full opacity-75",
-														activeTab === "right-now" || (activeTab === "browse" && isRightNowLive)
+														isRightNowPage
 															? "bg-[var(--right-now)]"
 															: activeTab === "browse" && isExploreActive
 																? "bg-[var(--explore)]"
@@ -652,7 +843,7 @@ export function NavBar() {
 												<span
 													className={cn(
 														"relative inline-block h-2 w-2 rounded-full ring-1 ring-[var(--surface)]",
-														activeTab === "right-now" || (activeTab === "browse" && isRightNowLive)
+														isRightNowPage
 															? "bg-[var(--right-now)]"
 															: activeTab === "browse" && isExploreActive
 																? "bg-[var(--explore)]"
@@ -662,10 +853,18 @@ export function NavBar() {
 											</span>
 										) : null}
 									</div>
-									{hideLabels ? (
+									{hideLabels && !rail ? (
 										<span className="sr-only">{item.label}</span>
 									) : (
-										<span className="text-xs md:text-[0.8rem]">
+										<span
+											className={
+												rail
+													? "w-full whitespace-normal break-words text-center text-[0.7rem] leading-tight"
+													: capsule
+														? "max-w-full truncate text-[0.6875rem] font-semibold leading-tight tracking-[-0.01em]"
+														: "text-xs md:text-[0.8rem]"
+											}
+										>
 											{item.label}
 										</span>
 									)}
@@ -675,13 +874,17 @@ export function NavBar() {
 					</TabsList>
 				</Tabs>
 
-				{isAccountSwitcherOpen && (
+				{isAccountSwitcherOpen && (!rail || railSwitcherPos) && (
 					<div
 						ref={accountSwitcherRef}
 						className={cn(
-							"absolute bottom-full z-50 mb-2 w-max min-w-[14rem] max-w-[calc(100vw-1.5rem)] overflow-hidden rounded-lg border border-[var(--border)] bg-[var(--surface)] p-3 shadow-xl animate-in fade-in zoom-in-95 slide-in-from-bottom-2 duration-150",
-							fullWidth ? "right-3" : "right-0",
+							"z-50 w-max min-w-[14rem] max-w-[calc(100vw-1.5rem)] overflow-hidden rounded-lg menu-surface p-3 animate-in fade-in zoom-in-95 duration-150",
+							// Rail: right of the rail, level with the avatar (railSwitcherPos).
+							rail
+								? "fixed slide-in-from-left-2"
+								: cn("absolute bottom-full mb-2 slide-in-from-bottom-2", fullWidth ? "end-3" : "end-0"),
 						)}
+						style={rail && railSwitcherPos ? { left: railSwitcherPos.left, bottom: railSwitcherPos.bottom } : undefined}
 					>
 						<div className="flex flex-col gap-1">
 							{savedAccounts.map((account) => {
@@ -694,7 +897,7 @@ export function NavBar() {
 										type="button"
 										onClick={() => void handleSwitchAccount(account.profileId)}
 										disabled={isActive || isSwitching}
-										className="flex min-w-0 items-center gap-2.5 rounded-sm px-1.5 py-1.5 text-left transition-colors hover:bg-[var(--surface-2)] active:bg-[var(--surface-2)] disabled:cursor-default"
+										className="flex min-w-0 items-center gap-2.5 rounded-sm px-1.5 py-1.5 text-start transition-colors hover-fill disabled:cursor-default"
 									>
 										<div className="relative h-10 w-10 shrink-0">
 											<Avatar
@@ -708,14 +911,14 @@ export function NavBar() {
 												</div>
 											)}
 											{isActive && (
-												<div className="absolute -bottom-0.5 -right-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-[var(--accent)] text-white ring-2 ring-[var(--surface)]">
+												<div className="absolute -bottom-0.5 -end-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-[var(--accent)] text-white ring-2 ring-[var(--surface)]">
 													<Check className="h-2.5 w-2.5" strokeWidth={3} />
 												</div>
 											)}
 										</div>
 										<div className="min-w-0 flex-1">
 											<p className="truncate text-sm font-semibold leading-snug text-[var(--text)]">
-												{savedProfile.displayName || t("settings.account_unnamed", { defaultValue: "Someone" })}
+												{savedProfile.displayName || t("common.unknown_display_name")}
 											</p>
 											{account.email && (
 												<p className="truncate text-xs text-[var(--text-muted)] leading-snug mt-0.5">

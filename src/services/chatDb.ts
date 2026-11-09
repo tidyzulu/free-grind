@@ -52,7 +52,12 @@ import { guardAgainstClosedPool } from "./sqlitePoolGuard";
 // before login, and as the migration source for existing installs.
 const LEGACY_CHAT_DB_FILENAME = "chat.sqlite3";
 const LEGACY_CHAT_DB = `sqlite:${LEGACY_CHAT_DB_FILENAME}`;
-const SQLITE_BUSY_TIMEOUT_MS = 5_000;
+// Stored in each db file's PRAGMA user_version once initChatDbSchema has run
+// on it. BUMP THIS whenever initChatDbSchema changes (new table, index,
+// column or data fix) — otherwise existing installs skip the setup and never
+// get the change; only fresh installs would.
+const CHAT_DB_SCHEMA_VERSION = 5;
+const SLOW_DB_OPEN_MS = 2_000;
 const SQLITE_LOCK_RETRY_DELAYS_MS = [30, 80, 180, 350] as const;
 
 let activeChatDbName = LEGACY_CHAT_DB;
@@ -61,6 +66,16 @@ let activeChatDbName = LEGACY_CHAT_DB;
 // the db file directly on disk, e.g. the native Rust backup/restore commands.
 export function getActiveChatDbFileName(): string {
 	return activeChatDbName.replace(/^sqlite:/, "");
+}
+
+/** Bare filename (in AppData) of a profile's own db file, whether or not it's the active one. */
+export function chatDbFileNameFor(profileId: number): string {
+	return `chat-${profileId}.sqlite3`;
+}
+
+/** Whether this device has a db file for the profile, i.e. any local data to back up. */
+export function hasChatDbFile(profileId: number): Promise<boolean> {
+	return exists(chatDbFileNameFor(profileId), { baseDir: BaseDirectory.AppData });
 }
 
 /**
@@ -186,385 +201,500 @@ let writeQueue: Promise<void> = Promise.resolve();
 async function getDb(): Promise<Database> {
 	if (!dbPromise) {
 		dbPromise = (async () => {
+			const openStartedAt = performance.now();
 			const db = guardAgainstClosedPool(await Database.load(activeChatDbName), "chat-db");
-			try {
-				await db.execute("PRAGMA journal_mode = WAL");
-				await db.execute("PRAGMA synchronous = NORMAL");
-				await db.execute(`PRAGMA busy_timeout = ${SQLITE_BUSY_TIMEOUT_MS}`);
-			} catch (error) {
-				appLog.warn("[chat-db] failed to set pragmas", error);
+			const loadMs = performance.now() - openStartedAt;
+
+			// Every statement below is one IPC round trip, ~90ms each on slow
+			// devices — so the schema setup only runs when the file's stored
+			// version is behind, not on every open. busy_timeout needs no pragma:
+			// sqlx already sets 5s on each pooled connection.
+			const versionRows = await db.select<{ user_version: number }[]>("PRAGMA user_version");
+			const storedSchemaVersion = versionRows[0]?.user_version ?? 0;
+			const runsInit = storedSchemaVersion < CHAT_DB_SCHEMA_VERSION;
+			if (runsInit) {
+				try {
+					// Persisted in the file itself, so once per file is enough.
+					await db.execute("PRAGMA journal_mode = WAL");
+				} catch (error) {
+					appLog.warn("[chat-db] failed to set journal mode", error);
+				}
+
+				await initChatDbSchema(db);
+				// Only after the whole setup succeeded — a failed one reruns next open.
+				await db.execute(`PRAGMA user_version = ${CHAT_DB_SCHEMA_VERSION}`);
 			}
 
-			await executeWithLockRetry(db, "init-tables", async () => {
-				await db.execute(`
-					CREATE TABLE IF NOT EXISTS conversations (
-						conversation_id TEXT PRIMARY KEY,
-						other_profile_id TEXT,
-						name TEXT,
-						participants_json TEXT NOT NULL,
-						last_activity_timestamp INTEGER,
-						unread_count INTEGER NOT NULL DEFAULT 0,
-						pinned INTEGER NOT NULL DEFAULT 0,
-						muted INTEGER NOT NULL DEFAULT 0,
-						favorite INTEGER NOT NULL DEFAULT 0,
-						preview_json TEXT,
-						archived INTEGER NOT NULL DEFAULT 0,
-						archived_reason TEXT,
-						archived_at INTEGER,
-						last_seen_in_inbox_at INTEGER,
-						created_at INTEGER NOT NULL,
-						updated_at INTEGER NOT NULL
-					)
-				`);
-				await db.execute(
-					"CREATE INDEX IF NOT EXISTS idx_conversations_other_profile ON conversations(other_profile_id)",
-				);
-				await db.execute(
-					"CREATE INDEX IF NOT EXISTS idx_conversations_archived ON conversations(archived)",
-				);
-				// Added later: explicit, durable "who blocked whom" state — the
-				// source of truth for archive/system-message decisions instead of
-				// inferring direction from toggling `archived` on an ambiguous
-				// chat.v1.conversation.delete event. NULL = not blocked either way.
-				try {
-					await db.execute("ALTER TABLE conversations ADD COLUMN block_state TEXT");
-				} catch {
-					// already migrated
-				}
-				// Added later: tracks message-fetch progress separately from
-				// conversation-metadata freshness so inboxSync can resume an
-				// interrupted first sync without re-walking conversations whose
-				// messages already landed (see StoredConversation.messagesSyncedActivityTimestamp).
-				try {
-					await db.execute(
-						"ALTER TABLE conversations ADD COLUMN messages_synced_activity_timestamp INTEGER",
-					);
-				} catch {
-					// already migrated
-				}
-				// Added later: manual, local-only "hide this chat from the inbox"
-				// flag — unlike `archived` (server says the conversation is gone),
-				// hidden conversations still round-trip through /v4/inbox normally;
-				// this only affects the client-side filteredConversations view.
-				try {
-					await db.execute("ALTER TABLE conversations ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0");
-				} catch {
-					// already migrated
-				}
-				// One-time data fix: earlier builds didn't clear `pinned` when a
-				// conversation got archived (e.g. by a block), leaving pinned+archived
-				// rows stuck showing pinned with no toggle able to reach them (the
-				// pinned duplicate lived outside the list the pin toggle updates).
-				// Idempotent — a no-op once every row is clean.
-				await db.execute("UPDATE conversations SET pinned = 0 WHERE archived = 1 AND pinned = 1");
-
-				await db.execute(`
-					CREATE TABLE IF NOT EXISTS conversation_meta (
-						conversation_id TEXT PRIMARY KEY,
-						last_read_timestamp INTEGER
-					)
-				`);
-
-				await db.execute(`
-					CREATE TABLE IF NOT EXISTS messages (
-						message_id TEXT PRIMARY KEY,
-						conversation_id TEXT NOT NULL,
-						sender_id INTEGER NOT NULL,
-						timestamp INTEGER NOT NULL,
-						type TEXT,
-						chat1_type TEXT,
-						body_json TEXT,
-						unsent INTEGER NOT NULL DEFAULT 0,
-						local_history INTEGER NOT NULL DEFAULT 0,
-						reply_to_message_id TEXT,
-						reply_preview_json TEXT,
-						reactions_json TEXT,
-						created_at INTEGER NOT NULL,
-						updated_at INTEGER NOT NULL
-					)
-				`);
-				await db.execute(
-					"CREATE INDEX IF NOT EXISTS idx_messages_conversation_ts ON messages(conversation_id, timestamp)",
-				);
-				await db.execute(
-					"CREATE INDEX IF NOT EXISTS idx_messages_reply_to ON messages(reply_to_message_id)",
-				);
-
-				await db.execute(`
-					CREATE TABLE IF NOT EXISTS media_files (
-						media_key TEXT PRIMARY KEY,
-						conversation_id TEXT,
-						message_id TEXT,
-						kind TEXT NOT NULL,
-						mime_type TEXT,
-						data_base64 TEXT NOT NULL,
-						view_once INTEGER NOT NULL DEFAULT 0,
-						size_bytes INTEGER,
-						fetch_status TEXT NOT NULL DEFAULT 'ok',
-						fetched_at INTEGER NOT NULL
-					)
-				`);
-				await db.execute(
-					"CREATE INDEX IF NOT EXISTS idx_media_files_message ON media_files(message_id)",
-				);
-
-				await db.execute(`
-					CREATE TABLE IF NOT EXISTS albums (
-						album_id TEXT PRIMARY KEY,
-						owner_profile_id TEXT,
-						album_name TEXT,
-						conversation_id TEXT,
-						shared_via_message_id TEXT,
-						created_at INTEGER NOT NULL,
-						updated_at INTEGER NOT NULL
-					)
-				`);
-				// Added later: the chat bubble's blurred teaser preview, which comes
-				// from the sharing message's own body (coverUrl/previewUrl) and is
-				// visually distinct from the album's actual (clear) content
-				// thumbnails in album_media. Best-effort migration — ignore
-				// "duplicate column" once it already exists.
-				try {
-					await db.execute("ALTER TABLE albums ADD COLUMN preview_cover_base64 TEXT");
-				} catch {
-					// already migrated
-				}
-				try {
-					await db.execute("ALTER TABLE albums ADD COLUMN preview_cover_mime_type TEXT");
-				} catch {
-					// already migrated
-				}
-
-				await db.execute(`
-					CREATE TABLE IF NOT EXISTS album_media (
-						content_id TEXT PRIMARY KEY,
-						album_id TEXT NOT NULL,
-						content_type TEXT,
-						data_base64 TEXT,
-						thumb_data_base64 TEXT,
-						remaining_views INTEGER,
-						is_viewable INTEGER,
-						fetched_at INTEGER,
-						position INTEGER
-					)
-				`);
-				await db.execute(
-					"CREATE INDEX IF NOT EXISTS idx_album_media_album ON album_media(album_id)",
-				);
-				// Added later: the item's slot in the album's actual (server-side)
-				// order, so a cache-only render (before the live album details
-				// round-trip resolves) shows the same order as the live one instead
-				// of capture order, which otherwise visibly re-sorts moments after
-				// the album sheet opens. Best-effort migration — ignore "duplicate
-				// column" once it already exists.
-				try {
-					await db.execute("ALTER TABLE album_media ADD COLUMN position INTEGER");
-				} catch {
-					// already migrated
-				}
-
-				await db.execute(`
-					CREATE TABLE IF NOT EXISTS avatars (
-						media_hash TEXT PRIMARY KEY,
-						data_base64 TEXT NOT NULL,
-						mime_type TEXT,
-						fetched_at INTEGER NOT NULL
-					)
-				`);
-
-				await db.execute(`
-					CREATE TABLE IF NOT EXISTS downloaded_media (
-						identifier TEXT PRIMARY KEY,
-						platform TEXT NOT NULL,
-						album_id TEXT,
-						byte_size INTEGER NOT NULL,
-						mime_type TEXT,
-						kind TEXT,
-						saved_at INTEGER NOT NULL
-					)
-				`);
-
-				await db.execute(`
-					CREATE TABLE IF NOT EXISTS settings (
-						key TEXT PRIMARY KEY,
-						value TEXT NOT NULL
-					)
-				`);
-
-				await db.execute(`
-					CREATE TABLE IF NOT EXISTS saved_phrases (
-						phrase TEXT PRIMARY KEY,
-						created_at INTEGER NOT NULL
-					)
-				`);
-
-				await db.execute(`
-					CREATE TABLE IF NOT EXISTS saved_locations (
-						id TEXT PRIMARY KEY,
-						name TEXT NOT NULL,
-						geohash TEXT NOT NULL,
-						lat REAL NOT NULL,
-						lon REAL NOT NULL,
-						created_at INTEGER NOT NULL
-					)
-				`);
-
-				await db.execute(`
-					CREATE TABLE IF NOT EXISTS sexual_health_prep_doses (
-						id TEXT PRIMARY KEY,
-						taken_at INTEGER NOT NULL,
-						scheme TEXT NOT NULL,
-						dose_role TEXT NOT NULL,
-						note TEXT,
-						created_at INTEGER NOT NULL
-					)
-				`);
-
-				await db.execute(`
-					CREATE TABLE IF NOT EXISTS sexual_health_encounters (
-						id TEXT PRIMARY KEY,
-						occurred_at INTEGER NOT NULL,
-						profile_id TEXT,
-						display_name TEXT NOT NULL,
-						tags_json TEXT NOT NULL DEFAULT '[]',
-						note TEXT,
-						conversation_id TEXT,
-						created_at INTEGER NOT NULL
-					)
-				`);
-
-				await db.execute(`
-					CREATE TABLE IF NOT EXISTS sexual_health_appointments (
-						id TEXT PRIMARY KEY,
-						title TEXT NOT NULL,
-						scheduled_at INTEGER NOT NULL,
-						kind TEXT NOT NULL,
-						location TEXT,
-						note TEXT,
-						completed_at INTEGER,
-						created_at INTEGER NOT NULL
-					)
-				`);
-
-				await db.execute(`
-					CREATE TABLE IF NOT EXISTS sexual_health_sti_tests (
-						id TEXT PRIMARY KEY,
-						tested_at INTEGER NOT NULL,
-						test_type TEXT NOT NULL,
-						result TEXT NOT NULL,
-						note TEXT,
-						created_at INTEGER NOT NULL
-					)
-				`);
-
-				await db.execute(`
-					CREATE TABLE IF NOT EXISTS drawer_media_usage (
-						media_id INTEGER PRIMARY KEY,
-						send_count INTEGER NOT NULL DEFAULT 0,
-						updated_at INTEGER NOT NULL
-					)
-				`);
-
-				// Collections: local-only, named groups of drawer media — the
-				// server has no such concept. media_ids_json keeps the drawer media
-				// ids in send order; ids that have since been deleted from the
-				// drawer are just skipped at send time, not pruned here.
-				await db.execute(`
-					CREATE TABLE IF NOT EXISTS drawer_collections (
-						id TEXT PRIMARY KEY,
-						name TEXT NOT NULL,
-						media_ids_json TEXT NOT NULL DEFAULT '[]',
-						created_at INTEGER NOT NULL,
-						updated_at INTEGER NOT NULL
-					)
-				`);
-				// Briefly shipped as local_drawer_albums in a test build — carry
-				// any rows over once, then drop the old table.
-				try {
-					await db.execute(`
-						INSERT OR IGNORE INTO drawer_collections (id, name, media_ids_json, created_at, updated_at)
-						SELECT id, name, media_ids_json, created_at, updated_at FROM local_drawer_albums
-					`);
-					await db.execute("DROP TABLE local_drawer_albums");
-				} catch {
-					// never existed / already migrated
-				}
-
-				await db.execute(`
-					CREATE TABLE IF NOT EXISTS block_events (
-						id TEXT PRIMARY KEY,
-						profile_id TEXT,
-						conversation_id TEXT NOT NULL,
-						event_type TEXT NOT NULL,
-						timestamp INTEGER NOT NULL,
-						display_name TEXT,
-						avatar_media_hash TEXT,
-						created_at INTEGER NOT NULL
-					)
-				`);
-				await db.execute(
-					"CREATE INDEX IF NOT EXISTS idx_block_events_timestamp ON block_events(timestamp DESC)",
-				);
-
-				// Manual, local-only "hide this profile from the grid" flag — unlike
-				// blocking (server-side, mutual), hiding is purely a client-side
-				// preference: the profile still comes back from /v4/cascade like any
-				// other card, this only gates the client-side sortedCards view in
-				// GridPage. display_name/avatar_media_hash are a snapshot at hide time
-				// so the Settings "Hidden" page can still show something if the
-				// profile later becomes unresolvable (deleted/banned).
-				await db.execute(`
-					CREATE TABLE IF NOT EXISTS hidden_profiles (
-						profile_id TEXT PRIMARY KEY,
-						display_name TEXT,
-						avatar_media_hash TEXT,
-						hidden_at INTEGER NOT NULL
-					)
-				`);
-
-				// Durable last-known-good snapshot of a full profile detail response,
-				// refreshed every time a live fetch resolves to an actual profile
-				// (not the blocked/gone stub — see classifyProfileAccess). Lets the
-				// profile page still show real info for a conversation whose profile
-				// can no longer be fetched live (archived via block/delete), instead
-				// of only being reachable while the profile is still live.
-				await db.execute(`
-					CREATE TABLE IF NOT EXISTS profile_snapshots (
-						profile_id TEXT PRIMARY KEY,
-						data TEXT NOT NULL,
-						updated_at INTEGER NOT NULL
-					)
-				`);
-
-				// Auto-translate results (Google Translate), one row per message and
-				// target language. source_text is kept so a changed message body
-				// (e.g. a restored local copy) is detected and re-translated instead
-				// of showing a stale translation. translated_text is NULL when the
-				// message was already in the target language — remembered so it's
-				// never sent to the API again.
-				await db.execute(`
-					CREATE TABLE IF NOT EXISTS message_translations (
-						message_id TEXT NOT NULL,
-						target_lang TEXT NOT NULL,
-						conversation_id TEXT NOT NULL,
-						source_text TEXT NOT NULL,
-						translated_text TEXT,
-						detected_source_lang TEXT,
-						created_at INTEGER NOT NULL,
-						PRIMARY KEY (message_id, target_lang)
-					)
-				`);
-				await db.execute(
-					"CREATE INDEX IF NOT EXISTS idx_message_translations_conversation ON message_translations(conversation_id, target_lang)",
-				);
-
-			});
+			// The app's settings (location, filters, ...) wait on this open, so a
+			// slow one shows up as a long grid skeleton on startup. Logged as a
+			// warning so it lands in issue reports (release keeps warn/error only).
+			const totalMs = performance.now() - openStartedAt;
+			if (totalMs > SLOW_DB_OPEN_MS) {
+				appLog.warn("[chat-db] slow db open", {
+					totalMs: Math.round(totalMs),
+					loadMs: Math.round(loadMs),
+					storedSchemaVersion,
+					runsInit,
+				});
+			}
 
 			return db;
 		})();
 	}
 
 	return dbPromise;
+}
+
+async function initChatDbSchema(db: Database): Promise<void> {
+	await executeWithLockRetry(db, "init-tables", async () => {
+		await db.execute(`
+			CREATE TABLE IF NOT EXISTS conversations (
+				conversation_id TEXT PRIMARY KEY,
+				other_profile_id TEXT,
+				name TEXT,
+				participants_json TEXT NOT NULL,
+				last_activity_timestamp INTEGER,
+				unread_count INTEGER NOT NULL DEFAULT 0,
+				pinned INTEGER NOT NULL DEFAULT 0,
+				muted INTEGER NOT NULL DEFAULT 0,
+				favorite INTEGER NOT NULL DEFAULT 0,
+				preview_json TEXT,
+				archived INTEGER NOT NULL DEFAULT 0,
+				archived_reason TEXT,
+				archived_at INTEGER,
+				last_seen_in_inbox_at INTEGER,
+				created_at INTEGER NOT NULL,
+				updated_at INTEGER NOT NULL
+			)
+		`);
+		await db.execute(
+			"CREATE INDEX IF NOT EXISTS idx_conversations_other_profile ON conversations(other_profile_id)",
+		);
+		await db.execute(
+			"CREATE INDEX IF NOT EXISTS idx_conversations_archived ON conversations(archived)",
+		);
+		// Added later: explicit, durable "who blocked whom" state — the
+		// source of truth for archive/system-message decisions instead of
+		// inferring direction from toggling `archived` on an ambiguous
+		// chat.v1.conversation.delete event. NULL = not blocked either way.
+		try {
+			await db.execute("ALTER TABLE conversations ADD COLUMN block_state TEXT");
+		} catch {
+			// already migrated
+		}
+		// Added later: tracks message-fetch progress separately from
+		// conversation-metadata freshness so inboxSync can resume an
+		// interrupted first sync without re-walking conversations whose
+		// messages already landed (see StoredConversation.messagesSyncedActivityTimestamp).
+		try {
+			await db.execute(
+				"ALTER TABLE conversations ADD COLUMN messages_synced_activity_timestamp INTEGER",
+			);
+		} catch {
+			// already migrated
+		}
+		// Added later: manual, local-only "hide this chat from the inbox"
+		// flag — unlike `archived` (server says the conversation is gone),
+		// hidden conversations still round-trip through /v4/inbox normally;
+		// this only affects the client-side filteredConversations view.
+		try {
+			await db.execute("ALTER TABLE conversations ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0");
+		} catch {
+			// already migrated
+		}
+		// One-time data fix: earlier builds didn't clear `pinned` when a
+		// conversation got archived (e.g. by a block), leaving pinned+archived
+		// rows stuck showing pinned with no toggle able to reach them (the
+		// pinned duplicate lived outside the list the pin toggle updates).
+		// Idempotent — a no-op once every row is clean.
+		await db.execute("UPDATE conversations SET pinned = 0 WHERE archived = 1 AND pinned = 1");
+
+		await db.execute(`
+			CREATE TABLE IF NOT EXISTS conversation_meta (
+				conversation_id TEXT PRIMARY KEY,
+				last_read_timestamp INTEGER
+			)
+		`);
+
+		await db.execute(`
+			CREATE TABLE IF NOT EXISTS messages (
+				message_id TEXT PRIMARY KEY,
+				conversation_id TEXT NOT NULL,
+				sender_id INTEGER NOT NULL,
+				timestamp INTEGER NOT NULL,
+				type TEXT,
+				chat1_type TEXT,
+				body_json TEXT,
+				unsent INTEGER NOT NULL DEFAULT 0,
+				local_history INTEGER NOT NULL DEFAULT 0,
+				reply_to_message_id TEXT,
+				reply_preview_json TEXT,
+				reactions_json TEXT,
+				created_at INTEGER NOT NULL,
+				updated_at INTEGER NOT NULL
+			)
+		`);
+		await db.execute(
+			"CREATE INDEX IF NOT EXISTS idx_messages_conversation_ts ON messages(conversation_id, timestamp)",
+		);
+		await db.execute(
+			"CREATE INDEX IF NOT EXISTS idx_messages_reply_to ON messages(reply_to_message_id)",
+		);
+
+		await db.execute(`
+			CREATE TABLE IF NOT EXISTS media_files (
+				media_key TEXT PRIMARY KEY,
+				conversation_id TEXT,
+				message_id TEXT,
+				kind TEXT NOT NULL,
+				mime_type TEXT,
+				data_base64 TEXT NOT NULL,
+				view_once INTEGER NOT NULL DEFAULT 0,
+				size_bytes INTEGER,
+				fetch_status TEXT NOT NULL DEFAULT 'ok',
+				fetched_at INTEGER NOT NULL
+			)
+		`);
+		await db.execute(
+			"CREATE INDEX IF NOT EXISTS idx_media_files_message ON media_files(message_id)",
+		);
+
+		await db.execute(`
+			CREATE TABLE IF NOT EXISTS albums (
+				album_id TEXT PRIMARY KEY,
+				owner_profile_id TEXT,
+				album_name TEXT,
+				conversation_id TEXT,
+				shared_via_message_id TEXT,
+				created_at INTEGER NOT NULL,
+				updated_at INTEGER NOT NULL
+			)
+		`);
+		// Added later: the chat bubble's blurred teaser preview, which comes
+		// from the sharing message's own body (coverUrl/previewUrl) and is
+		// visually distinct from the album's actual (clear) content
+		// thumbnails in album_media. Best-effort migration — ignore
+		// "duplicate column" once it already exists.
+		try {
+			await db.execute("ALTER TABLE albums ADD COLUMN preview_cover_base64 TEXT");
+		} catch {
+			// already migrated
+		}
+		try {
+			await db.execute("ALTER TABLE albums ADD COLUMN preview_cover_mime_type TEXT");
+		} catch {
+			// already migrated
+		}
+
+		await db.execute(`
+			CREATE TABLE IF NOT EXISTS album_media (
+				content_id TEXT PRIMARY KEY,
+				album_id TEXT NOT NULL,
+				content_type TEXT,
+				data_base64 TEXT,
+				thumb_data_base64 TEXT,
+				remaining_views INTEGER,
+				is_viewable INTEGER,
+				fetched_at INTEGER,
+				position INTEGER
+			)
+		`);
+		await db.execute(
+			"CREATE INDEX IF NOT EXISTS idx_album_media_album ON album_media(album_id)",
+		);
+		// Added later: the item's slot in the album's actual (server-side)
+		// order, so a cache-only render (before the live album details
+		// round-trip resolves) shows the same order as the live one instead
+		// of capture order, which otherwise visibly re-sorts moments after
+		// the album sheet opens. Best-effort migration — ignore "duplicate
+		// column" once it already exists.
+		try {
+			await db.execute("ALTER TABLE album_media ADD COLUMN position INTEGER");
+		} catch {
+			// already migrated
+		}
+
+		await db.execute(`
+			CREATE TABLE IF NOT EXISTS avatars (
+				media_hash TEXT PRIMARY KEY,
+				data_base64 TEXT NOT NULL,
+				mime_type TEXT,
+				fetched_at INTEGER NOT NULL
+			)
+		`);
+
+		await db.execute(`
+			CREATE TABLE IF NOT EXISTS downloaded_media (
+				identifier TEXT PRIMARY KEY,
+				platform TEXT NOT NULL,
+				album_id TEXT,
+				byte_size INTEGER NOT NULL,
+				mime_type TEXT,
+				kind TEXT,
+				saved_at INTEGER NOT NULL
+			)
+		`);
+
+		await db.execute(`
+			CREATE TABLE IF NOT EXISTS settings (
+				key TEXT PRIMARY KEY,
+				value TEXT NOT NULL
+			)
+		`);
+
+		await db.execute(`
+			CREATE TABLE IF NOT EXISTS saved_phrases (
+				phrase TEXT PRIMARY KEY,
+				created_at INTEGER NOT NULL
+			)
+		`);
+
+		await db.execute(`
+			CREATE TABLE IF NOT EXISTS saved_locations (
+				id TEXT PRIMARY KEY,
+				name TEXT NOT NULL,
+				geohash TEXT NOT NULL,
+				lat REAL NOT NULL,
+				lon REAL NOT NULL,
+				created_at INTEGER NOT NULL
+			)
+		`);
+
+		await db.execute(`
+			CREATE TABLE IF NOT EXISTS sexual_health_prep_doses (
+				id TEXT PRIMARY KEY,
+				taken_at INTEGER NOT NULL,
+				scheme TEXT NOT NULL,
+				dose_role TEXT NOT NULL,
+				note TEXT,
+				created_at INTEGER NOT NULL
+			)
+		`);
+
+		await db.execute(`
+			CREATE TABLE IF NOT EXISTS sexual_health_encounters (
+				id TEXT PRIMARY KEY,
+				occurred_at INTEGER NOT NULL,
+				profile_id TEXT,
+				display_name TEXT NOT NULL,
+				tags_json TEXT NOT NULL DEFAULT '[]',
+				note TEXT,
+				conversation_id TEXT,
+				created_at INTEGER NOT NULL
+			)
+		`);
+
+		await db.execute(`
+			CREATE TABLE IF NOT EXISTS sexual_health_appointments (
+				id TEXT PRIMARY KEY,
+				title TEXT NOT NULL,
+				scheduled_at INTEGER NOT NULL,
+				kind TEXT NOT NULL,
+				location TEXT,
+				note TEXT,
+				completed_at INTEGER,
+				created_at INTEGER NOT NULL
+			)
+		`);
+
+		await db.execute(`
+			CREATE TABLE IF NOT EXISTS sexual_health_sti_tests (
+				id TEXT PRIMARY KEY,
+				tested_at INTEGER NOT NULL,
+				test_type TEXT NOT NULL,
+				result TEXT NOT NULL,
+				note TEXT,
+				created_at INTEGER NOT NULL
+			)
+		`);
+
+		await db.execute(`
+			CREATE TABLE IF NOT EXISTS drawer_media_usage (
+				media_id INTEGER PRIMARY KEY,
+				send_count INTEGER NOT NULL DEFAULT 0,
+				updated_at INTEGER NOT NULL
+			)
+		`);
+
+		// Collections: local-only, named groups of drawer media — the
+		// server has no such concept. media_ids_json keeps the drawer media
+		// ids in send order; ids that have since been deleted from the
+		// drawer are just skipped at send time, not pruned here.
+		await db.execute(`
+			CREATE TABLE IF NOT EXISTS drawer_collections (
+				id TEXT PRIMARY KEY,
+				name TEXT NOT NULL,
+				media_ids_json TEXT NOT NULL DEFAULT '[]',
+				created_at INTEGER NOT NULL,
+				updated_at INTEGER NOT NULL
+			)
+		`);
+		// Briefly shipped as local_drawer_albums in a test build — carry
+		// any rows over once, then drop the old table.
+		try {
+			await db.execute(`
+				INSERT OR IGNORE INTO drawer_collections (id, name, media_ids_json, created_at, updated_at)
+				SELECT id, name, media_ids_json, created_at, updated_at FROM local_drawer_albums
+			`);
+			await db.execute("DROP TABLE local_drawer_albums");
+		} catch {
+			// never existed / already migrated
+		}
+
+		// The profile's own photos (bytes included) and block list, recorded on
+		// every profile load so a backup still has them once a ban locks the
+		// account out of its profile. A backup restored into a different profile
+		// lands in the restored_* tables instead (backup.rs's `restored_into`),
+		// waiting to be uploaded/blocked again — see ownProfilePhotos.ts and
+		// ownBlocklist.ts.
+		await db.execute(`
+			CREATE TABLE IF NOT EXISTS own_profile_photos (
+				media_hash TEXT PRIMARY KEY,
+				position INTEGER NOT NULL,
+				mime_type TEXT,
+				data_base64 TEXT
+			)
+		`);
+		await db.execute(`
+			CREATE TABLE IF NOT EXISTS restored_profile_photos (
+				media_hash TEXT PRIMARY KEY,
+				position INTEGER NOT NULL,
+				mime_type TEXT,
+				data_base64 TEXT,
+				uploaded_hash TEXT
+			)
+		`);
+		// One row (key "profile"): the restorable profile fields as JSON, see ownProfileDetails.ts.
+		await db.execute("CREATE TABLE IF NOT EXISTS own_profile_details (key TEXT PRIMARY KEY, data_json TEXT)");
+		await db.execute("CREATE TABLE IF NOT EXISTS restored_profile_details (key TEXT PRIMARY KEY, data_json TEXT)");
+		await db.execute("CREATE TABLE IF NOT EXISTS own_blocked_profiles (profile_id TEXT PRIMARY KEY)");
+		await db.execute("CREATE TABLE IF NOT EXISTS restored_blocked_profiles (profile_id TEXT PRIMARY KEY)");
+		// The profile's own albums (content bytes included), recorded on every
+		// start like the photos above so a backup still has them after a ban.
+		// A restore lands in the restored_* pair, where ownAlbums.ts creates the
+		// albums again and uploads their content bit by bit; uploaded_album_id
+		// keeps an interrupted run from creating an album twice.
+		await db.execute(
+			"CREATE TABLE IF NOT EXISTS own_albums (album_id TEXT PRIMARY KEY, position INTEGER NOT NULL, album_name TEXT)",
+		);
+		await db.execute(`
+			CREATE TABLE IF NOT EXISTS own_album_media (
+				content_id TEXT PRIMARY KEY,
+				album_id TEXT NOT NULL,
+				position INTEGER NOT NULL,
+				content_type TEXT,
+				data_base64 TEXT
+			)
+		`);
+		await db.execute(`
+			CREATE TABLE IF NOT EXISTS restored_own_albums (
+				album_id TEXT PRIMARY KEY,
+				position INTEGER NOT NULL,
+				album_name TEXT,
+				uploaded_album_id TEXT
+			)
+		`);
+		await db.execute(`
+			CREATE TABLE IF NOT EXISTS restored_own_album_media (
+				content_id TEXT PRIMARY KEY,
+				album_id TEXT NOT NULL,
+				position INTEGER NOT NULL,
+				content_type TEXT,
+				data_base64 TEXT
+			)
+		`);
+		// Favorites from a backup with their note, set again bit by bit (restoredFavorites.ts); filled by backup.rs.
+		await db.execute(
+			"CREATE TABLE IF NOT EXISTS restored_favorite_profiles (profile_id TEXT PRIMARY KEY, notes TEXT, phone_number TEXT)",
+		);
+
+		await db.execute(`
+			CREATE TABLE IF NOT EXISTS block_events (
+				id TEXT PRIMARY KEY,
+				profile_id TEXT,
+				conversation_id TEXT NOT NULL,
+				event_type TEXT NOT NULL,
+				timestamp INTEGER NOT NULL,
+				display_name TEXT,
+				avatar_media_hash TEXT,
+				created_at INTEGER NOT NULL
+			)
+		`);
+		await db.execute(
+			"CREATE INDEX IF NOT EXISTS idx_block_events_timestamp ON block_events(timestamp DESC)",
+		);
+
+		// Manual, local-only "hide this profile from the grid" flag — unlike
+		// blocking (server-side, mutual), hiding is purely a client-side
+		// preference: the profile still comes back from /v4/cascade like any
+		// other card, this only gates the client-side sortedCards view in
+		// GridPage. display_name/avatar_media_hash are a snapshot at hide time
+		// so the Settings "Hidden" page can still show something if the
+		// profile later becomes unresolvable (deleted/banned).
+		await db.execute(`
+			CREATE TABLE IF NOT EXISTS hidden_profiles (
+				profile_id TEXT PRIMARY KEY,
+				display_name TEXT,
+				avatar_media_hash TEXT,
+				hidden_at INTEGER NOT NULL
+			)
+		`);
+
+		// Durable last-known-good snapshot of a full profile detail response,
+		// refreshed every time a live fetch resolves to an actual profile
+		// (not the blocked/gone stub — see classifyProfileAccess). Lets the
+		// profile page still show real info for a conversation whose profile
+		// can no longer be fetched live (archived via block/delete), instead
+		// of only being reachable while the profile is still live.
+		await db.execute(`
+			CREATE TABLE IF NOT EXISTS profile_snapshots (
+				profile_id TEXT PRIMARY KEY,
+				data TEXT NOT NULL,
+				updated_at INTEGER NOT NULL
+			)
+		`);
+
+		// Auto-translate results (Google Translate), one row per message and
+		// target language. source_text is kept so a changed message body
+		// (e.g. a restored local copy) is detected and re-translated instead
+		// of showing a stale translation. translated_text is NULL when the
+		// message was already in the target language — remembered so it's
+		// never sent to the API again.
+		await db.execute(`
+			CREATE TABLE IF NOT EXISTS message_translations (
+				message_id TEXT NOT NULL,
+				target_lang TEXT NOT NULL,
+				conversation_id TEXT NOT NULL,
+				source_text TEXT NOT NULL,
+				translated_text TEXT,
+				detected_source_lang TEXT,
+				created_at INTEGER NOT NULL,
+				PRIMARY KEY (message_id, target_lang)
+			)
+		`);
+		await db.execute(
+			"CREATE INDEX IF NOT EXISTS idx_message_translations_conversation ON message_translations(conversation_id, target_lang)",
+		);
+
+		// First-frame stills of videos (chat messages, drawer media, ...), keyed
+		// like media_files (msg:<messageId>, drawer:<mediaId>, ...): captured
+		// once by the tile showing the video, so later renders show the still
+		// instead of decoding the whole video again. Derived data — safe to
+		// lose, it's just captured again. conversation_id is set for chat
+		// media only, so those go with their conversation.
+		await db.execute(`
+			CREATE TABLE IF NOT EXISTS media_posters (
+				poster_key TEXT PRIMARY KEY,
+				conversation_id TEXT,
+				data_uri TEXT NOT NULL,
+				created_at INTEGER NOT NULL
+			)
+		`);
+		await db.execute(
+			"CREATE INDEX IF NOT EXISTS idx_media_posters_conversation ON media_posters(conversation_id)",
+		);
+
+	});
 }
 
 function sleep(ms: number): Promise<void> {
@@ -622,10 +752,6 @@ async function executeWithLockRetry(
 	await current;
 }
 
-export async function initChatDb(): Promise<void> {
-	await getDb();
-}
-
 /**
  * On the very first switch to a given account, if that account doesn't have
  * its own db file yet but the pre-multi-account shared file does, rename it
@@ -634,7 +760,7 @@ export async function initChatDb(): Promise<void> {
  * target file's existence so it only ever runs once per account.
  */
 async function migrateLegacyDbIfNeeded(profileId: number): Promise<void> {
-	const targetFilename = `chat-${profileId}.sqlite3`;
+	const targetFilename = chatDbFileNameFor(profileId);
 	try {
 		const [targetExists, legacyExists] = await Promise.all([
 			exists(targetFilename, { baseDir: BaseDirectory.AppData }),
@@ -659,7 +785,7 @@ async function migrateLegacyDbIfNeeded(profileId: number): Promise<void> {
  * data from a previous one, and switching back needs no refetch.
  */
 export async function setActiveChatDbUser(profileId: number | null): Promise<void> {
-	const nextDbName = profileId != null ? `sqlite:chat-${profileId}.sqlite3` : LEGACY_CHAT_DB;
+	const nextDbName = profileId != null ? `sqlite:${chatDbFileNameFor(profileId)}` : LEGACY_CHAT_DB;
 	if (nextDbName === activeChatDbName && dbPromise) {
 		return;
 	}
@@ -803,17 +929,35 @@ export async function getConversation(
 	return row ? rowToStoredConversation(row) : null;
 }
 
+/**
+ * True for a row that only exists as ensureConversationRow's block_state
+ * carrier (blocking, or being blocked by, a profile we never had an actual
+ * chat thread with) — no participants and no preview, since nothing from a
+ * live inbox entry ever reached it. It has no messages worth listing, so chat
+ * lists skip it; the row itself stays, since block_state still drives the
+ * grid/profile block gating and the later unblock detection. Becomes a normal
+ * conversation as soon as a real inbox entry is upserted over it.
+ */
+export function isPlaceholderConversationEntry(entry: ConversationEntry): boolean {
+	return (entry.data.participants?.length ?? 0) === 0 && entry.data.preview == null;
+}
+
+const NOT_PLACEHOLDER_SQL = "NOT (participants_json = '[]' AND preview_json IS NULL)";
+
 export async function listConversations(options?: {
 	includeArchived?: boolean;
+	// Only for block_state bookkeeping (see reconcileBlockStateWithBlockedList) —
+	// every chat list should leave these out.
+	includePlaceholders?: boolean;
 }): Promise<StoredConversation[]> {
 	const db = await getDb();
-	const rows = options?.includeArchived
-		? await db.select<ConversationRow[]>(
-				"SELECT * FROM conversations ORDER BY pinned DESC, last_activity_timestamp DESC",
-			)
-		: await db.select<ConversationRow[]>(
-				"SELECT * FROM conversations WHERE archived = 0 ORDER BY pinned DESC, last_activity_timestamp DESC",
-			);
+	const conditions: string[] = [];
+	if (!options?.includeArchived) conditions.push("archived = 0");
+	if (!options?.includePlaceholders) conditions.push(NOT_PLACEHOLDER_SQL);
+	const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")} ` : "";
+	const rows = await db.select<ConversationRow[]>(
+		`SELECT * FROM conversations ${where}ORDER BY pinned DESC, last_activity_timestamp DESC`,
+	);
 	return rows.map(rowToStoredConversation);
 }
 
@@ -832,7 +976,7 @@ export async function listConversations(options?: {
 export async function listConversationsSince(sinceTimestamp: number): Promise<StoredConversation[]> {
 	const db = await getDb();
 	const rows = await db.select<ConversationRow[]>(
-		"SELECT * FROM conversations WHERE archived = 0 AND (pinned = 1 OR last_activity_timestamp >= $1) ORDER BY pinned DESC, last_activity_timestamp DESC",
+		`SELECT * FROM conversations WHERE archived = 0 AND ${NOT_PLACEHOLDER_SQL} AND (pinned = 1 OR last_activity_timestamp >= $1) ORDER BY pinned DESC, last_activity_timestamp DESC`,
 		[sinceTimestamp],
 	);
 	return rows.map(rowToStoredConversation);
@@ -1125,6 +1269,27 @@ export async function removeMediaFromDrawerCollections(mediaId: number): Promise
 	return getDrawerCollections();
 }
 
+/** For drawer media re-uploaded under a new id (see restoredDrawerMedia.ts):
+ * points every collection at the new ids, keeping their order. */
+export async function remapDrawerCollectionMediaIds(newIds: ReadonlyMap<number, number>): Promise<void> {
+	if (newIds.size === 0) return;
+	const affected = (await getDrawerCollections()).filter((collection) => collection.mediaIds.some((id) => newIds.has(id)));
+	if (affected.length === 0) return;
+
+	const db = await getDb();
+	const now = Date.now();
+	await executeWithLockRetry(db, "remap-drawer-collection-media-ids", async () => {
+		for (const collection of affected) {
+			await db.execute(
+				"UPDATE drawer_collections SET media_ids_json = $2, updated_at = $3 WHERE id = $1",
+				[collection.id, JSON.stringify(collection.mediaIds.map((id) => newIds.get(id) ?? id)), now],
+			);
+		}
+	});
+
+	notifyDrawerCollectionsChanged();
+}
+
 /** Unhides a conversation only if it's currently hidden, reporting whether it
  * actually changed — used to auto-unhide on new activity without dispatching
  * a no-op state-change event for conversations that were never hidden. */
@@ -1256,6 +1421,45 @@ export async function saveProfileSnapshot(profileId: string, json: string): Prom
 	});
 }
 
+/**
+ * Photo hash + name of every profile snapshot, extracted in SQL so the full
+ * profile JSON isn't loaded — an identity source for recovering locked view
+ * previews (see interestIdentityStore).
+ */
+export async function listProfileSnapshotIdentities(): Promise<
+	{ profileId: string; imageHash: string | null; displayName: string | null }[]
+> {
+	const db = await getDb();
+	const rows = await db.select<{ profile_id: string; hash: string | null; name: string | null }[]>(
+		"SELECT profile_id, json_extract(data, '$.profileImageMediaHash') AS hash, json_extract(data, '$.displayName') AS name FROM profile_snapshots",
+	);
+	return rows.map((row) => ({
+		profileId: row.profile_id,
+		imageHash: typeof row.hash === "string" ? row.hash : null,
+		displayName: typeof row.name === "string" ? row.name : null,
+	}));
+}
+
+/** Which of the given profiles already have a local snapshot. */
+export async function listProfileSnapshotIds(profileIds: string[]): Promise<Set<string>> {
+	if (profileIds.length === 0) {
+		return new Set();
+	}
+	const db = await getDb();
+	const result = new Set<string>();
+	// Chunked to stay well under SQLite's bound-parameter limit.
+	for (let i = 0; i < profileIds.length; i += 500) {
+		const chunk = profileIds.slice(i, i + 500);
+		const placeholders = chunk.map((_, j) => `$${j + 1}`).join(", ");
+		const rows = await db.select<{ profile_id: string }[]>(
+			`SELECT profile_id FROM profile_snapshots WHERE profile_id IN (${placeholders})`,
+			chunk,
+		);
+		for (const row of rows) result.add(row.profile_id);
+	}
+	return result;
+}
+
 export type StoredProfileSnapshot = {
 	profileId: string;
 	data: string;
@@ -1356,6 +1560,9 @@ export async function deleteConversationCascade(
 		await db.execute("DELETE FROM message_translations WHERE conversation_id = $1", [
 			conversationId,
 		]);
+		await db.execute("DELETE FROM media_posters WHERE conversation_id = $1", [
+			conversationId,
+		]);
 		await db.execute("DELETE FROM conversations WHERE conversation_id = $1", [
 			conversationId,
 		]);
@@ -1394,6 +1601,10 @@ export async function mergeConversationInto(
 		);
 		await db.execute(
 			"UPDATE media_files SET conversation_id = $2 WHERE conversation_id = $1",
+			[sourceConversationId, targetConversationId],
+		);
+		await db.execute(
+			"UPDATE media_posters SET conversation_id = $2 WHERE conversation_id = $1",
 			[sourceConversationId, targetConversationId],
 		);
 		await db.execute(
@@ -1551,7 +1762,10 @@ export type SystemMessageType =
 	| "SystemBlocked"
 	| "SystemUnblocked"
 	| "SystemBlockedBySelf"
-	| "SystemUnblockedBySelf";
+	| "SystemUnblockedBySelf"
+	// Inserted by the backup restore (backup.rs insert_restored_markers), never
+	// here: ends a conversation restored from another profile's backup.
+	| "SystemRestored";
 
 /**
  * Inserts a synthetic, locally-generated message marking a block/unblock
@@ -1879,7 +2093,50 @@ export async function deleteMessageRow(messageId: string): Promise<void> {
 	await executeWithLockRetry(db, "delete-message", async () => {
 		await db.execute("DELETE FROM messages WHERE message_id = $1", [messageId]);
 		await db.execute("DELETE FROM message_translations WHERE message_id = $1", [messageId]);
+		await db.execute("DELETE FROM media_posters WHERE poster_key = $1", [`msg:${messageId}`]);
 	});
+}
+
+// ---------------------------------------------------------------------------
+// Media posters (first-frame stills of videos)
+// ---------------------------------------------------------------------------
+
+export async function getMediaPosters(posterKeys: string[]): Promise<Map<string, string>> {
+	const result = new Map<string, string>();
+	if (posterKeys.length === 0) {
+		return result;
+	}
+	const db = await getDb();
+	// Chunked to stay under SQLite's bound-parameter limit.
+	for (let i = 0; i < posterKeys.length; i += 500) {
+		const chunk = posterKeys.slice(i, i + 500);
+		const placeholders = chunk.map((_, index) => `$${index + 1}`).join(", ");
+		const rows = await db.select<{ poster_key: string; data_uri: string }[]>(
+			`SELECT poster_key, data_uri FROM media_posters WHERE poster_key IN (${placeholders})`,
+			chunk,
+		);
+		for (const row of rows) result.set(row.poster_key, row.data_uri);
+	}
+	return result;
+}
+
+export async function upsertMediaPoster(
+	posterKey: string,
+	conversationId: string | null,
+	dataUri: string,
+): Promise<void> {
+	const db = await getDb();
+	await db.execute(
+		`
+		INSERT INTO media_posters (poster_key, conversation_id, data_uri, created_at)
+		VALUES ($1, $2, $3, $4)
+		ON CONFLICT(poster_key) DO UPDATE SET
+			conversation_id = COALESCE(excluded.conversation_id, media_posters.conversation_id),
+			data_uri = excluded.data_uri,
+			created_at = excluded.created_at
+		`,
+		[posterKey, conversationId, dataUri, Date.now()],
+	);
 }
 
 // ---------------------------------------------------------------------------
@@ -2076,10 +2333,29 @@ export async function getMediaFileByMessageId(
 }
 
 /** Removes one cached media entry (e.g. a single drawer item the user deleted). */
+/** Key and kind only (no data) of the cached media whose key starts with `prefix`. */
+export async function listMediaFilesWithPrefix(prefix: string): Promise<{ mediaKey: string; kind: string }[]> {
+	const db = await getDb();
+	const rows = await db.select<{ media_key: string; kind: string }[]>(
+		"SELECT media_key, kind FROM media_files WHERE substr(media_key, 1, length($1)) = $1",
+		[prefix],
+	);
+	return rows.map((row) => ({ mediaKey: row.media_key, kind: row.kind }));
+}
+
+/** Moves cached media to a new key, e.g. once restored drawer media has its new drawer id. */
+export async function renameMediaFile(fromKey: string, toKey: string): Promise<void> {
+	const db = await getDb();
+	await executeWithLockRetry(db, "rename-media-file", async () => {
+		await db.execute("UPDATE media_files SET media_key = $2 WHERE media_key = $1", [fromKey, toKey]);
+	});
+}
+
 export async function deleteMediaFile(mediaKey: string): Promise<void> {
 	const db = await getDb();
 	await executeWithLockRetry(db, "delete-media-file", async () => {
 		await db.execute("DELETE FROM media_files WHERE media_key = $1", [mediaKey]);
+		await db.execute("DELETE FROM media_posters WHERE poster_key = $1", [mediaKey]);
 	});
 }
 
@@ -2096,11 +2372,16 @@ export async function deleteStaleDrawerMediaFiles(currentMediaKeys: string[]): P
 	await executeWithLockRetry(db, "delete-stale-drawer-media", async () => {
 		if (currentMediaKeys.length === 0) {
 			await db.execute("DELETE FROM media_files WHERE media_key LIKE 'drawer:%'");
+			await db.execute("DELETE FROM media_posters WHERE poster_key LIKE 'drawer:%'");
 			return;
 		}
 		const placeholders = currentMediaKeys.map((_, i) => `$${i + 1}`).join(", ");
 		await db.execute(
 			`DELETE FROM media_files WHERE media_key LIKE 'drawer:%' AND media_key NOT IN (${placeholders})`,
+			currentMediaKeys,
+		);
+		await db.execute(
+			`DELETE FROM media_posters WHERE poster_key LIKE 'drawer:%' AND poster_key NOT IN (${placeholders})`,
 			currentMediaKeys,
 		);
 	});
@@ -2583,6 +2864,304 @@ export async function deleteDownloadedMediaEntries(identifiers: string[]): Promi
 // Settings (generic per-profile key/value store — JSON-encoded values)
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Own profile details, photos and block list (see ownProfileDetails.ts,
+// ownProfilePhotos.ts, ownBlocklist.ts)
+// ---------------------------------------------------------------------------
+
+const PROFILE_DETAILS_KEY = "profile";
+
+export async function setOwnProfileDetails(details: Record<string, unknown>): Promise<void> {
+	const db = await getDb();
+	await executeWithLockRetry(db, "set-own-profile-details", async () => {
+		await db.execute(
+			`INSERT INTO own_profile_details (key, data_json) VALUES ($1, $2)
+			ON CONFLICT(key) DO UPDATE SET data_json = excluded.data_json`,
+			[PROFILE_DETAILS_KEY, JSON.stringify(details)],
+		);
+	});
+}
+
+export async function getOwnProfileDetails(): Promise<Record<string, unknown> | null> {
+	return readProfileDetails("own_profile_details");
+}
+
+export async function getRestoredProfileDetails(): Promise<Record<string, unknown> | null> {
+	return readProfileDetails("restored_profile_details");
+}
+
+async function readProfileDetails(table: "own_profile_details" | "restored_profile_details"): Promise<Record<string, unknown> | null> {
+	const db = await getDb();
+	const rows = await db.select<{ data_json: string | null }[]>(
+		`SELECT data_json FROM ${table} WHERE key = $1`,
+		[PROFILE_DETAILS_KEY],
+	);
+	try {
+		const parsed: unknown = rows[0]?.data_json ? JSON.parse(rows[0].data_json) : null;
+		return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : null;
+	} catch {
+		return null;
+	}
+}
+
+export async function clearRestoredProfileDetails(): Promise<void> {
+	const db = await getDb();
+	await executeWithLockRetry(db, "clear-restored-profile-details", async () => {
+		await db.execute("DELETE FROM restored_profile_details");
+	});
+}
+
+/** Records the profile's photo order; keeps the bytes of photos still on it, drops the rest. */
+export async function replaceOwnProfilePhotos(mediaHashes: string[]): Promise<void> {
+	const db = await getDb();
+	await executeWithLockRetry(db, "replace-own-profile-photos", async () => {
+		const placeholders = mediaHashes.map((_, i) => `$${i + 1}`).join(", ");
+		await db.execute(
+			mediaHashes.length > 0
+				? `DELETE FROM own_profile_photos WHERE media_hash NOT IN (${placeholders})`
+				: "DELETE FROM own_profile_photos",
+			mediaHashes,
+		);
+		for (const [position, mediaHash] of mediaHashes.entries()) {
+			await db.execute(
+				`INSERT INTO own_profile_photos (media_hash, position) VALUES ($1, $2)
+				ON CONFLICT(media_hash) DO UPDATE SET position = excluded.position`,
+				[mediaHash, position],
+			);
+		}
+	});
+}
+
+export async function listOwnProfilePhotosWithoutData(): Promise<string[]> {
+	const db = await getDb();
+	const rows = await db.select<{ media_hash: string }[]>(
+		"SELECT media_hash FROM own_profile_photos WHERE data_base64 IS NULL ORDER BY position",
+	);
+	return rows.map((row) => row.media_hash);
+}
+
+export async function setOwnProfilePhotoData(mediaHash: string, mimeType: string | null, dataBase64: string): Promise<void> {
+	const db = await getDb();
+	await executeWithLockRetry(db, "set-own-profile-photo-data", async () => {
+		await db.execute("UPDATE own_profile_photos SET mime_type = $2, data_base64 = $3 WHERE media_hash = $1", [
+			mediaHash,
+			mimeType,
+			dataBase64,
+		]);
+	});
+}
+
+export type RestoredProfilePhoto = {
+	mediaHash: string;
+	mimeType: string | null;
+	dataBase64: string | null;
+	/** Set once uploaded to this profile, so an interrupted restore doesn't upload it twice. */
+	uploadedHash: string | null;
+};
+
+export async function listRestoredProfilePhotos(): Promise<RestoredProfilePhoto[]> {
+	const db = await getDb();
+	const rows = await db.select<{ media_hash: string; mime_type: string | null; data_base64: string | null; uploaded_hash: string | null }[]>(
+		"SELECT media_hash, mime_type, data_base64, uploaded_hash FROM restored_profile_photos ORDER BY position",
+	);
+	return rows.map((row) => ({
+		mediaHash: row.media_hash,
+		mimeType: row.mime_type,
+		dataBase64: row.data_base64,
+		uploadedHash: row.uploaded_hash,
+	}));
+}
+
+export async function countRestoredProfilePhotos(): Promise<number> {
+	const db = await getDb();
+	const rows = await db.select<{ count: number }[]>("SELECT COUNT(*) AS count FROM restored_profile_photos");
+	return rows[0]?.count ?? 0;
+}
+
+export async function markRestoredProfilePhotoUploaded(mediaHash: string, uploadedHash: string): Promise<void> {
+	const db = await getDb();
+	await executeWithLockRetry(db, "mark-restored-profile-photo-uploaded", async () => {
+		await db.execute("UPDATE restored_profile_photos SET uploaded_hash = $2 WHERE media_hash = $1", [mediaHash, uploadedHash]);
+	});
+}
+
+export async function clearRestoredProfilePhotos(): Promise<void> {
+	const db = await getDb();
+	await executeWithLockRetry(db, "clear-restored-profile-photos", async () => {
+		await db.execute("DELETE FROM restored_profile_photos");
+	});
+}
+
+export type OwnAlbumRecord = { albumId: string; albumName: string | null; content: { contentId: string; contentType: string | null }[] };
+
+/**
+ * Records the profile's own albums in order. Content still on them keeps its
+ * bytes; albums and content no longer there are dropped.
+ */
+export async function replaceOwnAlbums(albums: OwnAlbumRecord[]): Promise<void> {
+	const db = await getDb();
+	await executeWithLockRetry(db, "replace-own-albums", async () => {
+		const albumIds = albums.map((album) => album.albumId);
+		const contentIds = albums.flatMap((album) => album.content.map((item) => item.contentId));
+		const placeholders = (ids: string[]) => ids.map((_, i) => `$${i + 1}`).join(", ");
+		await db.execute(
+			albumIds.length > 0 ? `DELETE FROM own_albums WHERE album_id NOT IN (${placeholders(albumIds)})` : "DELETE FROM own_albums",
+			albumIds,
+		);
+		await db.execute(
+			contentIds.length > 0
+				? `DELETE FROM own_album_media WHERE content_id NOT IN (${placeholders(contentIds)})`
+				: "DELETE FROM own_album_media",
+			contentIds,
+		);
+		for (const [position, album] of albums.entries()) {
+			await db.execute(
+				`INSERT INTO own_albums (album_id, position, album_name) VALUES ($1, $2, $3)
+				ON CONFLICT(album_id) DO UPDATE SET position = excluded.position, album_name = excluded.album_name`,
+				[album.albumId, position, album.albumName],
+			);
+			for (const [itemPosition, item] of album.content.entries()) {
+				await db.execute(
+					`INSERT INTO own_album_media (content_id, album_id, position, content_type) VALUES ($1, $2, $3, $4)
+					ON CONFLICT(content_id) DO UPDATE SET
+						album_id = excluded.album_id,
+						position = excluded.position,
+						content_type = COALESCE(excluded.content_type, own_album_media.content_type)`,
+					[item.contentId, album.albumId, itemPosition, item.contentType],
+				);
+			}
+		}
+	});
+}
+
+/** Content whose bytes aren't recorded yet, in album order. */
+export async function listOwnAlbumMediaWithoutData(): Promise<string[]> {
+	const db = await getDb();
+	const rows = await db.select<{ content_id: string }[]>(
+		`SELECT m.content_id FROM own_album_media m JOIN own_albums a ON a.album_id = m.album_id
+		WHERE m.data_base64 IS NULL ORDER BY a.position, m.position`,
+	);
+	return rows.map((row) => String(row.content_id));
+}
+
+export async function setOwnAlbumMediaData(contentId: string, contentType: string | null, dataBase64: string): Promise<void> {
+	const db = await getDb();
+	await executeWithLockRetry(db, "set-own-album-media-data", async () => {
+		await db.execute(
+			"UPDATE own_album_media SET content_type = COALESCE(content_type, $2), data_base64 = $3 WHERE content_id = $1",
+			[contentId, contentType, dataBase64],
+		);
+	});
+}
+
+export type RestoredOwnAlbum = { albumId: string; albumName: string | null; uploadedAlbumId: string | null };
+export type RestoredOwnAlbumMedia = { contentId: string; contentType: string | null };
+
+export async function listRestoredOwnAlbums(): Promise<RestoredOwnAlbum[]> {
+	const db = await getDb();
+	const rows = await db.select<{ album_id: string; album_name: string | null; uploaded_album_id: string | null }[]>(
+		"SELECT album_id, album_name, uploaded_album_id FROM restored_own_albums ORDER BY position",
+	);
+	return rows.map((row) => ({
+		albumId: String(row.album_id),
+		albumName: row.album_name,
+		uploadedAlbumId: row.uploaded_album_id == null ? null : String(row.uploaded_album_id),
+	}));
+}
+
+/** Without the bytes: those are read one at a time with getRestoredOwnAlbumMediaData. */
+export async function listRestoredOwnAlbumMedia(albumId: string): Promise<RestoredOwnAlbumMedia[]> {
+	const db = await getDb();
+	const rows = await db.select<{ content_id: string; content_type: string | null }[]>(
+		"SELECT content_id, content_type FROM restored_own_album_media WHERE album_id = $1 ORDER BY position",
+		[albumId],
+	);
+	return rows.map((row) => ({ contentId: String(row.content_id), contentType: row.content_type }));
+}
+
+export async function getRestoredOwnAlbumMediaData(contentId: string): Promise<string | null> {
+	const db = await getDb();
+	const rows = await db.select<{ data_base64: string | null }[]>(
+		"SELECT data_base64 FROM restored_own_album_media WHERE content_id = $1",
+		[contentId],
+	);
+	return rows[0]?.data_base64 ?? null;
+}
+
+/** What's left to restore: albums still to create plus content still to upload. */
+export async function countRestoredOwnAlbumItems(): Promise<number> {
+	const db = await getDb();
+	const rows = await db.select<{ count: number }[]>(
+		`SELECT (SELECT COUNT(*) FROM restored_own_albums WHERE uploaded_album_id IS NULL)
+			+ (SELECT COUNT(*) FROM restored_own_album_media m
+				WHERE EXISTS (SELECT 1 FROM restored_own_albums a WHERE a.album_id = m.album_id)) AS count`,
+	);
+	return rows[0]?.count ?? 0;
+}
+
+export async function markRestoredOwnAlbumCreated(albumId: string, uploadedAlbumId: string): Promise<void> {
+	const db = await getDb();
+	await executeWithLockRetry(db, "mark-restored-own-album-created", async () => {
+		await db.execute("UPDATE restored_own_albums SET uploaded_album_id = $2 WHERE album_id = $1", [albumId, uploadedAlbumId]);
+	});
+}
+
+export async function deleteRestoredOwnAlbumMedia(contentId: string): Promise<void> {
+	const db = await getDb();
+	await executeWithLockRetry(db, "delete-restored-own-album-media", async () => {
+		await db.execute("DELETE FROM restored_own_album_media WHERE content_id = $1", [contentId]);
+	});
+}
+
+/** Drops a restored album along with whatever of its content is still left. */
+export async function deleteRestoredOwnAlbum(albumId: string): Promise<void> {
+	const db = await getDb();
+	await executeWithLockRetry(db, "delete-restored-own-album", async () => {
+		await db.execute("DELETE FROM restored_own_album_media WHERE album_id = $1", [albumId]);
+		await db.execute("DELETE FROM restored_own_albums WHERE album_id = $1", [albumId]);
+	});
+}
+
+export async function replaceOwnBlockedProfiles(profileIds: string[]): Promise<void> {
+	const db = await getDb();
+	await executeWithLockRetry(db, "replace-own-blocked-profiles", async () => {
+		await db.execute("DELETE FROM own_blocked_profiles");
+		for (const profileId of profileIds) {
+			await db.execute("INSERT OR IGNORE INTO own_blocked_profiles (profile_id) VALUES ($1)", [profileId]);
+		}
+	});
+}
+
+export async function listRestoredBlockedProfiles(): Promise<string[]> {
+	const db = await getDb();
+	const rows = await db.select<{ profile_id: string }[]>("SELECT profile_id FROM restored_blocked_profiles");
+	return rows.map((row) => String(row.profile_id));
+}
+
+export async function deleteRestoredBlockedProfile(profileId: string): Promise<void> {
+	const db = await getDb();
+	await executeWithLockRetry(db, "delete-restored-blocked-profile", async () => {
+		await db.execute("DELETE FROM restored_blocked_profiles WHERE profile_id = $1", [profileId]);
+	});
+}
+
+export type RestoredFavoriteProfile = { profileId: string; notes: string | null; phoneNumber: string | null };
+
+export async function listRestoredFavoriteProfiles(): Promise<RestoredFavoriteProfile[]> {
+	const db = await getDb();
+	const rows = await db.select<{ profile_id: string; notes: string | null; phone_number: string | null }[]>(
+		"SELECT profile_id, notes, phone_number FROM restored_favorite_profiles",
+	);
+	return rows.map((row) => ({ profileId: String(row.profile_id), notes: row.notes, phoneNumber: row.phone_number }));
+}
+
+export async function deleteRestoredFavoriteProfile(profileId: string): Promise<void> {
+	const db = await getDb();
+	await executeWithLockRetry(db, "delete-restored-favorite-profile", async () => {
+		await db.execute("DELETE FROM restored_favorite_profiles WHERE profile_id = $1", [profileId]);
+	});
+}
+
 export async function getSetting<T>(key: string): Promise<T | null> {
 	const db = await getDb();
 	const rows = await db.select<{ value: string }[]>(
@@ -2647,7 +3226,8 @@ export async function resetAllSettings(): Promise<void> {
 export async function getAllSavedPhrases(): Promise<string[]> {
 	const db = await getDb();
 	const rows = await db.select<{ phrase: string }[]>(
-		"SELECT phrase FROM saved_phrases ORDER BY created_at ASC",
+		// rowid breaks ties: lists saved before created_at was made distinct share one value.
+		"SELECT phrase FROM saved_phrases ORDER BY created_at ASC, rowid ASC",
 	);
 	return rows.map((row) => row.phrase);
 }
@@ -2659,10 +3239,11 @@ export async function setSavedPhrases(phrases: string[]): Promise<string[]> {
 
 	await executeWithLockRetry(db, "set-saved-phrases", async () => {
 		await db.execute("DELETE FROM saved_phrases");
-		for (const phrase of phrases) {
+		// One created_at per position, so the list's order survives a backup.
+		for (const [index, phrase] of phrases.entries()) {
 			await db.execute(
 				"INSERT INTO saved_phrases (phrase, created_at) VALUES ($1, $2) ON CONFLICT(phrase) DO NOTHING",
-				[phrase, now],
+				[phrase, now + index],
 			);
 		}
 	});
@@ -2686,6 +3267,16 @@ export async function getRecentGifs<T>(): Promise<T[]> {
 export async function setRecentGifs<T>(gifs: T[]): Promise<T[]> {
 	await setSetting("recentGifs", gifs);
 	return gifs;
+}
+
+export async function getRecentGaymoji<T>(): Promise<T[]> {
+	const stored = await getSetting<T[]>("recentGaymoji");
+	return Array.isArray(stored) ? stored : [];
+}
+
+export async function setRecentGaymoji<T>(items: T[]): Promise<T[]> {
+	await setSetting("recentGaymoji", items);
+	return items;
 }
 
 // ---------------------------------------------------------------------------
@@ -3092,151 +3683,4 @@ export async function deleteStiTestRow(id: string): Promise<StoredStiTest[]> {
 	});
 
 	return getAllStiTests();
-}
-
-// ---------------------------------------------------------------------------
-// One-time migration of legacy global localStorage settings into the
-// profile that's active the moment this code first ships — every other
-// profile is meant to start with defaults, so this must run exactly once
-// across the whole app's lifetime (not once per profile db), guarded by a
-// flag outside any per-profile file.
-// ---------------------------------------------------------------------------
-
-const LEGACY_SETTINGS_MIGRATED_FLAG = "fg-settings-migrated-to-db";
-
-function readLegacyJson<T>(key: string): T | null {
-	const raw = window.localStorage.getItem(key);
-	if (!raw) {
-		return null;
-	}
-	try {
-		return JSON.parse(raw) as T;
-	} catch {
-		return null;
-	}
-}
-
-export async function migrateLegacySettingsIfNeeded(userId: number): Promise<void> {
-	if (window.localStorage.getItem(LEGACY_SETTINGS_MIGRATED_FLAG) === "true") {
-		return;
-	}
-
-	try {
-		// Theme/UI preferences (app_preferences) intentionally stay in
-		// localStorage — they apply to the whole app, not per profile. The
-		// location fields inside that same blob are the exception: they move
-		// into this profile's settings so whichever account is active right
-		// now (typically the one the user had open before this migration)
-		// keeps its current location instead of losing it.
-		const legacyAppPreferences = readLegacyJson<{
-			geohash?: string | null;
-			locationName?: string | null;
-			useAutoLocation?: boolean;
-		}>("app_preferences");
-		if (legacyAppPreferences && (legacyAppPreferences.geohash != null || legacyAppPreferences.useAutoLocation)) {
-			await setSetting("locationPreferences", {
-				geohash: legacyAppPreferences.geohash ?? null,
-				locationName: legacyAppPreferences.locationName ?? null,
-				useAutoLocation: legacyAppPreferences.useAutoLocation === true,
-			});
-		}
-
-		const legacyPhrases = readLegacyJson<unknown>("fg-saved-phrases");
-		if (Array.isArray(legacyPhrases)) {
-			const phrases = legacyPhrases.filter((p): p is string => typeof p === "string");
-			if (phrases.length > 0) {
-				await setSavedPhrases(phrases);
-			}
-		}
-
-		const legacyLocations = readLegacyJson<unknown>("fg-saved-locations");
-		if (Array.isArray(legacyLocations)) {
-			for (const entry of legacyLocations) {
-				if (
-					entry &&
-					typeof entry === "object" &&
-					typeof (entry as Record<string, unknown>).id === "string" &&
-					typeof (entry as Record<string, unknown>).name === "string" &&
-					typeof (entry as Record<string, unknown>).geohash === "string" &&
-					typeof (entry as Record<string, unknown>).lat === "number" &&
-					typeof (entry as Record<string, unknown>).lon === "number"
-				) {
-					await insertSavedLocation(entry as StoredSavedLocation);
-				}
-			}
-		}
-
-		const legacyAutomation = {
-			blockOnChat: window.localStorage.getItem("fg-block-chat") === "true",
-			blockGrid: window.localStorage.getItem("fg-block-grid") === "true",
-			forbiddenWords: window.localStorage.getItem("fg-forbidden-words") ?? "",
-			minAge: window.localStorage.getItem("fg-block-min-age") ?? "18",
-			maxAge: window.localStorage.getItem("fg-block-max-age") ?? "99",
-		};
-		const hadLegacyAutomation = [
-			"fg-block-chat",
-			"fg-block-grid",
-			"fg-forbidden-words",
-			"fg-block-min-age",
-			"fg-block-max-age",
-		].some((key) => window.localStorage.getItem(key) != null);
-		if (hadLegacyAutomation) {
-			await setSetting("automation", legacyAutomation);
-		}
-
-		const legacyRecentGifs = readLegacyJson<unknown>("fg-recent-gifs");
-		if (Array.isArray(legacyRecentGifs) && legacyRecentGifs.length > 0) {
-			await setSetting("recentGifs", legacyRecentGifs);
-		}
-
-		const legacyHidePinned = window.localStorage.getItem("chat_hide_pinned");
-		if (legacyHidePinned != null) {
-			await setSetting("chatHidePinned", legacyHidePinned === "true");
-		}
-
-		const legacyPrivacyKeys = [
-			"fg-hide-read-receipts",
-			"fg-show-read-receipt-toggle",
-			"fg-read-receipts-exceptions",
-			"fg-record-profile-views",
-		];
-		const hadLegacyPrivacy = legacyPrivacyKeys.some((key) => window.localStorage.getItem(key) != null);
-		if (hadLegacyPrivacy) {
-			await setSetting("privacy", {
-				hideReadReceiptsGlobal: window.localStorage.getItem("fg-hide-read-receipts") === "true",
-				showReadReceiptToggle: window.localStorage.getItem("fg-show-read-receipt-toggle") !== "false",
-				recordProfileViews: window.localStorage.getItem("fg-record-profile-views") !== "false",
-				readReceiptsExceptions: readLegacyJson<Record<string, boolean>>("fg-read-receipts-exceptions") ?? {},
-			});
-		}
-
-		const legacyBrowseFilters = readLegacyJson<Record<string, unknown>>("open-grind:browse-filters");
-		if (legacyBrowseFilters) {
-			await setSetting("browseFilters", legacyBrowseFilters);
-		}
-
-		const legacySeenKeys: Record<string, string> = {
-			interest: "fg-interest-last-seen",
-			interestViews: "fg-interest-views-last-seen",
-			interestTaps: "fg-interest-taps-last-seen",
-			inbox: "fg-inbox-last-seen",
-			rightNow: "fg-rightnow-last-seen",
-		};
-		const hadLegacySeen = Object.values(legacySeenKeys).some((key) => window.localStorage.getItem(key) != null);
-		if (hadLegacySeen) {
-			const seenTimestamps: Record<string, number> = {};
-			for (const [field, key] of Object.entries(legacySeenKeys)) {
-				const raw = window.localStorage.getItem(key);
-				const value = raw ? Number(raw) : 0;
-				seenTimestamps[field] = Number.isFinite(value) ? value : 0;
-			}
-			await setSetting("seenTimestamps", seenTimestamps);
-		}
-
-		appLog.info("[chat-db] migrated legacy localStorage settings into profile db", { userId });
-	} catch (error) {
-		appLog.error("[chat-db] legacy settings migration failed", error);
-	} finally {
-		window.localStorage.setItem(LEGACY_SETTINGS_MIGRATED_FLAG, "true");
-	}
 }

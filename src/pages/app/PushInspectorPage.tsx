@@ -6,7 +6,7 @@ import { PageHeader } from "../../components/PageHeader";
 import { ConfirmDialog } from "../../components/ui/confirm-dialog";
 import { NATIVE_SHEET_BG } from "../../components/ui/action-sheet";
 import { BottomSheet, SheetCloseButton, SHEET_FOOTER_CLASS, sheetButtonClass } from "../../components/ui/bottom-sheet";
-import { SHEET_FIELD_CLASS, SheetChip, SheetSearchInput, SheetSection } from "../../components/ui/sheet-section";
+import { SHEET_FIELD_CLASS, SheetChip, SheetSection } from "../../components/ui/sheet-section";
 import { useAuth } from "../../contexts/useAuth";
 import { useApi } from "../../hooks/useApi";
 import { useDesktopBreakpoint } from "../../hooks/useDesktopBreakpoint";
@@ -22,7 +22,7 @@ import {
 } from "../../services/pushEventLog";
 import { cn } from "../../utils/cn";
 import { DrawerEmptyState } from "./chat/drawerUi";
-import { CodeBlock, HEADER_ICON_BUTTON_CLASS, copyText, formatTimestamp } from "./settings-dev/inspectorUi";
+import { CodeBlock, HEADER_ICON_BUTTON_CLASS, PageSearchBar, copyText, formatTimestamp } from "./settings-dev/inspectorUi";
 
 // A developer tool, so its texts stay English (like the API Inspector).
 
@@ -111,14 +111,15 @@ function EntryDetailSheet({ entry, onClose, isDesktop }: { entry: PushLogEntry; 
 
 	return (
 		<BottomSheet onClose={onClose} expandable isDesktop={isDesktop} bg={NATIVE_SHEET_BG} panelClassName={isDesktop ? "max-h-[85dvh] px-4" : "px-4"}>
-			<div className="mb-3 flex shrink-0 items-start justify-between gap-3">
+			<div className="mb-3 flex shrink-0 items-center justify-between gap-3">
 				<div className="min-w-0">
-					<div className="flex items-center gap-2">
-						<EventBadge event={event} className="px-1.5" />
-						<span className="rounded-full ink-tint-10 px-2 py-0.5 text-[11px] font-semibold text-[var(--text-muted)]">{entryKind(entry)}</span>
+					<p className="break-words text-sm font-semibold text-[var(--text)]">{entryTitle(entry)}</p>
+					<div className="mt-0.5 flex flex-wrap items-center gap-x-1.5 gap-y-1 text-xs leading-snug text-[var(--text-muted)]">
+						<EventBadge event={event} className="px-1.5 !py-px" />
+						<span>
+							{entryKind(entry)} · {new Date(entry.at).toLocaleString()}
+						</span>
 					</div>
-					<p className="mt-1.5 break-words text-sm font-semibold text-[var(--text)]">{entryTitle(entry)}</p>
-					<p className="mt-0.5 text-xs text-[var(--text-muted)]">{new Date(entry.at).toLocaleString()}</p>
 				</div>
 				<SheetCloseButton />
 			</div>
@@ -311,26 +312,25 @@ export function PushInspectorPage() {
 
 	return (
 		<section className="app-screen">
-			<div className="mx-auto grid w-full min-w-0 max-w-4xl gap-5">
-				<PageHeader
-					backTo="/settings"
-					title="Push Inspector"
-					subtitle="Every FCM push and notification tap, live — also while the app is open. Tap one for its full payload."
-					subtitleClassName="-mt-3 mb-0"
-					actions={
-						<>
-							<button type="button" onClick={() => void handleExport()} disabled={log.length === 0 || isExporting} className={HEADER_ICON_BUTTON_CLASS} aria-label="Export" title="Export as JSON">
-								{isExporting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
-							</button>
-							<button type="button" onClick={() => setIsConfirmClearOpen(true)} disabled={log.length === 0} className={cn(HEADER_ICON_BUTTON_CLASS, "hover:text-red-500")} aria-label="Clear" title="Clear all">
-								<Trash2 className="h-4 w-4" />
-							</button>
-						</>
-					}
-				/>
+			<PageHeader
+				backTo="/settings"
+				title="Push Inspector"
+				subtitle="Every FCM push and notification tap, live — also while the app is open. Tap one for its full payload."
+				actions={
+					<>
+						<button type="button" onClick={() => void handleExport()} disabled={log.length === 0 || isExporting} className={HEADER_ICON_BUTTON_CLASS} aria-label="Export" title="Export as JSON">
+							{isExporting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
+						</button>
+						<button type="button" onClick={() => setIsConfirmClearOpen(true)} disabled={log.length === 0} className={cn(HEADER_ICON_BUTTON_CLASS, "hover:text-red-500")} aria-label="Clear" title="Clear all">
+							<Trash2 className="h-4 w-4" />
+						</button>
+					</>
+				}
+			/>
 
+			<div className="grid min-w-0 gap-5">
 				{/* Token */}
-				<div className="native-card divide-y divide-[var(--border)] overflow-hidden">
+				<div className="native-group">
 					<div className="flex items-start gap-3 px-4 py-3.5">
 						<div className={cn("shrink-0 rounded-2xl p-2.5", tone === "ok" ? "bg-emerald-500/15 text-emerald-500" : "bg-amber-500/15 text-amber-500")}>
 							<BellFilled className="h-5 w-5" />
@@ -345,7 +345,7 @@ export function PushInspectorPage() {
 									: "Android hands it over via fg:fcm-token once Firebase has initialised."}
 							</p>
 							{token && (
-								<div className="mt-2 flex items-start gap-1.5 rounded-xl bg-[var(--surface-2)] py-1.5 pl-3 pr-1.5">
+								<div className="mt-2 flex items-start gap-1.5 rounded-xl bg-[var(--surface-2)] py-1.5 ps-3 pe-1.5">
 									<p className="min-w-0 flex-1 break-all py-0.5 font-mono text-[11px] leading-relaxed select-all">{token}</p>
 									<button
 										type="button"
@@ -363,7 +363,7 @@ export function PushInspectorPage() {
 						type="button"
 						onClick={() => token && void syncToken(token)}
 						disabled={!token || isSyncing}
-						className="flex w-full items-center gap-3 px-4 py-3.5 text-left transition hover:bg-[var(--surface-2)] disabled:opacity-50"
+						className="flex w-full items-center gap-3 px-4 py-3.5 text-start transition hover-fill disabled:opacity-50"
 					>
 						<div className="shrink-0 rounded-2xl accent-tint-15 p-2.5 text-[var(--accent)]">
 							{isSyncing ? <Loader2 className="h-5 w-5 animate-spin" /> : <RefreshCcw className="h-5 w-5" />}
@@ -377,7 +377,7 @@ export function PushInspectorPage() {
 					<button
 						type="button"
 						onClick={() => setIsManualSyncOpen(true)}
-						className="flex w-full items-center gap-3 px-4 py-3.5 text-left transition hover:bg-[var(--surface-2)]"
+						className="flex w-full items-center gap-3 px-4 py-3.5 text-start transition hover-fill"
 					>
 						<div className="shrink-0 rounded-2xl bg-slate-500/15 p-2.5 text-slate-400">
 							<KeyRound className="h-5 w-5" />
@@ -390,23 +390,21 @@ export function PushInspectorPage() {
 					</button>
 				</div>
 
-				<div className="grid min-w-0 gap-3">
-					<SheetSearchInput value={query} onChange={setQuery} placeholder="Search sender, text, ids or any payload field" />
-					<div className="flex flex-wrap gap-2">
-						{filters.map((option) => (
-							<SheetChip key={option.value} size="sm" active={filter === option.value} onClick={() => setFilter(option.value)}>
-								{option.value !== "all" && counts[option.value] > 0 ? `${option.label} · ${counts[option.value]}` : option.label}
-							</SheetChip>
-						))}
-					</div>
-				</div>
+				<PageSearchBar value={query} onChange={setQuery} placeholder="Search sender, text, ids or any payload field" />
 
 				<div className="min-w-0">
-					<div className="mb-2 flex items-center gap-2 px-1">
+					<div className="mb-2 flex flex-wrap items-center gap-2 px-1">
 						<p className="text-xs font-semibold uppercase tracking-widest text-[var(--text-muted)]">Events</p>
 						<span className="rounded-full ink-tint-10 px-2 py-0.5 text-[10px] font-bold tabular-nums text-[var(--text-muted)]">
 							{filtered.length}
 						</span>
+						<div className="ms-auto flex flex-wrap justify-end gap-1.5">
+							{filters.map((option) => (
+								<SheetChip key={option.value} size="sm" active={filter === option.value} onClick={() => setFilter(option.value)}>
+									{option.value !== "all" && counts[option.value] > 0 ? `${option.label} · ${counts[option.value]}` : option.label}
+								</SheetChip>
+							))}
+						</div>
 					</div>
 					{filtered.length === 0 ? (
 						<div className="native-card overflow-hidden px-4">
@@ -420,7 +418,7 @@ export function PushInspectorPage() {
 							/>
 						</div>
 					) : (
-						<div className="native-card divide-y divide-[var(--border)] overflow-hidden">
+						<div className="native-group">
 							{filtered.map((entry) => {
 								const event = entryEvent(entry);
 								const body = entryBody(entry);
@@ -429,7 +427,7 @@ export function PushInspectorPage() {
 										key={entry.id}
 										type="button"
 										onClick={() => setOpenEntry(entry)}
-										className="flex w-full min-w-0 items-center gap-3 px-4 py-3 text-left transition hover:bg-[var(--surface-2)]"
+										className="flex w-full min-w-0 items-center gap-3 px-4 py-3 text-start transition hover-fill"
 									>
 										<EventBadge event={event} className="w-14" />
 										<div className="min-w-0 flex-1">

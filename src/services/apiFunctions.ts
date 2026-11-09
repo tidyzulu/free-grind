@@ -6,7 +6,6 @@ import {
 import { createAlbumMethods } from "./api/albumMethods";
 import { createProfileMethods } from "./api/profileMethods";
 import { createInterestMethods } from "./api/interestMethods";
-import { createAgeVerificationMethods } from "./api/ageVerificationMethods";
 import { createFeedMethods } from "./api/feedMethods";
 import { createFavoritesMethods } from "./api/favoritesMethods";
 import { createPhrasesMethods } from "./api/phrasesMethods";
@@ -14,15 +13,17 @@ import { createTagMethods } from "./api/tagMethods";
 import { createVideoCallMethods } from "./api/videoCallMethods";
 import { createLegalMethods } from "./api/legalMethods";
 import { createWarningsMethods } from "./api/warningsMethods";
+import { createExploreHeatmapMethods } from "./api/exploreHeatmapMethods";
 import { createSpotifyMethods } from "./api/spotifyMethods";
 import { createPushSettingsMethods } from "./api/pushSettingsMethods";
-import type { RightNowFeedItem, RightNowCreatePostRequest, RightNowCreatePostMedia, RightNowUpdatePostRequest } from "../types/right-now";
+import type { RightNowFeedItem, RightNowDiscreetFeedItem, RightNowFeedEntry, RightNowCreatePostRequest, RightNowCreatePostMedia, RightNowUpdatePostRequest } from "../types/right-now";
 
 export {
 	ApiFunctionError,
 };
 
-export type { RightNowFeedItem, RightNowCreatePostRequest, RightNowCreatePostMedia, RightNowUpdatePostRequest };
+export type { RightNowFeedItem, RightNowDiscreetFeedItem, RightNowFeedEntry, RightNowCreatePostRequest, RightNowCreatePostMedia, RightNowUpdatePostRequest };
+export { NoFreeRightNowPostsError, RightNowDiscreetSetupError, RightNowPostAlreadyRunningError, RightNowSessionEndedError } from "./api/feedMethods";
 
 export function createApiFunctions(fetchRest: RestFetcher, t: (key: string) => string) {
 	const chatService = createChatService(fetchRest, t);
@@ -32,7 +33,6 @@ export function createApiFunctions(fetchRest: RestFetcher, t: (key: string) => s
 		...createInterestMethods(fetchRest, t),
 		...createAlbumMethods(fetchRest, t),
 		...createProfileMethods(fetchRest, t),
-		...createAgeVerificationMethods(fetchRest, t),
 		...createFeedMethods(fetchRest, t),
 		...createFavoritesMethods(fetchRest, t),
 		...createPhrasesMethods(fetchRest),
@@ -40,6 +40,7 @@ export function createApiFunctions(fetchRest: RestFetcher, t: (key: string) => s
 		...createVideoCallMethods(fetchRest, t),
 		...createLegalMethods(fetchRest, t),
 		...createWarningsMethods(fetchRest, t),
+		...createExploreHeatmapMethods(fetchRest, t),
 		...createSpotifyMethods(fetchRest, t),
 		...createPushSettingsMethods(fetchRest, t),
 

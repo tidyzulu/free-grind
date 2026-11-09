@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Routes, Route, Link, Navigate } from "react-router-dom";
+import { Routes, Route, Link, Navigate, useLocation, type Location } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import semver from "semver";
 import { AuthProvider } from "./contexts/AuthContext";
@@ -12,28 +12,26 @@ import { SignInPage } from "./pages/auth/SignInPage";
 import { SignUpPage } from "./pages/auth/SignUpPage";
 import { PasswordResetPage } from "./pages/auth/PasswordResetPage";
 import { GridPage } from "./pages/app/GridPage.tsx";
-import { BrowseLocationPage } from "./pages/app/BrowseLocationPage";
 import { RightNowPage } from "./pages/app/RightNowPage";
 import { InterestPage } from "./pages/app/InterestPage";
 import { ChatPage } from "./pages/app/ChatPage";
-import { ChatFiltersPage } from "./pages/app/ChatFiltersPage";
 import { SettingsPage } from "./pages/app/SettingsPage.tsx";
-import { ProfileEditorPage } from "./pages/app/ProfileEditorPage.tsx";
+import { OwnProfileEditRedirect } from "./pages/app/profile-editor/OwnProfileEditRedirect.tsx";
 import { GridProfilePage } from "./pages/app/GridProfilePage.tsx";
 import { AboutPage } from "./pages/app/AboutPage.tsx";
 import { SettingsBlockedPage } from "./pages/app/SettingsBlockedPage.tsx";
 import { SettingsHiddenPage } from "./pages/app/SettingsHiddenPage.tsx";
-import { SettingsTransferAccountPage } from "./pages/app/SettingsTransferAccountPage.tsx";
 import { SettingsBlockHistoryPage } from "./pages/app/SettingsBlockHistoryPage.tsx";
-import { AgeVerificationPage } from "./pages/app/AgeVerificationPage.tsx";
 import { SharedAlbumsPage } from "./pages/app/SharedAlbumsPage.tsx";
 import { VideoGalleryPage } from "./pages/app/VideoGalleryPage.tsx";
 import { ApiInspectorPage } from "./pages/app/ApiInspectorPage.tsx";
 import { PushInspectorPage } from "./pages/app/PushInspectorPage.tsx";
 import { AssignmentsPage } from "./pages/app/AssignmentsPage.tsx";
+import { WebSocketExplorerPage } from "./pages/app/WebSocketExplorerPage.tsx";
 import { CustomizabilityPage } from "./pages/app/CustomizabilityPage.tsx";
 import { BehaviorPage } from "./pages/app/BehaviorPage.tsx";
 import { OptionalFeaturesPage } from "./pages/app/OptionalFeaturesPage.tsx";
+import { RegionalPage } from "./pages/app/RegionalPage.tsx";
 import { NotificationsPage } from "./pages/app/NotificationsPage.tsx";
 import { SettingsAutomationPage } from "./pages/app/SettingsAutomationPage.tsx";
 import { SettingsTranslationPage } from "./pages/app/SettingsTranslationPage.tsx";
@@ -49,6 +47,7 @@ import { TokenExpiredGate } from "./components/TokenExpiredPrompt";
 import { AccountStatusGate } from "./components/AccountStatusPrompt";
 import { UnsupportedVersionGate } from "./components/UnsupportedVersionPrompt";
 import { EntitlementBypassPrompt } from "./components/EntitlementBypassPrompt";
+import { AgeVerificationRegionPrompt } from "./components/AgeVerificationRegionPrompt";
 import { LocateProfileHost } from "./pages/app/gridpage/hooks/useLocateProfile";
 import { PushNotificationBridge } from "./components/PushNotificationBridge";
 import { ShareTargetBridge } from "./components/ShareTargetBridge";
@@ -61,11 +60,14 @@ import { KeepScreenOnBridge } from "./components/KeepScreenOnBridge";
 import { EntitlementsBridge } from "./components/EntitlementsBridge";
 import { AssignmentsBridge } from "./components/AssignmentsBridge";
 import { HondurasRecoveryBridge } from "./components/HondurasRecoveryBridge";
+import { LgbtqRiskCountryWarning } from "./components/LgbtqRiskCountryWarning";
 import { ManagedOptionsCacheBridge } from "./components/ManagedOptionsCacheBridge";
 import { SplashReadyBridge } from "./components/SplashReadyBridge";
+import { RenderCrashReportBridge } from "./components/RenderCrashReportBridge";
 import { HotswapUpdatedToastBridge } from "./components/HotswapUpdatedToastBridge";
 import { SmoothScroll } from "./components/SmoothScroll";
 import { SinModeUnlockOverlay } from "./components/SinModeUnlockOverlay";
+import { HalloweenOverlay } from "./components/HalloweenOverlay";
 import { RightNowStartedOverlay } from "./components/RightNowStartedOverlay";
 import { usePreferences } from "./contexts/PreferencesContext";
 import ManagerApp from "./ManagerApp";
@@ -183,6 +185,11 @@ export default function App() {
 	// tracking, entitlements fetch) doesn't all land in the same first commit
 	// as the initial route.
 	const renderPhase = useRenderPhase(5);
+	const location = useLocation();
+	// Set when a page opens a profile as a modal over itself (desktop chat):
+	// the routes keep rendering that page underneath so closing the profile
+	// doesn't unmount and reload it.
+	const backgroundLocation = (location.state as { backgroundLocation?: Location } | null)?.backgroundLocation;
 
 	useEffect(() => {
 		const handleReplay = () => setShowOnboarding(true);
@@ -205,12 +212,15 @@ export default function App() {
 	return (
 		<AuthProvider>
 			<SplashReadyBridge />
+			<RenderCrashReportBridge />
 			<HotswapUpdatedToastBridge />
 			<PreferencesProvider>
 			<ExploreModeProvider>
 				<SinModeUnlockOverlay />
+				<HalloweenOverlay />
 				<RightNowStartedOverlay />
 				<EntitlementBypassPrompt />
+				<AgeVerificationRegionPrompt />
 				<LocateProfileHost />
 				<SmoothScroll>
 					<OtaUpdateGate>
@@ -234,6 +244,7 @@ export default function App() {
 					{renderPhase >= 2 && <NotificationReplyBridge />}
 					{renderPhase >= 2 && <ManagedOptionsCacheBridge />}
 					{renderPhase >= 2 && <AssignmentsBridge />}
+					{renderPhase >= 2 && <LgbtqRiskCountryWarning />}
 					{renderPhase >= 3 && <ChatRealtimeBridge />}
 					{renderPhase >= 3 && <VideoCallManager />}
 					{renderPhase >= 3 && <GridAutoRefreshBridge />}
@@ -244,7 +255,7 @@ export default function App() {
 							<HondurasRecoveryBridge />
 						</>
 					)}
-					<Routes>
+					<Routes location={backgroundLocation ?? location}>
 						<Route element={<RootLayout />}>
 							<Route path="/manager" element={<ManagerRoutePage />} />
 							{/* Auth Routes */}
@@ -264,10 +275,8 @@ export default function App() {
 								}
 							>
 								<Route path="/" element={<GridPage />} />
-								<Route path="/browse/location" element={<BrowseLocationPage />} />
 								<Route path="/right-now" element={<RightNowPage />} />
 								<Route path="/interest" element={<InterestPage />} />
-								<Route path="/chat/filters" element={<ChatFiltersPage />} />
 								<Route path="/chat/albums" element={<SharedAlbumsPage />} />
 								<Route path="/chat/videos" element={<VideoGalleryPage />} />
 								<Route path="/chat/:conversationId?" element={<ChatPage />} />
@@ -281,7 +290,7 @@ export default function App() {
 								<Route path="/settings/albums" element={<Navigate to="/settings" replace />} />
 								<Route path="/settings/blocked" element={<SettingsBlockedPage />} />
 								<Route path="/settings/hidden" element={<SettingsHiddenPage />} />
-								<Route path="/settings/transfer-account" element={<SettingsTransferAccountPage />} />
+								<Route path="/settings/transfer-account" element={<Navigate to="/settings#transfer-account" replace />} />
 								<Route path="/settings/block-history" element={<SettingsBlockHistoryPage />} />
 								<Route path="/settings/sexual-health" element={<SexualHealthPage />} />
 								<Route
@@ -301,6 +310,14 @@ export default function App() {
 									}
 								/>
 								<Route
+									path="/settings/ws-explorer"
+									element={
+										<DeveloperModeRoute>
+											<WebSocketExplorerPage />
+										</DeveloperModeRoute>
+									}
+								/>
+								<Route
 									path="/settings/assignments"
 									element={
 										<DeveloperModeRoute>
@@ -313,12 +330,12 @@ export default function App() {
 									element={<SharedAlbumsPage />}
 								/>
 								<Route
-									path="/settings/age-verification"
-									element={<AgeVerificationPage />}
-								/>
-								<Route
 									path="/settings/customizability"
 									element={<CustomizabilityPage />}
+								/>
+								<Route
+									path="/settings/regional"
+									element={<RegionalPage />}
 								/>
 								<Route
 									path="/settings/optional-features"
@@ -332,9 +349,10 @@ export default function App() {
 									path="/settings/notifications"
 									element={<NotificationsPage />}
 								/>
+								{/* The profile is edited in place now; the old editor URL leads there. */}
 								<Route
 									path="/settings/profile-editor"
-									element={<ProfileEditorPage />}
+									element={<OwnProfileEditRedirect />}
 								/>
 							</Route>
 
@@ -342,6 +360,18 @@ export default function App() {
 							<Route path="*" element={<ErrorPage />} />
 						</Route>
 					</Routes>
+					{backgroundLocation && (
+						<Routes>
+							<Route
+								path="/profile/:profileId"
+								element={
+									<ProtectedRoute>
+										<GridProfilePage />
+									</ProtectedRoute>
+								}
+							/>
+						</Routes>
+					)}
 					</TestReminderGate></OutdatedVersionGate></TokenExpiredGate></AccountStatusGate></UnsupportedVersionGate>)}
 					</OtaUpdateGate>
 				</SmoothScroll>

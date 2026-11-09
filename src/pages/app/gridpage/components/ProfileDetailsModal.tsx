@@ -1,12 +1,12 @@
-import { TapFlyBurst, TAP_FLY_BURST_MS, createTapFlyBurst, tapEmoji, tapGlow, type TapFlyBurstState } from "../../../../components/TapFlyBurst";
-import { Album, Ban, ChevronDown, ChevronLeft, ChevronUp, EllipsisVertical, Flag, Flame, Images, Loader2, LockKeyhole, MessageCircle, Pencil, Phone, ShieldCheck, Star, Trash2, X } from "lucide-react";
+import { TapFlyBurst, tapFlyBurstDuration, createTapFlyBurst, mutualTapIdFor, tapEmoji, tapGlow, type TapFlyBurstState } from "../../../../components/TapFlyBurst";
+import { Album, AlertTriangle, Ban, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, CircleUserRound, Clock, EllipsisVertical, Flag, Flame, Images, Loader2, LockKeyhole, MessageCircle, Pencil, Phone, Plus, ShieldCheck, Star, Trash2, X } from "lucide-react";
 import { BananaFilled, EyeFilled, HomeFilled, MapPinFilled, StickyNoteFilled, EyeOffFilled, LocateFixedFilled, PencilLineFilled, SendHorizontalFilled } from "../../../../components/icons/FilledIcons";
 import { RightNowIcon } from "../../../../components/icons/RightNowIcon";
 import toast from "react-hot-toast";
-import { type ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Fragment, type ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useLocation } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import { useDesktopBreakpoint } from "../../../../hooks/useDesktopBreakpoint";
-import { useNavigate } from "react-router-dom";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { appLog } from "../../../../utils/logger";
 import { useTranslation } from "react-i18next";
@@ -18,7 +18,7 @@ import { useTravelPlans } from "../../../../hooks/queries/useProfileQueries";
 import type { TravelPlan } from "../../../../types/travel";
 import { useApiFunctions } from "../../../../hooks/useApiFunctions";
 import { useAuth } from "../../../../contexts/useAuth";
-import { profileResponseSchema } from "../../profile-editor/profileEditorUtils";
+import { MEDIA_MODERATION_STATE, profileResponseSchema } from "../../profile-editor/profileEditorUtils";
 import type {
 	BrowseCard,
 	ManagedOption,
@@ -37,7 +37,7 @@ import {
 	getTribeLabelMap,
 	getVaccineLabelMap,
 } from "../../profile-option-builders";
-import { getProfileImageUrl } from "../../../../utils/media";
+import { getProfileImageUrl, validateMediaHash } from "../../../../utils/media";
 import { proxyMediaUrl } from "../../../../utils/mediaProxy";
 import { resolveAvatarSrc } from "../../../../services/avatarStore";
 import { getForbiddenWords, setForbiddenWords } from "../../../../utils/autoblock";
@@ -61,10 +61,15 @@ import {
 	formatHeightCm,
 	formatWeightKg,
 	getOnlineStatusMeta,
+	getOnlineStatusLabelArgs,
 	getEnumLabel,
 	shouldHideField,
 } from "../utils";
 import { ProfileDetailsContent } from "./ProfileDetailsContent";
+import { OwnProfileEditPanel, type OwnPhotoControls } from "../../profile-editor/OwnProfileEditPanel";
+import { useCarouselSwipe } from "./useCarouselSwipe";
+import { ConfirmDialog } from "../../../../components/ui/confirm-dialog";
+import { setCachedProfileDetail } from "../cache";
 import type { ChatContactIndexRecord } from "../../../../types/chat-contact-index";
 import { PhotoViewer, type HeroRect, type PhotoViewerMenuAction } from "../../../../components/PhotoViewer";
 import { PhotoActionBar } from "../../../../components/PhotoActionBar";
@@ -99,6 +104,10 @@ const ALBUM_SLIDE_HASH = "__album_slide__";
 // (and no Right Now slide either) — keeps the default-avatar placeholder as
 // its own slide instead of just disappearing once an album slide is added.
 const DEFAULT_PROFILE_SLIDE_HASH = "__default_profile_slide__";
+
+// Synthetic hash appended while editing your own photos (with a free slot
+// left): the slide that opens the picture drawer to add one.
+const ADD_PHOTO_SLIDE_HASH = "__add_photo_slide__";
 
 type ProfileDetailsModalProps = {
 	isOpen: boolean;
@@ -142,11 +151,15 @@ type ProfileDetailsModalProps = {
 	genderOptions: ManagedOption[];
 	pronounOptions: ManagedOption[];
 	variant?: "modal" | "page";
+	/** Page variant shown over the page that opened it (still rendered below, see App.tsx). */
+	isOverBackground?: boolean;
 	onPrevProfile?: () => void;
 	onNextProfile?: () => void;
 	/** What's already known about the neighbouring profiles, shown beside the page while swiping. */
 	prevProfilePreview?: ProfileSwipePreview | null;
 	nextProfilePreview?: ProfileSwipePreview | null;
+	/** Opens your own profile in edit mode right away (ignored for other profiles). */
+	initialEditMode?: boolean;
 };
 
 export type ProfileSwipePreview = {
@@ -168,9 +181,11 @@ type ProfileStatusLevel = "online" | "ending_soon" | "recent" | "offline";
 function getProfileStatusDisplay(
 	meta: ReturnType<typeof getOnlineStatusMeta>,
 	t: ReturnType<typeof useTranslation>["t"],
+	showTimeLeft: boolean,
 ): { label: string; level: ProfileStatusLevel } {
+	const onlineLabel = getOnlineStatusLabelArgs(meta, showTimeLeft);
 	const label = meta.isOnline
-		? t(meta.labelKey, { count: meta.count })
+		? t(onlineLabel.key, { count: onlineLabel.count })
 		: meta.labelKey === "browse_page.status_offline"
 			? t(meta.labelKey)
 			: t("profile_details.last_online", {
@@ -188,6 +203,27 @@ function getProfileStatusDisplay(
 // Same height as the photo carousel in the page variant.
 const PAGE_CAROUSEL_HEIGHT = "min(78dvh, calc(100vw * 1.55))";
 
+// A single touchpad swipe fires dozens of wheel events (and keeps firing while it
+// coasts), so a run of events without a pause this long counts as one gesture.
+const WHEEL_GESTURE_GAP_MS = 200;
+
+type WheelGestureState = { lastEventAt: number; direction: number; captured: boolean };
+
+function createWheelGestureState(): WheelGestureState {
+	return { lastEventAt: -Infinity, direction: 0, captured: false };
+}
+
+/** Returns the scroll direction if this wheel event starts a new gesture, otherwise 0. */
+function startsWheelGesture(state: WheelGestureState, deltaY: number): number {
+	const direction = Math.sign(deltaY);
+	if (direction === 0) return 0;
+	const now = performance.now();
+	const isNew = now - state.lastEventAt > WHEEL_GESTURE_GAP_MS || direction !== state.direction;
+	state.lastEventAt = now;
+	state.direction = direction;
+	return isNew ? direction : 0;
+}
+
 /** Neighbouring profile's photo and name, sitting just off-screen next to the swipeable page. */
 function ProfileSwipePreviewPanel({
 	preview,
@@ -200,11 +236,11 @@ function ProfileSwipePreviewPanel({
 	renderDetails: (detail: ProfileDetail) => ReactNode;
 }) {
 	const { t } = useTranslation();
-	const { unitsPreset } = usePreferences();
+	const { unitsPreset, showOnlineTimeLeft } = usePreferences();
 	const src = proxyMediaUrl(preview.imageUrl);
 	const hasStatus = preview.lastSeen != null || preview.onlineUntil != null;
-	const status = hasStatus ? getProfileStatusDisplay(getOnlineStatusMeta(preview.lastSeen, preview.onlineUntil), t) : null;
-	const name = preview.name?.trim() || t("profile_details.anonymous", "Someone");
+	const status = hasStatus ? getProfileStatusDisplay(getOnlineStatusMeta(preview.lastSeen, preview.onlineUntil), t, showOnlineTimeLeft) : null;
+	const name = preview.name?.trim() || t("common.unknown_display_name");
 	const hasAge = preview.age != null && Number.isFinite(preview.age);
 	const distanceLabel = preview.distance != null ? formatDistance(preview.distance, t, unitsPreset) : null;
 	const headerSubtitle = [status?.label, distanceLabel].filter(Boolean).join(" · ");
@@ -271,7 +307,7 @@ function ProfileSwipePreviewPanel({
 					<h2 className="truncate text-2xl font-bold leading-tight tracking-tight sm:text-3xl">
 						{name}
 						{hasAge && (
-							<span className="ml-2 text-xl font-normal text-[var(--text-muted)] sm:text-2xl">{preview.age}</span>
+							<span className="ms-2 text-xl font-normal text-[var(--text-muted)] sm:text-2xl">{preview.age}</span>
 						)}
 					</h2>
 					{/* Same status line as ProfileDetailsContent's header. */}
@@ -413,6 +449,22 @@ function getProfileContentFlags(
 	};
 }
 
+/** Photo hashes of a profile in carousel order (primary first), as the
+ * parents derive them for the `activeProfilePhotoHashes` prop. */
+function getProfileDetailPhotoHashes(profile: ProfileDetail): string[] {
+	const hashes = profile.medias
+		.map((item) => item.mediaHash ?? "")
+		.filter((hash): hash is string => validateMediaHash(hash));
+	if (
+		profile.profileImageMediaHash &&
+		validateMediaHash(profile.profileImageMediaHash) &&
+		!hashes.includes(profile.profileImageMediaHash)
+	) {
+		hashes.unshift(profile.profileImageMediaHash);
+	}
+	return hashes;
+}
+
 /** `withHeader={false}` leaves out the name/status lines, for when those are already known. */
 function ProfileDetailsSkeleton({ withHeader = true }: { withHeader?: boolean }) {
 	return (
@@ -481,27 +533,60 @@ export function ProfileDetailsModal({
 	isTapBlocked = false,
 	tapVisualState = { state: "none", tapId: 1 },
 	onTagClick,
-	activeProfile,
+	activeProfile: activeProfileProp,
 	selectedBrowseCard,
 	isLoadingActiveProfile,
 	activeProfileError,
-	activeProfilePhotoHashes,
+	activeProfilePhotoHashes: activeProfilePhotoHashesProp,
 	chatContactStatus,
 	localNickname,
 	onLocalNicknameChange,
 	genderOptions,
 	pronounOptions,
 	variant = "modal",
+	isOverBackground = false,
 	onPrevProfile,
 	onNextProfile,
 	prevProfilePreview,
 	nextProfilePreview,
+	initialEditMode = false,
 }: ProfileDetailsModalProps) {
 	const { t } = useTranslation();
-	const { unitsPreset, showAlbumSensitiveContentWarning, openAlbumAsBottomSheet } = usePreferences();
+	const { unitsPreset, showAlbumSensitiveContentWarning, openAlbumAsBottomSheet, showOnlineTimeLeft } = usePreferences();
 	const { userId } = useAuth();
-	const navigate = useNavigate();
 	const apiFunctions = useApiFunctions();
+	// Own profile only: edit mode swaps the details for the editor sections.
+	// Leaving it re-reads the profile here, since the parent only fetches it
+	// when the opened profile changes.
+	const [isEditingOwnProfile, setIsEditingOwnProfile] = useState(initialEditMode);
+	const [hasUnsavedOwnEdits, setHasUnsavedOwnEdits] = useState(false);
+	const [isDiscardEditsPromptOpen, setIsDiscardEditsPromptOpen] = useState(false);
+	const [refreshedOwnProfile, setRefreshedOwnProfile] = useState<ProfileDetail | null>(null);
+	// The editor reports the saved photo order (photo edits are a draft saved
+	// with the profile). It wins over the reload on leaving edit mode, which
+	// reads /v7/profiles and can lag behind the write.
+	const [editedOwnPhotoHashes, setEditedOwnPhotoHashes] = useState<string[] | null>(null);
+	// Set while the editor is open: the carousel then shows only your photos
+	// (the draft order), each with its edit controls, plus a slide to add one.
+	const [ownPhotoControls, setOwnPhotoControls] = useState<OwnPhotoControls | null>(null);
+	const openedProfileId = activeProfileProp?.profileId;
+	// Reset only when switching from one loaded profile to another — not when
+	// the first one arrives, which would undo `initialEditMode`.
+	const previousOpenedProfileIdRef = useRef(openedProfileId);
+	useEffect(() => {
+		const previous = previousOpenedProfileIdRef.current;
+		previousOpenedProfileIdRef.current = openedProfileId;
+		if (previous == null || previous === openedProfileId) return;
+		setRefreshedOwnProfile(null);
+		setEditedOwnPhotoHashes(null);
+		setIsEditingOwnProfile(false);
+	}, [openedProfileId]);
+	const activeProfile = refreshedOwnProfile ?? activeProfileProp;
+	const activeProfilePhotoHashes = useMemo(
+		() => editedOwnPhotoHashes
+			?? (refreshedOwnProfile ? getProfileDetailPhotoHashes(refreshedOwnProfile) : activeProfilePhotoHashesProp),
+		[editedOwnPhotoHashes, refreshedOwnProfile, activeProfilePhotoHashesProp],
+	);
 	const [ownTags, setOwnTags] = useState<string[]>(() => (userId ? (ownProfileDataCache.get(String(userId))?.tags ?? []) : []));
 	useEffect(() => {
 		if (!userId) return;
@@ -534,11 +619,43 @@ export function ProfileDetailsModal({
 			return value;
 		}
 
-		return t("profile_details.anonymous", "Someone");
+		return t("common.unknown_display_name");
 	}, [activeProfile, localNickname, t]);
 
 	const messageProfileId = activeProfile?.profileId ?? selectedBrowseCard?.profileId ?? null;
 	const isOwnProfile = userId != null && messageProfileId != null && String(userId) === String(messageProfileId);
+
+	const finishOwnProfileEdit = useCallback(() => {
+		setIsEditingOwnProfile(false);
+		setHasUnsavedOwnEdits(false);
+		setIsDiscardEditsPromptOpen(false);
+		if (userId == null) return;
+		const ownId = String(userId);
+		apiFunctions.getProfileDetail(ownId).then((fresh) => {
+			setRefreshedOwnProfile(fresh);
+			setCachedProfileDetail(ownId, fresh);
+			ownProfileDataCache.set(ownId, { tags: fresh.profileTags ?? [] });
+		}).catch((error) => appLog.warn("Failed to reload own profile after editing", error));
+	}, [apiFunctions, userId]);
+	const toggleOwnProfileEdit = () => {
+		if (!isEditingOwnProfile) setIsEditingOwnProfile(true);
+		else if (hasUnsavedOwnEdits) setIsDiscardEditsPromptOpen(true);
+		else finishOwnProfileEdit();
+	};
+	const ownProfileEditLabel = isEditingOwnProfile
+		? t("profile_editor.stop_editing", { defaultValue: "Stop editing" })
+		: t("profile_editor.edit_profile", { defaultValue: "Edit profile" });
+	const discardEditsDialog = (
+		<ConfirmDialog
+			isOpen={isDiscardEditsPromptOpen}
+			title={t("profile_editor.discard.title", { defaultValue: "Discard changes?" })}
+			message={t("profile_editor.discard.message", { defaultValue: "Your unsaved profile changes will be lost." })}
+			confirmLabel={t("profile_editor.discard.confirm", { defaultValue: "Discard" })}
+			cancelLabel={t("common.cancel")}
+			onConfirm={finishOwnProfileEdit}
+			onCancel={() => setIsDiscardEditsPromptOpen(false)}
+		/>
+	);
 	const profileDistance =
 		activeProfile?.distance ?? selectedBrowseCard?.distanceMeters ?? null;
 	const profileOnlineUntil = isOwnProfile
@@ -549,12 +666,13 @@ export function ProfileDetailsModal({
 		profileLastSeen,
 		profileOnlineUntil,
 	);
-	const { label: profileStatusLabel, level: profileStatusLevel } = getProfileStatusDisplay(profileStatusMeta, t);
+	const { label: profileStatusLabel, level: profileStatusLevel } = getProfileStatusDisplay(profileStatusMeta, t, showOnlineTimeLeft);
 	const estimatedCreatedAt = formatEstimatedAccountCreation(activeProfile?.profileId, t);
 	const { data: travelPlans } = useTravelPlans(activeProfile?.profileId);
 	const visualStateValue = typeof tapVisualState === "string" ? tapVisualState : tapVisualState.state;
 	const effectiveTapVisualState = isTappingProfile ? "single" : visualStateValue;
 	const isTapActive = effectiveTapVisualState !== "none";
+	const isBarTapMutual = effectiveTapVisualState === "mutual";
 	const isProfileUnavailable = isBlocked || isSnapshotProfile;
 	const isTapDisabled = isOwnProfile || !onTapProfile || isTappingProfile || isTapBlocked || isProfileUnavailable;
 	const isTriangleDisabled =
@@ -618,15 +736,19 @@ export function ProfileDetailsModal({
 	const mobileCarouselRef = useRef<HTMLDivElement | null>(null);
 	const carouselIndexRef = useRef(0);
 	const carouselTotalRef = useRef(0);
+	const splitWheelGestureRef = useRef<WheelGestureState>(createWheelGestureState());
 	const scrollContainerRef = useRef<HTMLDivElement | null>(null);
 	const pageWrapRef = useRef<HTMLDivElement | null>(null);
-	const profileSwipeRef = useRef({ startX: 0, startY: 0, decided: false, horizontal: false, dragging: false, lastDelta: 0, pastThreshold: false });
+	const pageScreenRef = useRef<HTMLDivElement | null>(null);
+	const profileSwipeRef = useRef({ startX: 0, startY: 0, decided: false, horizontal: false, dragging: false, lastDelta: 0, pastThreshold: false, canDismiss: false, dismissing: false, dismissStartTime: 0 });
 	// Gestures write straight to the DOM (header fade, profile swipe) instead
 	// of state, so a frame of finger movement doesn't re-render the whole modal.
 	const headerBgRef = useRef<HTMLDivElement | null>(null);
 	const [inlineScrolled, setInlineScrolled] = useState(false);
 	const [isActionsMenuOpen, setIsActionsMenuOpen] = useState(false);
 	const actionsMenuPresence = usePresence(isActionsMenuOpen);
+	const isActionsMenuOpenRef = useRef(isActionsMenuOpen);
+	isActionsMenuOpenRef.current = isActionsMenuOpen;
 	const [banBioPrompt, setBanBioPrompt] = useState<{ text: string } | null>(null);
 	const [banNamePrompt, setBanNamePrompt] = useState<{ text: string } | null>(null);
 	const [quickMessageDraft, setQuickMessageDraft] = useState("");
@@ -801,7 +923,7 @@ export function ProfileDetailsModal({
 								className="min-w-0 flex-1 resize-none overflow-hidden bg-transparent text-[15px] leading-relaxed text-[var(--text)] placeholder:text-[var(--text-muted)] outline-none"
 							/>
 						</label>
-						<div className="ml-11 h-px bg-[var(--border)]" />
+						<div className="ms-11 h-px bg-[var(--border)]" />
 						<label className="flex min-h-12 items-center gap-3 px-4">
 							<Phone className="h-4 w-4 shrink-0 fill-current text-[var(--text-muted)]" />
 							<input
@@ -819,7 +941,7 @@ export function ProfileDetailsModal({
 									type="button"
 									onClick={handleDeleteNote}
 									disabled={isSavingNote}
-									className="flex min-h-12 w-full items-center gap-3 px-4 text-left text-[15px] text-red-400 transition active:bg-red-500/10 disabled:opacity-50"
+									className="flex min-h-12 w-full items-center gap-3 px-4 text-start text-[15px] text-red-400 transition active:bg-red-500/10 disabled:opacity-50"
 								>
 									<Trash2 className="h-4 w-4 shrink-0" />
 									{t("favorites.delete_note")}
@@ -837,7 +959,7 @@ export function ProfileDetailsModal({
 								</p>
 							</div>
 						)}
-						{profileNote && profilePhoneNumber && <div className="ml-11 h-px bg-[var(--border)]" />}
+						{profileNote && profilePhoneNumber && <div className="ms-11 h-px bg-[var(--border)]" />}
 						{profilePhoneNumber && (
 							// Tapping the number starts a call (through the opener, like
 							// other external links — a plain tel: link isn't handed on by the webview).
@@ -847,7 +969,7 @@ export function ProfileDetailsModal({
 									const url = `tel:${profilePhoneNumber.replace(/[^\d+]/g, "")}`;
 									openUrl(url).catch((error) => appLog.error("Failed to open phone link", error));
 								}}
-								className="flex min-h-12 w-full items-center gap-3 px-4 text-left transition active:bg-[var(--surface)]"
+								className="flex min-h-12 w-full items-center gap-3 px-4 text-start transition active:bg-[var(--surface)]"
 							>
 								<Phone className="h-4 w-4 shrink-0 fill-current text-[var(--text-muted)]" />
 								<span className="min-w-0 flex-1 truncate text-[15px] text-[var(--accent)]">{profilePhoneNumber}</span>
@@ -859,7 +981,7 @@ export function ProfileDetailsModal({
 						type="button"
 						onClick={() => { setNoteDraft(""); setPhoneNumberDraft(""); setIsEditingNote(true); }}
 						disabled={isLoadingNote}
-						className="flex min-h-12 w-full items-center gap-3 px-4 text-left transition active:bg-[var(--surface)] disabled:opacity-50"
+						className="flex min-h-12 w-full items-center gap-3 px-4 text-start transition active:bg-[var(--surface)] disabled:opacity-50"
 					>
 						<StickyNoteFilled className="h-4 w-4 shrink-0 text-[var(--accent)]" />
 						<span className="text-[15px] text-[var(--text-muted)]">{t("favorites.note_empty")}</span>
@@ -919,7 +1041,9 @@ export function ProfileDetailsModal({
 		if (!onTapProfile || !messageProfileId || isTapBlocked) return;
 		haptic(30, [15, 10, 25]);
 		onTapProfile(String(messageProfileId), tapId);
-		setBarTapFlyEmoji(createTapFlyBurst(tapId, barTapButtonRef.current));
+		setBarTapFlyEmoji(
+			createTapFlyBurst(tapId, barTapButtonRef.current, mutualTapIdFor(activeProfile?.lastReceivedTapTimestamp, receivedTapType)),
+		);
 		setBarTapPickerOpen(false);
 		setBarTapHoverId(null);
 		barTapStickyRef.current = false;
@@ -951,7 +1075,7 @@ export function ProfileDetailsModal({
 
 	useEffect(() => {
 		if (!barTapFlyEmoji) return;
-		const timer = setTimeout(() => setBarTapFlyEmoji(null), TAP_FLY_BURST_MS);
+		const timer = setTimeout(() => setBarTapFlyEmoji(null), tapFlyBurstDuration(barTapFlyEmoji));
 		return () => clearTimeout(timer);
 	}, [barTapFlyEmoji]);
 
@@ -1001,6 +1125,8 @@ export function ProfileDetailsModal({
 	onPrevProfileRef.current = onPrevProfile;
 	const onNextProfileRef = useRef(onNextProfile);
 	onNextProfileRef.current = onNextProfile;
+	const onCloseRef = useRef(onClose);
+	onCloseRef.current = onClose;
 	const hasProfileNeighbors = Boolean(onPrevProfile || onNextProfile);
 	// Set once a swipe has slid the neighbour's preview fully in. The preview
 	// stays on screen as the loading state; the offset is only reset once the
@@ -1049,18 +1175,69 @@ export function ProfileDetailsModal({
 			!isOpen ||
 			selectedPhotoIndex !== null ||
 			variant !== "page" ||
-			!hasProfileNeighbors
+			// Editing your own profile: drags belong to the form (sliders,
+			// photo reordering), and leaving would drop the draft.
+			isEditingOwnProfile
 		) {
 			return;
 		}
 
 		const SWIPE_THRESHOLD = 80;
+		// Pull-down-to-close, like the photo viewer: past this distance (or a
+		// quick flick) releasing closes the profile.
+		const DISMISS_THRESHOLD = 120;
+		const DISMISS_FLICK_MIN = 40;
+		const DISMISS_FLICK_VELOCITY = 0.5; // px/ms
 		const s = profileSwipeRef.current;
+		let dismissResetTimer: ReturnType<typeof setTimeout> | null = null;
 
 		const setOffset = (dx: number, animate: boolean) => {
 			el.style.transition = animate ? "transform 250ms ease-out" : "none";
 			el.style.transform = dx === 0 ? "" : `translateX(${dx}px)`;
 		};
+
+		const clearDismissStyles = () => {
+			el.style.transition = "";
+			el.style.transform = "";
+			el.style.opacity = "";
+			el.style.borderRadius = "";
+			el.style.overflow = "";
+			el.style.background = "";
+			const screen = pageScreenRef.current;
+			if (screen) {
+				screen.style.transition = "";
+				screen.style.background = "";
+			}
+		};
+
+		// Over the opening page it shows through, dimmed less the further
+		// the profile is pulled; on its own there's nothing behind it.
+		const setScreenBackdrop = (progress: number, transition: string) => {
+			const screen = pageScreenRef.current;
+			if (!screen) return;
+			screen.style.transition = transition;
+			screen.style.background = isOverBackground
+				? `rgba(0, 0, 0, ${(0.5 * (1 - progress)).toFixed(3)})`
+				: "#000";
+		};
+
+		const setDismissOffset = (dy: number, animate: boolean) => {
+			const height = el.offsetHeight || window.innerHeight;
+			const progress = Math.min(Math.max(dy, 0) / height, 1);
+			setScreenBackdrop(animate ? 0 : progress, animate ? "background 250ms ease-out" : "none");
+			el.style.background = "var(--bg)";
+			el.style.overflow = "hidden";
+			el.style.borderRadius = dy > 0 ? `${Math.min(dy / 4, 24)}px` : "";
+			el.style.transition = animate
+				? "transform 250ms ease-out, opacity 250ms ease-out, border-radius 250ms ease-out"
+				: "none";
+			el.style.transform = `translateY(${dy}px) scale(${1 - progress * 0.12})`;
+			el.style.opacity = String(1 - progress * 0.5);
+		};
+
+		const isFormField = (target: EventTarget | null) =>
+			target instanceof HTMLElement &&
+			Boolean(target.closest("input, textarea, select, [contenteditable=\"true\"]"));
 
 		const onStart = (e: TouchEvent) => {
 			if (controlsBarRef.current?.contains(e.target as Node)) return;
@@ -1070,20 +1247,50 @@ export function ProfileDetailsModal({
 			s.decided = false;
 			s.horizontal = false;
 			s.dragging = false;
+			s.dismissing = false;
 			s.lastDelta = 0;
 			s.pastThreshold = false;
+			const scroller = scrollContainerRef.current;
+			// Only from the scrolled-to-top content itself — not the header,
+			// menus or overlays layered inside the page.
+			s.canDismiss =
+				e.touches.length === 1 &&
+				!isActionsMenuOpenRef.current &&
+				Boolean(scroller?.contains(e.target as Node)) &&
+				(scroller?.scrollTop ?? 1) <= 0 &&
+				!isFormField(e.target);
 		};
 
 		const onMove = (e: TouchEvent) => {
 			if (pendingSwipeResetRef.current) return;
+			if (e.touches.length !== 1) return;
 			const dx = e.touches[0].clientX - s.startX;
 			const dy = e.touches[0].clientY - s.startY;
 			if (!s.decided) {
 				if (Math.abs(dx) < 10 && Math.abs(dy) < 10) return;
 				s.decided = true;
 				s.horizontal = Math.abs(dx) >= Math.abs(dy);
+				// The photo carousel handles vertical swipes itself (except on
+				// its first photo) and claims them via preventDefault.
+				if (!s.horizontal && dy > 0 && s.canDismiss && !e.defaultPrevented) {
+					s.dismissing = true;
+					s.dismissStartTime = performance.now();
+				}
 			}
-			if (!s.horizontal) return;
+			if (s.dismissing) {
+				e.preventDefault();
+				// Dragging back above the start point just sticks at 0.
+				const offset = Math.max(dy, 0);
+				s.lastDelta = offset;
+				const past = offset > DISMISS_THRESHOLD;
+				if (past !== s.pastThreshold) {
+					s.pastThreshold = past;
+					if (past) haptic(8);
+				}
+				setDismissOffset(offset, false);
+				return;
+			}
+			if (!s.horizontal || !hasProfileNeighbors) return;
 			e.preventDefault();
 			s.dragging = true;
 			const target = dx < 0 ? onNextProfileRef.current : onPrevProfileRef.current;
@@ -1098,7 +1305,35 @@ export function ProfileDetailsModal({
 			setOffset(offset, false);
 		};
 
+		const onDismissEnd = () => {
+			s.dismissing = false;
+			const dy = s.lastDelta;
+			s.lastDelta = 0;
+			s.pastThreshold = false;
+			const elapsed = Math.max(1, performance.now() - s.dismissStartTime);
+			const flick = dy > DISMISS_FLICK_MIN && dy / elapsed > DISMISS_FLICK_VELOCITY;
+			if (dy > DISMISS_THRESHOLD || flick) {
+				const height = el.offsetHeight || window.innerHeight;
+				el.style.transition = "transform 200ms ease-in, opacity 200ms ease-in";
+				el.style.transform = `translateY(${height}px) scale(0.88)`;
+				el.style.opacity = "0";
+				setScreenBackdrop(1, "background 200ms ease-in");
+				dismissResetTimer = setTimeout(() => {
+					onCloseRef.current();
+					// Still mounted (the close didn't navigate away)? Come back.
+					dismissResetTimer = setTimeout(clearDismissStyles, 300);
+				}, 200);
+				return;
+			}
+			setDismissOffset(0, true);
+			dismissResetTimer = setTimeout(clearDismissStyles, 260);
+		};
+
 		const onEnd = () => {
+			if (s.dismissing) {
+				onDismissEnd();
+				return;
+			}
 			if (!s.dragging) return;
 			s.dragging = false;
 			s.horizontal = false;
@@ -1136,12 +1371,22 @@ export function ProfileDetailsModal({
 			el.removeEventListener("touchmove", onMove);
 			el.removeEventListener("touchend", onEnd);
 			el.removeEventListener("touchcancel", onEnd);
+			if (dismissResetTimer) {
+				clearTimeout(dismissResetTimer);
+				clearDismissStyles();
+			}
+			if (s.dismissing) {
+				s.dismissing = false;
+				clearDismissStyles();
+			}
 		};
 	}, [
 		isOpen,
 		selectedPhotoIndex,
 		variant,
 		hasProfileNeighbors,
+		isEditingOwnProfile,
+		isOverBackground,
 		resetProfileSwipeOffset,
 	]);
 
@@ -1159,7 +1404,8 @@ export function ProfileDetailsModal({
 
 	useEffect(() => {
 		setSelectedPhotoIndex(null);
-		setMobileCarouselPhotoIndex(0);
+		// While editing, adding or removing a photo keeps your place (clamped below).
+		if (!isEditingOwnProfile) setMobileCarouselPhotoIndex(0);
 	}, [activeProfile?.profileId, activeProfilePhotoHashes.length]);
 
 	useEffect(() => {
@@ -1174,17 +1420,20 @@ export function ProfileDetailsModal({
 	useEffect(() => {
 		const el = mobileCarouselRef.current;
 		if (!el || isModalSplit) return;
+		const gesture = createWheelGestureState();
 		const onWheel = (e: WheelEvent) => {
-			const idx = carouselIndexRef.current;
-			const total = carouselTotalRef.current;
-			if (e.deltaY > 0 && idx < total - 1) {
-				e.preventDefault();
-				setMobileCarouselPhotoIndex((i) => Math.min(i + 1, total - 1));
-			} else if (e.deltaY < 0 && idx > 0) {
-				e.preventDefault();
-				setMobileCarouselPhotoIndex((i) => Math.max(i - 1, 0));
+			const direction = startsWheelGesture(gesture, e.deltaY);
+			if (direction !== 0) {
+				const idx = carouselIndexRef.current;
+				const total = carouselTotalRef.current;
+				// At boundary the gesture isn't captured → scroll propagates normally
+				gesture.captured = direction > 0 ? idx < total - 1 : idx > 0;
+				if (gesture.captured) {
+					setMobileCarouselPhotoIndex((i) => Math.min(Math.max(i + direction, 0), total - 1));
+				}
 			}
-			// At boundary: don't preventDefault → scroll propagates normally
+			// Swallow the rest of a captured gesture so its coasting doesn't scroll the page
+			if (gesture.captured && e.deltaY !== 0) e.preventDefault();
 		};
 		el.addEventListener("wheel", onWheel, { passive: false });
 		return () => el.removeEventListener("wheel", onWheel);
@@ -1237,11 +1486,78 @@ export function ProfileDetailsModal({
 	// default-avatar placeholder (if there's no real photo or Right Now slide
 	// to show instead) first, then the Right Now post's image (if any), then
 	// the profile's own photos, then the album slide (if any) last.
+	const ownPhotoOrder = ownPhotoControls?.hashes ?? null;
 	const carouselHashes = useMemo(() => {
+		if (ownPhotoControls && ownPhotoOrder) {
+			return ownPhotoOrder.length < ownPhotoControls.maxPhotos ? [...ownPhotoOrder, ADD_PHOTO_SLIDE_HASH] : ownPhotoOrder;
+		}
 		const base = hasRightNowSlide ? [RIGHT_NOW_SLIDE_HASH, ...activeProfilePhotoHashes] : activeProfilePhotoHashes;
 		const withDefault = showDefaultProfileSlide ? [DEFAULT_PROFILE_SLIDE_HASH, ...base] : base;
 		return albumStatus.hasAlbum ? [...withDefault, ALBUM_SLIDE_HASH] : withDefault;
-	}, [hasRightNowSlide, activeProfilePhotoHashes, albumStatus.hasAlbum, showDefaultProfileSlide]);
+	}, [hasRightNowSlide, activeProfilePhotoHashes, albumStatus.hasAlbum, showDefaultProfileSlide, ownPhotoControls, ownPhotoOrder]);
+
+	// Whenever the slide set changes (entering or leaving edit mode, a photo
+	// added, removed or moved), stay on the photo that was in view. Gone (a
+	// removed photo): keep the position, clamped. A Right Now / album /
+	// placeholder slide that edit mode doesn't have: back to the start. A
+	// different profile is left to the reset above.
+	// Layout effects: the index is fixed before the browser paints. With a
+	// plain effect the new order showed first under the old index for a frame,
+	// so a moved photo slid away and back.
+	const shownCarouselSlideRef = useRef<{ hash: string; profileId: unknown } | null>(null);
+	// The slides jump to their new places without sliding while the set
+	// changes — a swapped neighbour would otherwise glide across the photo
+	// in view (from above it to below it). Back on two frames later.
+	const [isSlideSetChanging, setIsSlideSetChanging] = useState(false);
+	useLayoutEffect(() => {
+		setIsSlideSetChanging(true);
+		let secondFrame = 0;
+		const firstFrame = requestAnimationFrame(() => {
+			secondFrame = requestAnimationFrame(() => setIsSlideSetChanging(false));
+		});
+		return () => {
+			cancelAnimationFrame(firstFrame);
+			cancelAnimationFrame(secondFrame);
+		};
+	}, [carouselHashes]);
+	useLayoutEffect(() => {
+		const shown = shownCarouselSlideRef.current;
+		if (!shown || shown.profileId !== activeProfile?.profileId) return;
+		const found = carouselHashes.indexOf(shown.hash);
+		if (found !== -1) {
+			setMobileCarouselPhotoIndex(found);
+		} else if (shown.hash === RIGHT_NOW_SLIDE_HASH || shown.hash === ALBUM_SLIDE_HASH || shown.hash === DEFAULT_PROFILE_SLIDE_HASH) {
+			setMobileCarouselPhotoIndex(0);
+		} else {
+			setMobileCarouselPhotoIndex((index) => Math.min(index, Math.max(carouselHashes.length - 1, 0)));
+		}
+	}, [carouselHashes]);
+	// After the effect above, so it still sees the slide from before the change.
+	useLayoutEffect(() => {
+		const hash = carouselHashes[mobileCarouselPhotoIndex];
+		shownCarouselSlideRef.current = hash ? { hash, profileId: activeProfile?.profileId } : null;
+	}, [carouselHashes, mobileCarouselPhotoIndex, activeProfile?.profileId]);
+
+	// Moves one of your photos to another slot (0 = main photo); the carousel follows it.
+	const moveOwnPhoto = (hash: string, to: number) => {
+		if (!ownPhotoControls || !ownPhotoOrder || ownPhotoControls.isBusy) return;
+		const from = ownPhotoOrder.indexOf(hash);
+		if (from === -1 || from === to || to < 0 || to >= ownPhotoOrder.length) return;
+		const nextOrder = ownPhotoOrder.filter((item) => item !== hash);
+		nextOrder.splice(to, 0, hash);
+		haptic(10);
+		// The carousel follows the moved photo by itself (see shownCarouselSlideRef).
+		void ownPhotoControls.reorder(nextOrder);
+	};
+
+	// ProfileDetailsContent wires up swiping the mobile carousel; in edit mode it
+	// isn't mounted, so the carousel above the editor gets it from here.
+	useCarouselSwipe(mobileCarouselRef, {
+		enabled: isOwnProfile && isEditingOwnProfile && !isDesktopLike,
+		count: carouselHashes.length,
+		index: mobileCarouselPhotoIndex,
+		onIndexChange: setMobileCarouselPhotoIndex,
+	});
 	const getSlideImageUrl = (hash: string) => {
 		if (hash === RIGHT_NOW_SLIDE_HASH) return rightNowSlideUrl ?? "";
 		if (hash === ALBUM_SLIDE_HASH) return albumStatus.coverUrl ?? "";
@@ -1256,6 +1572,13 @@ export function ProfileDetailsModal({
 		const url = getProfileImageUrl(hash, size);
 		return resolveAvatarSrc(hash, url, { cache: isChatLinkedProfile, sourceUrl: url }) ?? url;
 	};
+	// The grid tile's photo is already cached: shown while the profile loads and
+	// under the first photo until its full size arrives, so opening doesn't
+	// flash an empty box first. Elsewhere a spinner holds the spot.
+	const browseCardImageUrl =
+		selectedBrowseCard?.primaryImageUrl && (!activeProfile || selectedBrowseCard.profileId === String(activeProfile.profileId))
+			? selectedBrowseCard.primaryImageUrl
+			: null;
 	const isRightNowSlideActive = carouselHashes[mobileCarouselPhotoIndex] === RIGHT_NOW_SLIDE_HASH;
 	carouselTotalRef.current = carouselHashes.length;
 
@@ -1266,7 +1589,7 @@ export function ProfileDetailsModal({
 	// would let swiping past the boundary land on an unstyled "photo".
 	const photoUrls = useMemo(() => {
 		return carouselHashes
-			.filter((hash) => hash !== ALBUM_SLIDE_HASH && hash !== DEFAULT_PROFILE_SLIDE_HASH)
+			.filter((hash) => hash !== ALBUM_SLIDE_HASH && hash !== DEFAULT_PROFILE_SLIDE_HASH && hash !== ADD_PHOTO_SLIDE_HASH)
 			.map((hash) => getSlideImageUrl(hash));
 	}, [carouselHashes, rightNowSlideUrl]);
 
@@ -1323,11 +1646,13 @@ export function ProfileDetailsModal({
 	// Bottom left of the profile carousel: "taken on Grindr" for the photo in
 	// view, then when they last tapped you, as matching glass pills.
 	const renderCarouselCornerBadges = () => {
+		// While editing, that corner holds the photo's own labels instead.
+		if (ownPhotoControls) return null;
 		const meta = photoCreatedAtByHash[carouselHashes[mobileCarouselPhotoIndex]];
 		const tapTimestamp = activeProfile?.lastReceivedTapTimestamp ?? null;
 		if (!meta?.takenOnGrindr && tapTimestamp == null) return null;
 		return (
-			<div className="pointer-events-none absolute bottom-3 left-3 z-20 flex flex-row items-center gap-1.5">
+			<div className="pointer-events-none absolute bottom-3 start-3 z-20 flex flex-row items-center gap-1.5">
 				{meta?.takenOnGrindr ? (
 					<TakenOnGrindrBadge variant="pill" label={meta.createdAt ? formatTakenOnGrindrSentence(meta.createdAt, Date.now(), t) : null} />
 				) : null}
@@ -1574,6 +1899,29 @@ export function ProfileDetailsModal({
 		];
 	}, [albumViewer, isSavingAllAlbumMedia, t, handleSaveAllAlbumMedia]);
 
+	// Left/right arrow keys step to the neighbouring profile, the keyboard
+	// counterpart of the page variant's swipe.
+	const isAlbumViewerOpen = albumViewer !== null;
+	useEffect(() => {
+		if (!isOpen || !hasProfileNeighbors || selectedPhotoIndex !== null || isAlbumViewerOpen || isEditingOwnProfile) {
+			return;
+		}
+		const onKeyDown = (e: KeyboardEvent) => {
+			if (e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+			if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+			// Arrow keys in a text field move the caret.
+			const target = e.target as HTMLElement | null;
+			if (target?.isContentEditable || target?.closest("input, textarea, select")) return;
+			if (pendingSwipeResetRef.current) return;
+			const go = e.key === "ArrowLeft" ? onPrevProfileRef.current : onNextProfileRef.current;
+			if (!go) return;
+			e.preventDefault();
+			go();
+		};
+		window.addEventListener("keydown", onKeyDown);
+		return () => window.removeEventListener("keydown", onKeyDown);
+	}, [isOpen, hasProfileNeighbors, selectedPhotoIndex, isAlbumViewerOpen, isEditingOwnProfile]);
+
 	const sendAlbumContentReaction = useCallback(
 		async (albumId: number, albumContentId: number, targetProfileId: number) => {
 			try {
@@ -1698,6 +2046,25 @@ export function ProfileDetailsModal({
 		}
 	}, [albumStatus.hasSharedWithMe, albumStatus.albumId, isOpeningAlbum, apiFunctions, messageProfileId, activeProfileName, activeProfilePhotoHashes, profileOnlineUntil, profileDistance, t, openAlbumAsBottomSheet, pushAlbumViewerHistory, resetAlbumViewerState, closeAlbumViewer]);
 
+	// A "favorite updated their album" push opens the profile with
+	// `openAlbumId` in the router state — open the album on top once the share
+	// check is in, so back lands on the profile. The flag is dropped from the
+	// history entry so returning to it later doesn't reopen the album.
+	const location = useLocation();
+	const requestedAlbumId = (location.state as { openAlbumId?: unknown } | null)?.openAlbumId;
+	const autoOpenedAlbumKeyRef = useRef<string | null>(null);
+	useEffect(() => {
+		if (requestedAlbumId == null || autoOpenedAlbumKeyRef.current === location.key) return;
+		if (!activeProfile || !albumStatus.hasSharedWithMe || albumStatus.albumId == null) return;
+		autoOpenedAlbumKeyRef.current = location.key;
+		const state = window.history.state as { usr?: Record<string, unknown> } | null;
+		if (state?.usr) {
+			const { openAlbumId: _omit, ...usr } = state.usr;
+			window.history.replaceState({ ...state, usr }, "");
+		}
+		void handleAlbumSlideClick();
+	}, [requestedAlbumId, location.key, activeProfile, albumStatus.hasSharedWithMe, albumStatus.albumId, handleAlbumSlideClick]);
+
 	const albumViewerPhotos = useMemo(() => {
 		if (!albumViewer) return [];
 		return albumViewer.content.map((item) => ({
@@ -1709,7 +2076,9 @@ export function ProfileDetailsModal({
 	// "We just hooked up" — same encounter logging as the chat header
 	// menu, gated by the same Sexual Health optional-feature toggle.
 	const [showSexualHealth] = useState(isSexualHealthEnabled);
-	const [showLocate] = useState(isLocateEnabled);
+	const [isLocateFeatureEnabled] = useState(isLocateEnabled);
+	// Locate trilaterates from distances, so it's pointless without one.
+	const showLocate = isLocateFeatureEnabled && profileDistance != null;
 	const [encounterPrefill, setEncounterPrefill] = useState<PickedPerson | null>(null);
 	const canLogEncounter = showSexualHealth && messageProfileId != null && !isOwnProfile;
 
@@ -1771,9 +2140,9 @@ export function ProfileDetailsModal({
 			<button
 				type="button"
 				onClick={handleEditNickname}
-				className="flex items-center rounded-sm px-2 py-2 text-left text-sm text-[var(--text)] transition hover:bg-[var(--surface-2)]"
+				className="flex items-center rounded-sm px-2 py-2 text-start text-sm text-[var(--text)] transition hover-fill"
 			>
-				<PencilLineFilled className="mr-2 h-4 w-4 opacity-70" />
+				<PencilLineFilled className="me-2 h-4 w-4 opacity-70" />
 				<NicknameMenuItemLabel
 					label={localNickname ? t("chat.nicknames.edit") : t("chat.nicknames.set")}
 					realName={nicknameNameChange.realName}
@@ -1787,9 +2156,9 @@ export function ProfileDetailsModal({
 		<button
 			type="button"
 			onClick={() => void handleLogEncounter()}
-			className="flex items-center rounded-sm px-2 py-2 text-left text-sm text-[var(--text)] transition hover:bg-[var(--surface-2)]"
+			className="flex items-center rounded-sm px-2 py-2 text-start text-sm text-[var(--text)] transition hover-fill"
 		>
-			<BananaFilled className="mr-2 h-4 w-4 opacity-70" />
+			<BananaFilled className="me-2 h-4 w-4 opacity-70" />
 			{t("chat.log_encounter", { defaultValue: "We just hooked up" })}
 		</button>
 	) : null;
@@ -1805,9 +2174,9 @@ export function ProfileDetailsModal({
 			<button
 				type="button"
 				onClick={() => { setIsActionsMenuOpen(false); setIsReportDialogOpen(true); }}
-				className="flex items-center rounded-sm px-2 py-2 text-left text-sm text-red-400 transition hover:bg-[var(--surface-2)]"
+				className="flex items-center rounded-sm px-2 py-2 text-start text-sm text-red-400 transition hover:bg-red-500/10 active:bg-red-500/15"
 			>
-				<Flag className="mr-2 h-4 w-4 fill-current opacity-70" />
+				<Flag className="me-2 h-4 w-4 fill-current opacity-70" />
 				{t("profile_details.report.menu_item")}
 			</button>
 			</div>
@@ -1890,10 +2259,128 @@ export function ProfileDetailsModal({
 		</>
 	);
 
+	// The actions for the photo in view: one bar fixed bottom center of the
+	// carousel, so it stays put while swiping (on the add slide only "manage"
+	// works). The avatar button doubles as the main-photo label: highlighted on the first
+	// photo, "make main photo" on the others. A review state hangs off the
+	// bar's left side, so the bar itself never shifts.
+	const renderOwnPhotoActions = () => {
+		if (!ownPhotoControls || !ownPhotoOrder) return null;
+		const hash = carouselHashes[mobileCarouselPhotoIndex] ?? "";
+		const position = ownPhotoOrder.indexOf(hash);
+		const isPhoto = position !== -1;
+		const isPrimary = position === 0;
+		const isBusy = ownPhotoControls.isBusy;
+		const moderation = isPhoto ? ownPhotoControls.moderationByHash.get(hash) : undefined;
+		const isPending = moderation?.state === MEDIA_MODERATION_STATE.PENDING;
+		const isRejected = moderation?.state === MEDIA_MODERATION_STATE.REJECTED;
+		const moderationLabel = isRejected
+			? t("profile_editor.sections.pictures.rejected")
+			: t("profile_editor.sections.pictures.pending_moderation");
+		const actionClass = "flex h-9 w-9 items-center justify-center rounded-full text-white transition-colors hover:bg-white/15 disabled:pointer-events-none disabled:opacity-35";
+		const moveUpLabel = t("profile_editor.sections.pictures.move_up", { defaultValue: "Move up" });
+		const moveDownLabel = t("profile_editor.sections.pictures.move_down", { defaultValue: "Move down" });
+		const primaryLabel = isPrimary
+			? t("profile_editor.sections.pictures.primary")
+			: t("profile_editor.sections.pictures.set_primary");
+		return (
+			// The outer box only centers; the glass sits on the bar and on the
+			// round buttons beside it (a blur nested in another blur shows none).
+			<div className="absolute bottom-3 left-1/2 z-20 flex -translate-x-1/2 items-center gap-2">
+				{(isPending || isRejected) && (
+					<span
+						title={moderation?.reason ? `${moderationLabel}: ${moderation.reason}` : moderationLabel}
+						aria-label={moderationLabel}
+						className={`absolute end-full top-1/2 me-2 flex h-9 w-9 -translate-y-1/2 items-center justify-center rounded-full text-white shadow-sm ${isRejected ? "bg-red-500/90" : "bg-amber-500/90"}`}
+					>
+						{isRejected ? <AlertTriangle className="h-[18px] w-[18px]" /> : <Clock className="h-[18px] w-[18px]" />}
+					</span>
+				)}
+				<div className="flex items-center gap-0.5 rounded-full bg-black/45 p-1 backdrop-blur-md">
+					<button
+						type="button"
+						onClick={() => moveOwnPhoto(hash, 0)}
+						// On the main photo it's a label, not a no-op button.
+						disabled={isBusy || !isPhoto || isPrimary}
+						aria-label={primaryLabel}
+						aria-pressed={isPhoto ? isPrimary : undefined}
+						title={primaryLabel}
+						className={`${actionClass} ${isPrimary ? "bg-[var(--accent)] shadow-sm disabled:opacity-100" : ""}`}
+					>
+						<CircleUserRound className="h-[18px] w-[18px]" />
+					</button>
+					<button
+						type="button"
+						onClick={() => moveOwnPhoto(hash, position - 1)}
+						disabled={isBusy || !isPhoto || position === 0}
+						aria-label={moveUpLabel}
+						title={moveUpLabel}
+						className={actionClass}
+					>
+						<ChevronUp className="h-[18px] w-[18px]" />
+					</button>
+					<button
+						type="button"
+						onClick={() => moveOwnPhoto(hash, position + 1)}
+						disabled={isBusy || !isPhoto || position === ownPhotoOrder.length - 1}
+						aria-label={moveDownLabel}
+						title={moveDownLabel}
+						className={actionClass}
+					>
+						<ChevronDown className="h-[18px] w-[18px]" />
+					</button>
+					<button
+						type="button"
+						onClick={() => { haptic(10); void ownPhotoControls.remove(hash); }}
+						disabled={isBusy || !isPhoto}
+						aria-label={t("profile_editor.sections.pictures.remove")}
+						title={t("profile_editor.sections.pictures.remove")}
+						className={`${actionClass} hover:bg-red-500`}
+					>
+						<Trash2 className="h-[18px] w-[18px]" />
+					</button>
+				</div>
+				{/* Not about the photo in view, so set apart: its own round button
+				    beside the bar; the two are centered as one group. */}
+				<button
+					type="button"
+					onClick={ownPhotoControls.openManager}
+					aria-label={t("profile_editor.sections.pictures.manage")}
+					title={t("profile_editor.sections.pictures.manage")}
+					className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-black/45 text-white backdrop-blur-md transition-colors hover:bg-black/60"
+				>
+					<Images className="h-[18px] w-[18px]" />
+				</button>
+			</div>
+		);
+	};
+
 	// Shared between both the mobile/inline and split-desktop carousel
 	// blocks below — renders a slide's tappable content for a given hash,
 	// swapping in the album cover/lock overlay in place of a plain photo.
 	const renderCarouselSlideContent = (hash: string, index: number) => {
+		if (hash === ADD_PHOTO_SLIDE_HASH && ownPhotoControls) {
+			return (
+				<button
+					type="button"
+					onClick={ownPhotoControls.openManager}
+					className="group absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 bg-[var(--surface-2)] text-[var(--text-muted)] transition-colors hover:text-[var(--accent)]"
+				>
+					<span className="flex h-16 w-16 items-center justify-center rounded-full ink-tint-6 transition-transform duration-150 group-hover:ink-tint-10 group-active:scale-95">
+						{ownPhotoControls.isUploading ? <Loader2 className="h-7 w-7 animate-spin" /> : <Plus className="h-7 w-7" />}
+					</span>
+					<span className="text-sm font-semibold">
+						{ownPhotoControls.isUploading
+							? t("profile_editor.sections.pictures.uploading")
+							: t("profile_editor.sections.pictures.add_photo", { defaultValue: "Add photo" })}
+					</span>
+					<span className="text-xs tabular-nums opacity-70">
+						{ownPhotoOrder?.length ?? 0}/{ownPhotoControls.maxPhotos}
+					</span>
+				</button>
+			);
+		}
+
 		if (hash === DEFAULT_PROFILE_SLIDE_HASH) {
 			// Non-interactive, same as the old standalone placeholder — there's
 			// no real photo behind this slide to open a viewer for.
@@ -1968,10 +2455,22 @@ export function ProfileDetailsModal({
 					className="absolute inset-0 z-10"
 					aria-label={t("profile_details.open_photo", { index: index + 1 })}
 				/>
+				{/* Covered by the photo once it has loaded. */}
+				<div className="absolute inset-0 flex items-center justify-center" aria-hidden="true">
+					<Loader2 className="h-7 w-7 animate-spin text-white/60" />
+				</div>
+				{browseCardImageUrl && hash === activeProfilePhotoHashes[0] && (
+					<ProfileImage
+						src={browseCardImageUrl}
+						alt=""
+						className="absolute inset-0 h-full w-full object-cover"
+						revealed={!photoReveal.isBlurred(hash)}
+					/>
+				)}
 				<ProfileImage
 					src={getSlideImageUrl(hash)}
 					alt={t("profile_details.photo_alt", { name: activeProfileName })}
-					className="h-full w-full object-cover"
+					className="relative h-full w-full object-cover"
 					revealed={!photoReveal.isBlurred(hash)}
 				/>
 			</>
@@ -1981,17 +2480,19 @@ export function ProfileDetailsModal({
 	// Floating bar to message or tap the profile: one frosted pill hovering
 	// over the content, like the location sheet's search (MapSheetSearch).
 	// Message turns into a filled send button once there's text.
+	const hasQuickMessageBar = Boolean(messageProfileId) && !isOwnProfile;
 	const renderQuickMessageBar = (paddingBottom: string) => {
 		const sendDraft = () => {
-			if (!quickMessageDraft.trim()) return;
-			onSendQuickMessage?.(String(messageProfileId), quickMessageDraft.trim());
+			// Without a handler there's nowhere to send it, so keep the draft.
+			if (!quickMessageDraft.trim() || !onSendQuickMessage) return;
+			onSendQuickMessage(String(messageProfileId), quickMessageDraft.trim());
 			setQuickMessageDraft("");
 		};
 		const hasDraft = quickMessageDraft.trim().length > 0;
 		return (
 			// The dark fade stays from before; only the pill takes touches.
 			<div
-				className="pointer-events-none absolute inset-x-0 bottom-0 z-30 px-3"
+				className="pointer-events-none absolute inset-x-0 bottom-0 z-30 px-4"
 				style={{
 					paddingTop: "5rem",
 					paddingBottom,
@@ -2011,26 +2512,28 @@ export function ProfileDetailsModal({
 					>
 						{/* Just the field floats as a pill; tap and chat sit next to it.
 						    It fades out while the tap picker is open. */}
-						<div
+						{/* A form so Enter (and the mobile keyboard's send key) submits natively. */}
+						<form
 							className="min-w-0 flex-1 rounded-full bg-[color-mix(in_srgb,var(--surface)_82%,transparent)] p-1 shadow-[0_2px_6px_rgba(0,0,0,0.18),0_8px_28px_rgba(0,0,0,0.32)] ring-1 ring-[var(--border)]/50 backdrop-blur-xl focus-within:ring-2 focus-within:ring-[var(--accent)]"
 							style={{
 								pointerEvents: barInputVisible ? "auto" : "none",
 								opacity: barInputVisible ? 1 : 0,
 								transition: barInputVisible ? "opacity 0.25s" : "opacity 0.12s",
 							}}
+							onSubmit={(e) => {
+								e.preventDefault();
+								sendDraft();
+							}}
 						>
 							<input
 								type="text"
 								value={quickMessageDraft}
 								onChange={(e) => setQuickMessageDraft(e.target.value)}
-								onKeyDown={(e) => {
-									if (e.key === "Enter") sendDraft();
-								}}
 								enterKeyHint="send"
 								placeholder={t("profile_details.quick_message_placeholder", "Message...")}
 								className="h-10 w-full bg-transparent px-4 text-[15px] text-[var(--text)] placeholder:text-[var(--text-muted)] outline-none"
 							/>
-						</div>
+						</form>
 						<div
 							className="transition-[max-width] duration-200 ease-out"
 							style={{ maxWidth: barTapPickerOpen ? `${3 * 52}px` : "0px", overflowX: barTapPickerOpen ? "visible" : "clip", overflowY: "visible" }}
@@ -2060,6 +2563,7 @@ export function ProfileDetailsModal({
 							onPointerCancel={() => { setBarTapPickerOpen(false); setBarTapHoverId(null); barTapStickyRef.current = false; if (barTapLongPressRef.current) clearTimeout(barTapLongPressRef.current); barInputTimerRef.current = setTimeout(() => setBarInputVisible(true), 210); }}
 							disabled={isTapDisabled}
 							aria-label={t("profile_details.tap", { defaultValue: "Tap" })}
+							title={isBarTapMutual ? t("browse_page.tile_tap.mutual", { defaultValue: "You tapped each other" }) : undefined}
 							className={`tap-btn-base bar-icon-btn relative inline-flex h-12 w-12 shrink-0 items-center justify-center rounded-full border-none bg-transparent text-2xl leading-none transition-all active:scale-90 touch-none select-none ${isTappingProfile ? "opacity-40" : ""} ${barTapPickerOpen ? "text-white/70" : isTapActive || barTapHoverId !== null ? "text-white" : "text-white/70"}`}
 							style={isTapBlocked ? { filter: barTapGlow(tapVisualState.tapId) } : !barTapPickerOpen && barTapHoverId !== null ? { filter: barTapGlow(barTapHoverId) } : undefined}
 						>
@@ -2067,9 +2571,17 @@ export function ProfileDetailsModal({
 								? <X className="h-5 w-5" strokeWidth={2} />
 								: barTapHoverId !== null
 									? barTapEmoji(barTapHoverId)
-									: isTapActive
-										? barTapEmoji(tapVisualState.tapId)
-										: <Flame className="h-5 w-5" strokeWidth={1.8} />
+									: isBarTapMutual
+										? (
+											// Mutual: ours in front, theirs tucked behind it, as a pair.
+											<span className="inline-flex items-center text-[19px] leading-none">
+												<span className="relative z-10 translate-y-1 drop-shadow-[2px_0_2px_rgba(0,0,0,0.65)]">{barTapEmoji(tapVisualState.tapId)}</span>
+												<span className="-ms-2 -translate-y-1">{barTapEmoji(receivedTapType ?? 1)}</span>
+											</span>
+										)
+										: isTapActive
+											? barTapEmoji(tapVisualState.tapId)
+											: <Flame className="h-5 w-5" strokeWidth={1.8} />
 							}
 						</button>
 						{(onMessageProfile || onSendQuickMessage) && (
@@ -2089,7 +2601,7 @@ export function ProfileDetailsModal({
 									<span className="relative inline-flex">
 										<MessageCircle className="h-5 w-5" strokeWidth={1.8} />
 										{(chatContactStatus?.unreadCount ?? 0) > 0 && (
-											<span className="absolute -top-1.5 -right-2 flex h-4 min-w-[16px] items-center justify-center rounded-full bg-[var(--accent)] px-1 text-[9px] font-bold text-[var(--accent-contrast)] shadow-sm">
+											<span className="absolute -top-1.5 -end-2 flex h-4 min-w-[16px] items-center justify-center rounded-full bg-[var(--accent)] px-1 text-[9px] font-bold text-[var(--accent-contrast)] shadow-sm">
 												{chatContactStatus?.unreadCount}
 											</span>
 										)}
@@ -2111,7 +2623,7 @@ export function ProfileDetailsModal({
 	const renderPreviewDetails = (detail: ProfileDetail) => {
 		const flags = getContentFlags(detail);
 		const meta = getOnlineStatusMeta(detail.seen, detail.onlineUntil);
-		const status = getProfileStatusDisplay(meta, t);
+		const status = getProfileStatusDisplay(meta, t, showOnlineTimeLeft);
 		return (
 			<ProfileDetailsContent
 				activeProfile={detail}
@@ -2121,7 +2633,7 @@ export function ProfileDetailsModal({
 				mobileCarouselRef={previewCarouselRef}
 				mobileCarouselPhotoIndex={0}
 				openPhotoViewer={() => {}}
-				activeProfileName={detail.displayName?.trim() || t("profile_details.anonymous", "Someone")}
+				activeProfileName={detail.displayName?.trim() || t("common.unknown_display_name")}
 				estimatedCreatedAt={formatEstimatedAccountCreation(detail.profileId, t)}
 				travelPlans={queryClient.getQueryData<TravelPlan[]>(["travel-plans", String(detail.profileId)])}
 				profileStatusLabel={status.label}
@@ -2156,9 +2668,11 @@ export function ProfileDetailsModal({
 			>
 				<div
 					// Frosted like the other headers (86% + blur) instead of turning fully solid.
+					// Inline it's in the card's own fill, set off by a soft shadow instead of a
+					// divider line (the neutral border didn't match the tinted card).
 					ref={headerBgRef}
 					// Opacity is driven by the scroll handler above.
-					className={`absolute inset-0 opacity-0 backdrop-blur-xl ${variant === "page" ? "bg-[color-mix(in_srgb,var(--bg)_86%,transparent)]" : "bg-[color-mix(in_srgb,var(--surface-2)_86%,transparent)]"}${inlineScrolled ? " border-b border-[var(--border)]/60" : ""}`}
+					className={`absolute inset-0 opacity-0 backdrop-blur-xl ${variant === "page" ? "bg-[color-mix(in_srgb,var(--bg)_86%,transparent)]" : "bg-[color-mix(in_srgb,var(--card-bg,var(--surface))_86%,transparent)]"}${inlineScrolled ? " shadow-[0_6px_16px_-8px_rgba(0,0,0,0.45)]" : ""}`}
 					aria-hidden="true"
 				/>
 				<div className="pointer-events-auto relative flex w-full items-center gap-3">
@@ -2184,11 +2698,12 @@ export function ProfileDetailsModal({
 					{isOwnProfile && (
 						<button
 							type="button"
-							onClick={() => navigate("/settings/profile-editor")}
+							onClick={toggleOwnProfileEdit}
 							className={`header-icon-btn inline-flex shrink-0 items-center justify-center rounded-xl border p-2 transition-colors ${inlineScrolled ? "border-[var(--border)] bg-[var(--surface-2)] text-[var(--text)]" : "border-white/45 bg-transparent text-white shadow-[0_10px_28px_-18px_rgba(0,0,0,0.95)] backdrop-blur-md drop-shadow-[0_1px_2px_rgba(0,0,0,0.85)]"}`}
-							aria-label={t("profile_editor.edit_profile")}
+							aria-label={ownProfileEditLabel}
+							title={ownProfileEditLabel}
 						>
-							<Pencil className="h-4 w-4" />
+							{isEditingOwnProfile ? <X className="h-4 w-4" /> : <Pencil className="h-4 w-4" />}
 						</button>
 					)}
 					{messageProfileId && !isOwnProfile && (
@@ -2235,16 +2750,16 @@ export function ProfileDetailsModal({
 								</button>
 								{nicknameNameChangeBadge}
 								{actionsMenuPresence.rendered && (
-									<div data-lenis-prevent style={menuTransitionStyle(actionsMenuPresence.visible)} className="absolute right-0 top-full z-50 mt-1 flex max-h-[calc(100dvh-8rem)] min-w-[190px] flex-col gap-2 overflow-y-auto overscroll-contain rounded-lg border border-[var(--border)] bg-[var(--surface)] py-2 shadow-lg">
+									<div data-lenis-prevent style={menuTransitionStyle(actionsMenuPresence.visible)} className="absolute end-0 top-full z-50 mt-1 flex max-h-[calc(100dvh-8rem)] min-w-[190px] flex-col gap-2 overflow-y-auto overscroll-contain rounded-lg menu-surface py-2">
 										<div className="flex flex-col gap-1 px-2">
 										{showLocate && (
 										<button
 											type="button"
 											disabled={isTriangleDisabled}
 											onClick={() => { setIsActionsMenuOpen(false); if (messageProfileId) onTriangleProfile?.(String(messageProfileId)); }}
-											className="flex items-center rounded-sm px-2 py-2 text-left text-sm text-[var(--text)] transition hover:bg-[var(--surface-2)] disabled:opacity-50"
+											className="flex items-center rounded-sm px-2 py-2 text-start text-sm text-[var(--text)] transition hover-fill disabled:opacity-50"
 										>
-											<LocateFixedFilled className="mr-2 h-4 w-4 opacity-70" />
+											<LocateFixedFilled className="me-2 h-4 w-4 opacity-70" />
 											{locateLabel ?? t("profile_details.locate")}
 										</button>
 										)}
@@ -2253,9 +2768,9 @@ export function ProfileDetailsModal({
 											type="button"
 											disabled={isProfileUnavailable}
 											onClick={() => { setIsActionsMenuOpen(false); if (!messageProfileId || isProfileUnavailable) return; isHidden ? onUnhideProfile?.(String(messageProfileId)) : onHideProfile?.(String(messageProfileId)); }}
-											className="flex items-center rounded-sm px-2 py-2 text-left text-sm text-[var(--text)] transition hover:bg-[var(--surface-2)] disabled:opacity-50"
+											className="flex items-center rounded-sm px-2 py-2 text-start text-sm text-[var(--text)] transition hover-fill disabled:opacity-50"
 										>
-											{isHidden ? <EyeFilled className="mr-2 h-4 w-4 opacity-70" /> : <EyeOffFilled className="mr-2 h-4 w-4 opacity-70" />}
+											{isHidden ? <EyeFilled className="me-2 h-4 w-4 opacity-70" /> : <EyeOffFilled className="me-2 h-4 w-4 opacity-70" />}
 											{isHidden ? t("profile_details.unhide") : t("profile_details.hide")}
 										</button>
 										)}
@@ -2269,26 +2784,20 @@ export function ProfileDetailsModal({
 											<button
 												type="button"
 												onClick={handleBanBioPhrase}
-												className="flex items-center rounded-sm px-2 py-2 text-left text-sm text-[var(--text)] transition hover:bg-[var(--surface-2)]"
+												className="flex items-center rounded-sm px-2 py-2 text-start text-sm text-[var(--text)] transition hover-fill"
 											>
-												<Ban className="mr-2 h-4 w-4 opacity-70" />
-												<span className="flex flex-col">
-													<span>{t("profile_details.ban_bio_title")}</span>
-													<span className="text-xs text-[var(--text-muted)]">{t("profile_details.ban_keyword_source_bio", { defaultValue: "Bio phrase" })}</span>
-												</span>
+												<Ban className="me-2 h-4 w-4 opacity-70" />
+												{t("profile_details.ban_keyword_menu_bio", { defaultValue: "Ban word from bio" })}
 											</button>
 										)}
 										{actualProfileName && (
 											<button
 												type="button"
 												onClick={handleBanProfileName}
-												className="flex items-center rounded-sm px-2 py-2 text-left text-sm text-[var(--text)] transition hover:bg-[var(--surface-2)]"
+												className="flex items-center rounded-sm px-2 py-2 text-start text-sm text-[var(--text)] transition hover-fill"
 											>
-												<Ban className="mr-2 h-4 w-4 opacity-70" />
-												<span className="flex flex-col">
-													<span>{t("profile_details.ban_bio_title")}</span>
-													<span className="text-xs text-[var(--text-muted)]">{t("profile_details.ban_keyword_source_name", { defaultValue: "Profile name" })}</span>
-												</span>
+												<Ban className="me-2 h-4 w-4 opacity-70" />
+												{t("profile_details.ban_keyword_menu_name", { defaultValue: "Ban word from name" })}
 											</button>
 										)}
 										</div>
@@ -2306,10 +2815,14 @@ export function ProfileDetailsModal({
 			<div ref={scrollContainerRef} className="min-h-0 flex-1 overflow-y-auto overscroll-contain" data-lenis-prevent>
 				{isLoadingActiveProfile && (
 					<div
-						className="animate-pulse bg-[var(--surface-2)]"
+						className="flex items-center justify-center overflow-hidden bg-black"
 						style={{ height: variant === "page" ? PAGE_CAROUSEL_HEIGHT : "min(55dvh, calc((100vw - 3rem) * 1.25))" }}
 						aria-hidden="true"
-					/>
+					>
+						{browseCardImageUrl
+							? <ProfileImage src={browseCardImageUrl} alt="" className="h-full w-full object-cover" />
+							: <Loader2 className="h-7 w-7 animate-spin text-white/60" />}
+					</div>
 				)}
 				{!isLoadingActiveProfile && !activeProfileError && activeProfile && (
 					<div
@@ -2337,22 +2850,22 @@ export function ProfileDetailsModal({
 									// --carousel-drag / --carousel-transition are set on the
 									// carousel by ProfileDetailsContent's touch handler.
 									transform: `translateY(calc(${(index - mobileCarouselPhotoIndex) * 100}% + var(--carousel-drag, 0px)))`,
-									transition: "var(--carousel-transition, transform 300ms ease-out)",
+									transition: isSlideSetChanging ? "none" : "var(--carousel-transition, transform 300ms ease-out)",
 								}}
 							>
 								{renderCarouselSlideContent(hash, index)}
 							</div>
 						))}
 						{renderCarouselCornerBadges()}
+						{renderOwnPhotoActions()}
 						{carouselHashes.length > 1 && (
-							<div className="absolute inset-y-0 right-3 z-20 flex flex-col items-center justify-center">
+							<div className="absolute inset-y-0 end-3 z-20 flex flex-col items-center justify-center">
 								<div className="flex flex-col items-center gap-1.5 rounded-full bg-black/30 px-[5px] py-[10px] backdrop-blur-sm">
 									{carouselHashes.map((hash, index) => (
 										<button
-											key={`${hash}-dot`}
+											key={`dot-${index}`}
 											type="button"
 											onClick={() => {
-												if (index !== mobileCarouselPhotoIndex) haptic(8);
 												setMobileCarouselPhotoIndex(index);
 											}}
 											className="flex items-center justify-center p-1.5 -m-1.5"
@@ -2393,11 +2906,13 @@ export function ProfileDetailsModal({
 						)}
 					</div>
 				)}
-				<div className={`p-4 sm:p-5 ${variant === "page" ? "pb-[calc(env(safe-area-inset-bottom,0px)+6rem)] sm:pb-[calc(env(safe-area-inset-bottom,0px)+6rem)]" : "pb-28"}`}>
+				<div className={`p-4 sm:p-5 ${isEditingOwnProfile ? "pb-0 sm:pb-0" : !hasQuickMessageBar ? (variant === "page" ? "pb-[calc(var(--safe-area-bottom)+1rem)] sm:pb-[calc(var(--safe-area-bottom)+1.25rem)]" : "") : variant === "page" ? "pb-[calc(var(--safe-area-bottom)+6rem)] sm:pb-[calc(var(--safe-area-bottom)+6rem)]" : "pb-28"}`}>
 					{isLoadingActiveProfile ? (
 						<ProfileDetailsSkeleton />
 					) : activeProfileError ? (
 						<p className="text-sm text-[var(--text-muted)]">{activeProfileError}</p>
+					) : activeProfile && isOwnProfile && isEditingOwnProfile ? (
+						<OwnProfileEditPanel onDone={finishOwnProfileEdit} onDirtyChange={setHasUnsavedOwnEdits} onPhotoHashesChange={setEditedOwnPhotoHashes} onPhotoControlsChange={setOwnPhotoControls} />
 					) : activeProfile ? (
 						<ProfileDetailsContent
 							activeProfile={activeProfile}
@@ -2455,8 +2970,8 @@ export function ProfileDetailsModal({
 			</div>
 
 			{/* Floating message bar, like the chat's composer */}
-			{messageProfileId && !isOwnProfile &&
-				renderQuickMessageBar(variant === "page" ? "calc(env(safe-area-inset-bottom,0px) + 0.75rem)" : "0.75rem")}
+			{hasQuickMessageBar &&
+				renderQuickMessageBar(variant === "page" ? "max(1rem, var(--safe-area-bottom))" : "1rem")}
 		</>
 	);
 
@@ -2466,7 +2981,7 @@ export function ProfileDetailsModal({
 
 	if (variant === "page") {
 		return (
-			<div className="app-screen relative flex h-dvh flex-col w-full !px-0 !pb-0 !pt-0 overflow-x-hidden bg-[var(--bg)]">
+			<div ref={pageScreenRef} className={`app-screen flex h-dvh flex-col w-full !px-0 !pb-0 !pt-0 overflow-x-hidden bg-[var(--bg)] ${isOverBackground ? "fixed inset-0 z-[60]" : "relative"}`}>
 				<div
 					ref={pageWrapRef}
 					// translateX is driven by the profile swipe handler.
@@ -2488,9 +3003,11 @@ export function ProfileDetailsModal({
 				{encounterSheet}
 				{nicknamePrompt}
 				{reportDialog}
+				{discardEditsDialog}
 				<PromptDialog
 					isOpen={banBioPrompt !== null}
 					title={t("profile_details.ban_bio_title")}
+					rows={6}
 					message={t("profile_details.ban_bio_prompt")}
 					defaultValue={banBioPrompt?.text ?? ""}
 					confirmLabel={t("chat.actions.ban_word_confirm", { defaultValue: "Add" })}
@@ -2507,6 +3024,7 @@ export function ProfileDetailsModal({
 				<PromptDialog
 					isOpen={banNamePrompt !== null}
 					title={t("profile_details.ban_bio_title")}
+					rows={6}
 					message={t("chat.actions.ban_name_prompt", {
 						defaultValue: "Trim this down to the exact name or phrase you want to ban:",
 					})}
@@ -2530,11 +3048,11 @@ export function ProfileDetailsModal({
 
 	return (
 		<div
-			className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-6"
+			className="fixed inset-0 z-[60] flex animate-backdrop-in items-center justify-center bg-black/60 p-6"
 			onClick={handleBackdropClose}
 		>
 			<div
-				className="native-card flex w-full max-w-[min(80vw,1300px)] overflow-hidden rounded-2xl"
+				className="native-card flex w-full max-w-[min(80vw,1300px)] animate-modal-zoom-in overflow-hidden rounded-2xl motion-reduce:animate-none"
 				style={{
 					flexDirection: isModalSplit ? "row" : "column",
 					maxHeight: isModalSplit ? "calc(100dvh - 8rem)" : "calc(100dvh - 1.5rem)",
@@ -2543,17 +3061,25 @@ export function ProfileDetailsModal({
 				onClick={(event) => event.stopPropagation()}
 			>
 				{/* Left panel: full-height photo carousel (split mode only) */}
-				{isModalSplit && isLoadingActiveProfile && (
-					<div className="relative shrink-0 animate-pulse overflow-hidden bg-[var(--surface-2)]" style={{ width: "54%" }} aria-hidden="true" />
-				)}
+				{isModalSplit && isLoadingActiveProfile && (browseCardImageUrl ? (
+					<div className="relative shrink-0 overflow-hidden bg-black" style={{ width: "54%" }} aria-hidden="true">
+						<ProfileImage src={browseCardImageUrl} alt="" className="h-full w-full object-cover" />
+					</div>
+				) : (
+					<div className="relative flex shrink-0 items-center justify-center overflow-hidden bg-black" style={{ width: "54%" }} aria-hidden="true">
+						<Loader2 className="h-7 w-7 animate-spin text-white/60" />
+					</div>
+				))}
 				{isModalSplit && !isLoadingActiveProfile && !activeProfileError && activeProfile && (
 					<div
 						className="relative shrink-0 overflow-hidden bg-black"
 						style={{ width: "54%" }}
 						onWheel={(e) => {
 							e.preventDefault();
-							if (e.deltaY > 0) setMobileCarouselPhotoIndex((i) => Math.min(i + 1, carouselHashes.length - 1));
-							else if (e.deltaY < 0) setMobileCarouselPhotoIndex((i) => Math.max(i - 1, 0));
+							const direction = startsWheelGesture(splitWheelGestureRef.current, e.deltaY);
+							if (direction !== 0) {
+								setMobileCarouselPhotoIndex((i) => Math.min(Math.max(i + direction, 0), carouselHashes.length - 1));
+							}
 						}}
 					>
 						{isRightNowSlideActive && (
@@ -2569,14 +3095,15 @@ export function ProfileDetailsModal({
 								className="absolute inset-0 overflow-hidden"
 								style={{
 									transform: `translateY(${(index - mobileCarouselPhotoIndex) * 100}%)`,
-									transition: "transform 300ms ease-out",
+									transition: isSlideSetChanging ? "none" : "transform 300ms ease-out",
 								}}
 							>
 								{renderCarouselSlideContent(hash, index)}
 							</div>
 						))}
 						{renderCarouselCornerBadges()}
-						{carouselHashes.length > 1 && (
+						{renderOwnPhotoActions()}
+						{!ownPhotoControls && carouselHashes.length > 1 && (
 							<>
 								<button
 									type="button"
@@ -2599,14 +3126,13 @@ export function ProfileDetailsModal({
 							</>
 						)}
 						{carouselHashes.length > 1 && (
-							<div className="absolute inset-y-0 right-4 z-20 flex flex-col items-center justify-center">
+							<div className="absolute inset-y-0 end-4 z-20 flex flex-col items-center justify-center">
 								<div className="flex flex-col items-center gap-2 rounded-full bg-black/30 px-[7px] py-[14px] backdrop-blur-sm">
 									{carouselHashes.map((hash, index) => (
 										<button
-											key={`${hash}-dot`}
+											key={`dot-${index}`}
 											type="button"
 											onClick={() => {
-												if (index !== mobileCarouselPhotoIndex) haptic(8);
 												setMobileCarouselPhotoIndex(index);
 											}}
 											className="flex items-center justify-center p-1.5 -m-1.5"
@@ -2650,10 +3176,14 @@ export function ProfileDetailsModal({
 
 				{/* Right column (or full width on non-split): header + content + footer */}
 				<div className="relative flex min-w-0 flex-1 flex-col overflow-hidden">
-					{!isModalSplit ? renderInlineLayout() : (
-						<>
-							{/* Solid split-mode header */}
-							<div className="flex shrink-0 items-center gap-3 border-b border-[var(--border)] bg-[var(--surface-2)] p-3">
+					{/* Keyed so switching layouts remounts instead of reusing DOM nodes: the
+					    stacked header's background (opacity set imperatively by the scroll
+					    handler) would otherwise become the split header's row, invisible. */}
+					{!isModalSplit ? <Fragment key="stacked">{renderInlineLayout()}</Fragment> : (
+						<Fragment key="split">
+							{/* Solid split-mode header, set off from the content by its surface-2
+							    fill alone (a neutral divider clashed with the tinted card). */}
+							<div className="flex shrink-0 items-center gap-3 bg-[var(--surface-2)] p-3">
 								<div className="flex w-full items-center gap-3">
 									<button type="button" onClick={onClose} className="header-icon-btn header-icon-btn--back shrink-0 rounded-xl text-[var(--text-muted)] transition-colors hover:text-[var(--text)]" aria-label={t("profile_details.close_profile_details")}>
 										<ChevronLeft className="h-4 w-4" />
@@ -2662,8 +3192,8 @@ export function ProfileDetailsModal({
 										<p className="truncate text-base font-semibold">{activeProfileName}</p>
 									</div>
 									{isOwnProfile && (
-										<button type="button" onClick={() => navigate("/settings/profile-editor")} className="header-icon-btn shrink-0 rounded-xl text-[var(--text-muted)] transition-colors hover:text-[var(--text)]" aria-label={t("profile_editor.edit_profile")}>
-											<Pencil className="h-4 w-4" />
+										<button type="button" onClick={toggleOwnProfileEdit} className="header-icon-btn shrink-0 rounded-xl text-[var(--text-muted)] transition-colors hover:text-[var(--text)]" aria-label={ownProfileEditLabel} title={ownProfileEditLabel}>
+											{isEditingOwnProfile ? <X className="h-4 w-4" /> : <Pencil className="h-4 w-4" />}
 										</button>
 									)}
 									{messageProfileId && !isOwnProfile && (
@@ -2690,13 +3220,13 @@ export function ProfileDetailsModal({
 												</button>
 												{nicknameNameChangeBadge}
 												{actionsMenuPresence.rendered && (
-													<div data-lenis-prevent style={menuTransitionStyle(actionsMenuPresence.visible)} className="absolute right-0 top-full z-50 mt-1 flex max-h-[calc(100dvh-8rem)] min-w-[190px] flex-col gap-2 overflow-y-auto overscroll-contain rounded-lg border border-[var(--border)] bg-[var(--surface)] py-2 shadow-lg">
+													<div data-lenis-prevent style={menuTransitionStyle(actionsMenuPresence.visible)} className="absolute end-0 top-full z-50 mt-1 flex max-h-[calc(100dvh-8rem)] min-w-[190px] flex-col gap-2 overflow-y-auto overscroll-contain rounded-lg menu-surface py-2">
 														<div className="flex flex-col gap-1 px-2">
 														{showLocate && (
 														<button type="button" disabled={isTriangleDisabled}
 															onClick={() => { setIsActionsMenuOpen(false); if (messageProfileId) onTriangleProfile?.(String(messageProfileId)); }}
-															className="flex items-center rounded-sm px-2 py-2 text-left text-sm text-[var(--text)] transition hover:bg-[var(--surface-2)] disabled:opacity-50">
-															<LocateFixedFilled className="mr-2 h-4 w-4 opacity-70" />
+															className="flex items-center rounded-sm px-2 py-2 text-start text-sm text-[var(--text)] transition hover-fill disabled:opacity-50">
+															<LocateFixedFilled className="me-2 h-4 w-4 opacity-70" />
 															{locateLabel ?? t("profile_details.locate")}
 														</button>
 														)}
@@ -2705,9 +3235,9 @@ export function ProfileDetailsModal({
 															type="button"
 															disabled={isProfileUnavailable}
 															onClick={() => { setIsActionsMenuOpen(false); if (!messageProfileId || isProfileUnavailable) return; isHidden ? onUnhideProfile?.(String(messageProfileId)) : onHideProfile?.(String(messageProfileId)); }}
-															className="flex items-center rounded-sm px-2 py-2 text-left text-sm text-[var(--text)] transition hover:bg-[var(--surface-2)] disabled:opacity-50"
+															className="flex items-center rounded-sm px-2 py-2 text-start text-sm text-[var(--text)] transition hover-fill disabled:opacity-50"
 														>
-															{isHidden ? <EyeFilled className="mr-2 h-4 w-4 opacity-70" /> : <EyeOffFilled className="mr-2 h-4 w-4 opacity-70" />}
+															{isHidden ? <EyeFilled className="me-2 h-4 w-4 opacity-70" /> : <EyeOffFilled className="me-2 h-4 w-4 opacity-70" />}
 															{isHidden ? t("profile_details.unhide") : t("profile_details.hide")}
 														</button>
 														)}
@@ -2721,26 +3251,20 @@ export function ProfileDetailsModal({
 															<button
 																type="button"
 																onClick={handleBanBioPhrase}
-																className="flex items-center rounded-sm px-2 py-2 text-left text-sm text-[var(--text)] transition hover:bg-[var(--surface-2)]"
+																className="flex items-center rounded-sm px-2 py-2 text-start text-sm text-[var(--text)] transition hover-fill"
 															>
-																<Ban className="mr-2 h-4 w-4 opacity-70" />
-																<span className="flex flex-col">
-																	<span>{t("profile_details.ban_bio_title")}</span>
-																	<span className="text-xs text-[var(--text-muted)]">{t("profile_details.ban_keyword_source_bio", { defaultValue: "Bio phrase" })}</span>
-																</span>
+																<Ban className="me-2 h-4 w-4 opacity-70" />
+																{t("profile_details.ban_keyword_menu_bio", { defaultValue: "Ban word from bio" })}
 															</button>
 														)}
 														{actualProfileName && (
 															<button
 																type="button"
 																onClick={handleBanProfileName}
-																className="flex items-center rounded-sm px-2 py-2 text-left text-sm text-[var(--text)] transition hover:bg-[var(--surface-2)]"
+																className="flex items-center rounded-sm px-2 py-2 text-start text-sm text-[var(--text)] transition hover-fill"
 															>
-																<Ban className="mr-2 h-4 w-4 opacity-70" />
-																<span className="flex flex-col">
-																	<span>{t("profile_details.ban_bio_title")}</span>
-																	<span className="text-xs text-[var(--text-muted)]">{t("profile_details.ban_keyword_source_name", { defaultValue: "Profile name" })}</span>
-																</span>
+																<Ban className="me-2 h-4 w-4 opacity-70" />
+																{t("profile_details.ban_keyword_menu_name", { defaultValue: "Ban word from name" })}
 															</button>
 														)}
 														</div>
@@ -2755,11 +3279,13 @@ export function ProfileDetailsModal({
 							</div>
 							{/* Split-mode content */}
 							<div ref={scrollContainerRef} className="min-h-0 flex-1 overflow-y-auto overscroll-contain" data-lenis-prevent>
-								<div className="p-4 pb-28 sm:p-5 sm:pb-28">
+								<div className={`p-4 sm:p-5 ${isEditingOwnProfile ? "pb-0 sm:pb-0" : hasQuickMessageBar ? "pb-28 sm:pb-28" : ""}`}>
 									{isLoadingActiveProfile ? (
 										<ProfileDetailsSkeleton />
 									) : activeProfileError ? (
 										<p className="text-sm text-[var(--text-muted)]">{activeProfileError}</p>
+									) : activeProfile && isOwnProfile && isEditingOwnProfile ? (
+										<OwnProfileEditPanel onDone={finishOwnProfileEdit} onDirtyChange={setHasUnsavedOwnEdits} onPhotoHashesChange={setEditedOwnPhotoHashes} onPhotoControlsChange={setOwnPhotoControls} />
 									) : activeProfile ? (
 										<ProfileDetailsContent
 											activeProfile={activeProfile}
@@ -2815,20 +3341,52 @@ export function ProfileDetailsModal({
 								</div>
 							</div>
 							{/* Split-mode footer */}
-							{messageProfileId && !isOwnProfile && renderQuickMessageBar("0.75rem")}
-						</>
+							{hasQuickMessageBar && renderQuickMessageBar("1rem")}
+						</Fragment>
 					)}
 				</div>
 			</div>
+			{!isEditingOwnProfile && (onPrevProfile || onNextProfile) && (
+				<>
+					<button
+						type="button"
+						onClick={(event) => {
+							event.stopPropagation();
+							onPrevProfile?.();
+						}}
+						disabled={!onPrevProfile}
+						aria-label={t("profile_details.previous_profile")}
+						title={t("profile_details.previous_profile")}
+						className="absolute start-3 top-1/2 z-10 flex h-11 w-11 -translate-y-1/2 items-center justify-center rounded-full bg-black/40 text-white backdrop-blur-sm transition hover:bg-black/60 disabled:opacity-0 disabled:pointer-events-none"
+					>
+						<ChevronLeft className="h-6 w-6" />
+					</button>
+					<button
+						type="button"
+						onClick={(event) => {
+							event.stopPropagation();
+							onNextProfile?.();
+						}}
+						disabled={!onNextProfile}
+						aria-label={t("profile_details.next_profile")}
+						title={t("profile_details.next_profile")}
+						className="absolute end-3 top-1/2 z-10 flex h-11 w-11 -translate-y-1/2 items-center justify-center rounded-full bg-black/40 text-white backdrop-blur-sm transition hover:bg-black/60 disabled:opacity-0 disabled:pointer-events-none"
+					>
+						<ChevronRight className="h-6 w-6" />
+					</button>
+				</>
+			)}
 			{barTapFlyEmoji && <TapFlyBurst burst={barTapFlyEmoji} />}
 			{photoViewerOverlay}
 			{albumViewerOverlay}
 			{encounterSheet}
 			{nicknamePrompt}
 			{reportDialog}
+			{discardEditsDialog}
 			<PromptDialog
 				isOpen={banBioPrompt !== null}
 				title={t("profile_details.ban_bio_title")}
+				rows={6}
 				message={t("profile_details.ban_bio_prompt")}
 				defaultValue={banBioPrompt?.text ?? ""}
 				confirmLabel={t("chat.actions.ban_word_confirm", { defaultValue: "Add" })}
@@ -2845,6 +3403,7 @@ export function ProfileDetailsModal({
 			<PromptDialog
 				isOpen={banNamePrompt !== null}
 				title={t("profile_details.ban_bio_title")}
+				rows={6}
 				message={t("chat.actions.ban_name_prompt", {
 					defaultValue: "Trim this down to the exact name or phrase you want to ban:",
 				})}
