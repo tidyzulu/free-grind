@@ -34,6 +34,14 @@ TAURI_CONFIG="$(bun --no-env-file scripts/tauri-config.mjs android)"
 export TAURI_CONFIG
 
 bunx tauri android init --ci --skip-targets-install
+# The init drops Tauri's placeholder launcher icons into the main res folder;
+# the real ones come from manifest/android/res (build.gradle.kts), and Gradle
+# refuses the same resource twice in one source set.
+for density in mdpi hdpi xhdpi xxhdpi xxxhdpi; do
+	rm -f "$android/app/src/main/res/mipmap-$density/ic_launcher.png" \
+		"$android/app/src/main/res/mipmap-$density/ic_launcher_round.png" \
+		"$android/app/src/main/res/mipmap-$density/ic_launcher_foreground.png"
+done
 # arm64-v8a only: GeckoView (Google sign-in) adds ~85 MB per ABI.
 bunx tauri android build --apk --split-per-abi --target aarch64
 
