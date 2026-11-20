@@ -276,11 +276,11 @@ fn resolve_child_exe_path() -> Result<PathBuf, AppError> {
     let candidates = [
         manager_dir.join("client.exe"),
         manager_dir.join("child.exe"),
-        manager_dir.join("free-grind-client.exe"),
-        manager_dir.join("free-grind-child.exe"),
-        manager_dir.join("Free Grind Client.exe"),
-        manager_dir.join("Free Grind Child.exe"),
-        manager_dir.join("free-grind.exe"),
+        manager_dir.join(format!("{}-client.exe", crate::app_identity::APP_SLUG)),
+        manager_dir.join(format!("{}-child.exe", crate::app_identity::APP_SLUG)),
+        manager_dir.join(format!("{} Client.exe", crate::app_identity::APP_NAME)),
+        manager_dir.join(format!("{} Child.exe", crate::app_identity::APP_NAME)),
+        manager_dir.join(format!("{}.exe", crate::app_identity::APP_SLUG)),
     ];
 
     for path in candidates {
@@ -324,7 +324,7 @@ fn resolve_child_exe_path() -> Result<PathBuf, AppError> {
 #[cfg(target_os = "windows")]
 fn manager_instances_file_path() -> PathBuf {
     crate::windows_instance::windows_app_data_root_dir()
-        .join("free-grind")
+        .join(crate::app_identity::APP_SLUG)
         .join("manager")
         .join("instances.json")
 }

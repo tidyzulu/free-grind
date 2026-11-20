@@ -45,6 +45,13 @@ export const browseCardSchema = z.object({
 	favorite: z.boolean().optional(),
 	chatted: z.boolean().optional(),
 	rightNow: z.string().nullable().optional(),
+	/** False: the server offers no block for this profile (see useCanBlockProfile). */
+	isBlockable: z.boolean().nullable().optional(),
+	// Map position as the server obfuscated it (upstream field names, as on the
+	// carousel items). Never the real location, and no fuzz radius either (that
+	// would narrow down the real one).
+	fuzzedLat: z.number().nullable().optional(),
+	fuzzedLon: z.number().nullable().optional(),
 });
 
 export type BrowseCard = z.infer<typeof browseCardSchema>;
@@ -77,6 +84,9 @@ export const profileDetailItemSchema = z.object({
 	profileId: z
 		.union([z.string(), z.number()])
 		.transform((value) => String(value)),
+	// GET /v7/profiles/:id: "FULL" for a real profile, "ERROR" for the
+	// blocked/hidden/gone stub (see classifyProfileAccess). Absent elsewhere.
+	profileType: z.string().nullable().optional(),
 	displayName: z.string().nullable().optional(),
 	age: z.number().nullable().optional(),
 	showAge: z.boolean().optional(),
@@ -85,6 +95,9 @@ export const profileDetailItemSchema = z.object({
 	lastViewed: z.number().nullable().optional(),
 	lastChatTimestamp: z.number().nullable().optional(),
 	isNew: z.boolean().optional(),
+	// Account creation (ms). Only the Free Grind server sends it, and only with
+	// the account-creation-date flag; Grindr's doesn't.
+	created: z.number().nullable().optional(),
 	lastUpdatedTime: z.number().nullable().optional(),
 	distance: z.number().nullable().optional(),
 	approximateDistance: z.boolean().optional(),
@@ -104,6 +117,8 @@ export const profileDetailItemSchema = z.object({
 				reason: z.string().nullable().optional(),
 				takenOnGrindr: z.boolean().nullable().optional(),
 				createdAt: z.number().nullable().optional(),
+				// Self-hosted server: profile videos (type 2) carry their MP4 URL.
+				videoUrl: z.string().nullable().optional(),
 			}),
 		)
 		.nullable()

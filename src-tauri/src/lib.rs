@@ -3,6 +3,7 @@ mod api;
 mod app_disguise;
 mod commands;
 mod error;
+mod app_identity;
 mod instance_lock;
 mod media;
 mod media_proxy;
@@ -84,8 +85,8 @@ fn create_linux_main_window(app: &tauri::App) -> tauri::Result<()> {
 /// websocket-bridge tasks it spawns run in the background from here on.
 fn init_client(app: &tauri::AppHandle) {
     api::auth::SigningKeyStorage::forget_unscoped();
-    // The backend (official or self-hosted) must be set before any request.
-    api::server::apply_persisted_server();
+    // A session of another backend (older builds) never reaches Grindr.
+    api::server::drop_other_backend_session();
     let device = api::auth::DeviceStorage::load().ok().flatten();
     let session = api::auth::AuthStorage::get_session().ok().flatten();
     if let Err(e) = api::auth::adopt_client(app, device, session) {
@@ -275,13 +276,11 @@ pub fn run() {
                 api::entitlements::restore_stranded_location,
                 api::auth::websocket_token,
                 api::auth::sync_push_token,
+                api::auth::revoke_push_token,
                 api::auth::list_saved_accounts,
                 api::auth::switch_account,
                 api::auth::remove_saved_account,
                 api::auth::create_transfer_code,
-                api::server::get_server_config,
-                api::server::test_server,
-                api::server::set_server_config,
                 api::auth::sign_in_with_transfer_code,
                 api::rest::request,
                 api::rest::fetch_external,
@@ -310,6 +309,7 @@ pub fn run() {
                 upload::staged::resize_staged_media,
                 upload::video::upload_staged_chat_video,
                 upload::video::upload_staged_album_video,
+                upload::video::upload_staged_profile_video,
                 upload::edit::video_trim_points,
                 upload::edit::video_needed_ranges,
                 upload::edit::video_decode_window,
@@ -419,13 +419,11 @@ pub fn run() {
                 api::entitlements::restore_stranded_location,
                 api::auth::websocket_token,
                 api::auth::sync_push_token,
+                api::auth::revoke_push_token,
                 api::auth::list_saved_accounts,
                 api::auth::switch_account,
                 api::auth::remove_saved_account,
                 api::auth::create_transfer_code,
-                api::server::get_server_config,
-                api::server::test_server,
-                api::server::set_server_config,
                 api::auth::sign_in_with_transfer_code,
                 api::rest::request,
                 api::rest::fetch_external,
@@ -454,6 +452,7 @@ pub fn run() {
                 upload::staged::resize_staged_media,
                 upload::video::upload_staged_chat_video,
                 upload::video::upload_staged_album_video,
+                upload::video::upload_staged_profile_video,
                 upload::edit::video_trim_points,
                 upload::edit::video_needed_ranges,
                 upload::edit::video_decode_window,

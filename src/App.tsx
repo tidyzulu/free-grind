@@ -28,6 +28,7 @@ import { ApiInspectorPage } from "./pages/app/ApiInspectorPage.tsx";
 import { PushInspectorPage } from "./pages/app/PushInspectorPage.tsx";
 import { AssignmentsPage } from "./pages/app/AssignmentsPage.tsx";
 import { WebSocketExplorerPage } from "./pages/app/WebSocketExplorerPage.tsx";
+import { DeveloperPage } from "./pages/app/DeveloperPage.tsx";
 import { CustomizabilityPage } from "./pages/app/CustomizabilityPage.tsx";
 import { BehaviorPage } from "./pages/app/BehaviorPage.tsx";
 import { OptionalFeaturesPage } from "./pages/app/OptionalFeaturesPage.tsx";
@@ -41,16 +42,19 @@ import { SexualHealthPage } from "./pages/app/sexual-health/SexualHealthPage.tsx
 import { PermissionsOnboarding } from "./components/PermissionsOnboarding";
 import { VersionAnnouncement } from "./components/VersionAnnouncement";
 import { OutdatedVersionGate } from "./components/OutdatedVersionPrompt";
+// TEMPORARY (repository move), see RepoMovedPrompt.tsx.
+import { RepoMovedGate } from "./components/RepoMovedPrompt";
 import { OtaUpdateGate } from "./components/OtaUpdatePrompt";
 import { TestReminderGate } from "./components/TestReminderPrompt";
 import { TokenExpiredGate } from "./components/TokenExpiredPrompt";
 import { AccountStatusGate } from "./components/AccountStatusPrompt";
+import { EmailVerificationGate } from "./components/EmailVerificationGate";
 import { UnsupportedVersionGate } from "./components/UnsupportedVersionPrompt";
-import { EntitlementBypassPrompt } from "./components/EntitlementBypassPrompt";
+import { GrindrWorkaroundBridges, GrindrWorkaroundOverlays, LocateProfileHost } from "./grindr-workarounds";
 import { AgeVerificationRegionPrompt } from "./components/AgeVerificationRegionPrompt";
-import { LocateProfileHost } from "./pages/app/gridpage/hooks/useLocateProfile";
 import { PushNotificationBridge } from "./components/PushNotificationBridge";
 import { ShareTargetBridge } from "./components/ShareTargetBridge";
+import { ShareProfileBridge } from "./components/ShareProfileBridge";
 import { NotificationReplyBridge } from "./components/NotificationReplyBridge";
 import { ChatRealtimeBridge } from "./components/ChatRealtimeBridge";
 import { GridAutoRefreshBridge } from "./components/GridAutoRefreshBridge";
@@ -58,8 +62,8 @@ import { VideoCallManager } from "./components/VideoCallManager";
 import { ActiveRouteBridge } from "./components/ActiveRouteBridge";
 import { KeepScreenOnBridge } from "./components/KeepScreenOnBridge";
 import { EntitlementsBridge } from "./components/EntitlementsBridge";
+import { RightNowSessionBridge } from "./components/RightNowSessionBridge";
 import { AssignmentsBridge } from "./components/AssignmentsBridge";
-import { HondurasRecoveryBridge } from "./components/HondurasRecoveryBridge";
 import { LgbtqRiskCountryWarning } from "./components/LgbtqRiskCountryWarning";
 import { ManagedOptionsCacheBridge } from "./components/ManagedOptionsCacheBridge";
 import { SplashReadyBridge } from "./components/SplashReadyBridge";
@@ -76,6 +80,7 @@ import { hasCompletedOnboarding, REPLAY_ONBOARDING_EVENT } from "./utils/onboard
 import { getLastSeenAnnouncementVersion, markAnnouncementSeen } from "./utils/announcementStorage";
 import { VERSION_ANNOUNCEMENTS } from "./data/versionAnnouncements";
 import { useRenderPhase } from "./hooks/useRenderPhase";
+import { AppLocationContext } from "./hooks/useAndroidBackToGrid";
 
 function ErrorPage() {
 	const { t } = useTranslation();
@@ -210,6 +215,7 @@ export default function App() {
 	};
 
 	return (
+		<AppLocationContext.Provider value={location}>
 		<AuthProvider>
 			<SplashReadyBridge />
 			<RenderCrashReportBridge />
@@ -219,7 +225,7 @@ export default function App() {
 				<SinModeUnlockOverlay />
 				<HalloweenOverlay />
 				<RightNowStartedOverlay />
-				<EntitlementBypassPrompt />
+				<GrindrWorkaroundOverlays />
 				<AgeVerificationRegionPrompt />
 				<LocateProfileHost />
 				<SmoothScroll>
@@ -236,11 +242,12 @@ export default function App() {
 								onClose={handleAnnouncementClose}
 							/>
 						</div>
-					) : (<UnsupportedVersionGate><AccountStatusGate><TokenExpiredGate><OutdatedVersionGate><TestReminderGate>
+					) : (<UnsupportedVersionGate><AccountStatusGate><TokenExpiredGate><EmailVerificationGate><RepoMovedGate><OutdatedVersionGate><TestReminderGate>
 					{renderPhase >= 1 && <ManagerModeRedirect />}
 					{renderPhase >= 1 && <KeepScreenOnBridge />}
 					{renderPhase >= 2 && <PushNotificationBridge />}
 					{renderPhase >= 2 && <ShareTargetBridge />}
+					{renderPhase >= 2 && <ShareProfileBridge />}
 					{renderPhase >= 2 && <NotificationReplyBridge />}
 					{renderPhase >= 2 && <ManagedOptionsCacheBridge />}
 					{renderPhase >= 2 && <AssignmentsBridge />}
@@ -252,7 +259,8 @@ export default function App() {
 					{renderPhase >= 5 && (
 						<>
 							<EntitlementsBridge />
-							<HondurasRecoveryBridge />
+							<RightNowSessionBridge />
+							<GrindrWorkaroundBridges />
 						</>
 					)}
 					<Routes location={backgroundLocation ?? location}>
@@ -293,6 +301,14 @@ export default function App() {
 								<Route path="/settings/transfer-account" element={<Navigate to="/settings#transfer-account" replace />} />
 								<Route path="/settings/block-history" element={<SettingsBlockHistoryPage />} />
 								<Route path="/settings/sexual-health" element={<SexualHealthPage />} />
+								<Route
+									path="/settings/developer"
+									element={
+										<DeveloperModeRoute>
+											<DeveloperPage />
+										</DeveloperModeRoute>
+									}
+								/>
 								<Route
 									path="/settings/api-inspector"
 									element={
@@ -372,11 +388,12 @@ export default function App() {
 							/>
 						</Routes>
 					)}
-					</TestReminderGate></OutdatedVersionGate></TokenExpiredGate></AccountStatusGate></UnsupportedVersionGate>)}
+					</TestReminderGate></OutdatedVersionGate></RepoMovedGate></EmailVerificationGate></TokenExpiredGate></AccountStatusGate></UnsupportedVersionGate>)}
 					</OtaUpdateGate>
 				</SmoothScroll>
 			</ExploreModeProvider>
 			</PreferencesProvider>
 		</AuthProvider>
+		</AppLocationContext.Provider>
 	);
 }

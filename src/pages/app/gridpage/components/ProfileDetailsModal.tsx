@@ -1,6 +1,8 @@
 import { TapFlyBurst, tapFlyBurstDuration, createTapFlyBurst, mutualTapIdFor, tapEmoji, tapGlow, type TapFlyBurstState } from "../../../../components/TapFlyBurst";
-import { Album, AlertTriangle, Ban, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, CircleUserRound, Clock, EllipsisVertical, Flag, Flame, Images, Loader2, LockKeyhole, MessageCircle, Pencil, Phone, Plus, ShieldCheck, Star, Trash2, X } from "lucide-react";
+import { isChatArchiveEnabled } from "../../../../services/chatArchiveMode";
+import { Album, AlertTriangle, Ban, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, CircleUserRound, Clock, EllipsisVertical, Flag, Flame, Images, Loader2, LockKeyhole, MessageCircle, Pencil, Phone, Plus, Share2, ShieldCheck, Star, Trash2, X } from "lucide-react";
 import { BananaFilled, EyeFilled, HomeFilled, MapPinFilled, StickyNoteFilled, EyeOffFilled, LocateFixedFilled, PencilLineFilled, SendHorizontalFilled } from "../../../../components/icons/FilledIcons";
+import { useCanBlockProfile } from "../../../../grindr-workarounds";
 import { RightNowIcon } from "../../../../components/icons/RightNowIcon";
 import toast from "react-hot-toast";
 import { Fragment, type ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
@@ -40,6 +42,7 @@ import {
 import { getProfileImageUrl, validateMediaHash } from "../../../../utils/media";
 import { proxyMediaUrl } from "../../../../utils/mediaProxy";
 import { resolveAvatarSrc } from "../../../../services/avatarStore";
+import { requestProfileShare, useCanShareProfiles } from "../../../../services/profileShare";
 import { getForbiddenWords, setForbiddenWords } from "../../../../utils/autoblock";
 import { ProfileImage } from "../../../../components/ui/profile-image";
 import { useProfilePhotoPrivacy } from "../../../../hooks/useProfilePhotoPrivacy";
@@ -54,7 +57,6 @@ import { formatRelativeTime } from "../../../../utils/relativeTime";
 import { useInterestData } from "../../../../hooks/queries/useInterestQueries";
 import { getTapEmoji } from "../../interest/interestUtils";
 import {
-	formatEstimatedAccountCreation,
 	formatDistance,
 	formatEnumArray,
 	formatEnumValue,
@@ -66,14 +68,17 @@ import {
 	shouldHideField,
 } from "../utils";
 import { ProfileDetailsContent } from "./ProfileDetailsContent";
+import { useAccountCreationLabel } from "../hooks/useAccountCreationLabel";
 import { OwnProfileEditPanel, type OwnPhotoControls } from "../../profile-editor/OwnProfileEditPanel";
 import { useCarouselSwipe } from "./useCarouselSwipe";
 import { ConfirmDialog } from "../../../../components/ui/confirm-dialog";
+import { useProfileNetworkMenu } from "../../profile-network/useProfileNetworkMenu";
 import { setCachedProfileDetail } from "../cache";
 import type { ChatContactIndexRecord } from "../../../../types/chat-contact-index";
 import { PhotoViewer, type HeroRect, type PhotoViewerMenuAction } from "../../../../components/PhotoViewer";
 import { PhotoActionBar } from "../../../../components/PhotoActionBar";
 import { markAlbumContentReacted, useAlbumContentReactions } from "../../../../services/albumReactionStore";
+import { useAlbumContentViewCounter } from "../../../../hooks/useAlbumContentViewCounter";
 import { AlbumMediaSheet } from "../../../../components/AlbumMediaSheet";
 import { useProfileAlbumStatus } from "../../../../hooks/useProfileAlbumStatus";
 import { captureAlbum, getLocalAlbum } from "../../../../services/albumStore";
@@ -559,6 +564,8 @@ export function ProfileDetailsModal({
 	// Leaving it re-reads the profile here, since the parent only fetches it
 	// when the opened profile changes.
 	const [isEditingOwnProfile, setIsEditingOwnProfile] = useState(initialEditMode);
+	// Edit mode opened from the open link requests row: the editor scrolls there.
+	const [focusLinkedProfilesOnEdit, setFocusLinkedProfilesOnEdit] = useState(false);
 	const [hasUnsavedOwnEdits, setHasUnsavedOwnEdits] = useState(false);
 	const [isDiscardEditsPromptOpen, setIsDiscardEditsPromptOpen] = useState(false);
 	const [refreshedOwnProfile, setRefreshedOwnProfile] = useState<ProfileDetail | null>(null);
@@ -580,6 +587,7 @@ export function ProfileDetailsModal({
 		setRefreshedOwnProfile(null);
 		setEditedOwnPhotoHashes(null);
 		setIsEditingOwnProfile(false);
+		setFocusLinkedProfilesOnEdit(false);
 	}, [openedProfileId]);
 	const activeProfile = refreshedOwnProfile ?? activeProfileProp;
 	const activeProfilePhotoHashes = useMemo(
@@ -624,9 +632,11 @@ export function ProfileDetailsModal({
 
 	const messageProfileId = activeProfile?.profileId ?? selectedBrowseCard?.profileId ?? null;
 	const isOwnProfile = userId != null && messageProfileId != null && String(userId) === String(messageProfileId);
+	const canShareProfiles = useCanShareProfiles();
 
 	const finishOwnProfileEdit = useCallback(() => {
 		setIsEditingOwnProfile(false);
+		setFocusLinkedProfilesOnEdit(false);
 		setHasUnsavedOwnEdits(false);
 		setIsDiscardEditsPromptOpen(false);
 		if (userId == null) return;
@@ -637,6 +647,10 @@ export function ProfileDetailsModal({
 			ownProfileDataCache.set(ownId, { tags: fresh.profileTags ?? [] });
 		}).catch((error) => appLog.warn("Failed to reload own profile after editing", error));
 	}, [apiFunctions, userId]);
+	const manageOwnLinkedProfiles = useCallback(() => {
+		setFocusLinkedProfilesOnEdit(true);
+		setIsEditingOwnProfile(true);
+	}, []);
 	const toggleOwnProfileEdit = () => {
 		if (!isEditingOwnProfile) setIsEditingOwnProfile(true);
 		else if (hasUnsavedOwnEdits) setIsDiscardEditsPromptOpen(true);
@@ -667,13 +681,25 @@ export function ProfileDetailsModal({
 		profileOnlineUntil,
 	);
 	const { label: profileStatusLabel, level: profileStatusLevel } = getProfileStatusDisplay(profileStatusMeta, t, showOnlineTimeLeft);
-	const estimatedCreatedAt = formatEstimatedAccountCreation(activeProfile?.profileId, t);
+	const accountCreationLabel = useAccountCreationLabel();
+	const accountCreatedLabel = accountCreationLabel(activeProfile);
 	const { data: travelPlans } = useTravelPlans(activeProfile?.profileId);
 	const visualStateValue = typeof tapVisualState === "string" ? tapVisualState : tapVisualState.state;
 	const effectiveTapVisualState = isTappingProfile ? "single" : visualStateValue;
 	const isTapActive = effectiveTapVisualState !== "none";
 	const isBarTapMutual = effectiveTapVisualState === "mutual";
 	const isProfileUnavailable = isBlocked || isSnapshotProfile;
+	const canBlockProfile = useCanBlockProfile();
+	// A profile that can't be blocked (and isn't already): the block button hides it instead.
+	const blockBecomesHide = !isBlocked && !isOwnProfile && !canBlockProfile(activeProfile?.isBlockable ?? selectedBrowseCard?.isBlockable);
+	// Unhiding stays possible on an unavailable profile (e.g. one hidden and
+	// since deleted), so it can still be taken off the hidden list.
+	const canToggleHidden = isHidden || !isProfileUnavailable;
+	const toggleHidden = () => {
+		if (!messageProfileId || !canToggleHidden) return;
+		if (isHidden) onUnhideProfile?.(String(messageProfileId));
+		else onHideProfile?.(String(messageProfileId));
+	};
 	const isTapDisabled = isOwnProfile || !onTapProfile || isTappingProfile || isTapBlocked || isProfileUnavailable;
 	const isTriangleDisabled =
 		!onTriangleProfile || !messageProfileId || isProfileUnavailable;
@@ -739,16 +765,13 @@ export function ProfileDetailsModal({
 	const splitWheelGestureRef = useRef<WheelGestureState>(createWheelGestureState());
 	const scrollContainerRef = useRef<HTMLDivElement | null>(null);
 	const pageWrapRef = useRef<HTMLDivElement | null>(null);
-	const pageScreenRef = useRef<HTMLDivElement | null>(null);
-	const profileSwipeRef = useRef({ startX: 0, startY: 0, decided: false, horizontal: false, dragging: false, lastDelta: 0, pastThreshold: false, canDismiss: false, dismissing: false, dismissStartTime: 0 });
+	const profileSwipeRef = useRef({ startX: 0, startY: 0, decided: false, horizontal: false, dragging: false, lastDelta: 0, pastThreshold: false });
 	// Gestures write straight to the DOM (header fade, profile swipe) instead
 	// of state, so a frame of finger movement doesn't re-render the whole modal.
 	const headerBgRef = useRef<HTMLDivElement | null>(null);
 	const [inlineScrolled, setInlineScrolled] = useState(false);
 	const [isActionsMenuOpen, setIsActionsMenuOpen] = useState(false);
 	const actionsMenuPresence = usePresence(isActionsMenuOpen);
-	const isActionsMenuOpenRef = useRef(isActionsMenuOpen);
-	isActionsMenuOpenRef.current = isActionsMenuOpen;
 	const [banBioPrompt, setBanBioPrompt] = useState<{ text: string } | null>(null);
 	const [banNamePrompt, setBanNamePrompt] = useState<{ text: string } | null>(null);
 	const [quickMessageDraft, setQuickMessageDraft] = useState("");
@@ -1125,8 +1148,6 @@ export function ProfileDetailsModal({
 	onPrevProfileRef.current = onPrevProfile;
 	const onNextProfileRef = useRef(onNextProfile);
 	onNextProfileRef.current = onNextProfile;
-	const onCloseRef = useRef(onClose);
-	onCloseRef.current = onClose;
 	const hasProfileNeighbors = Boolean(onPrevProfile || onNextProfile);
 	// Set once a swipe has slid the neighbour's preview fully in. The preview
 	// stays on screen as the loading state; the offset is only reset once the
@@ -1175,69 +1196,21 @@ export function ProfileDetailsModal({
 			!isOpen ||
 			selectedPhotoIndex !== null ||
 			variant !== "page" ||
-			// Editing your own profile: drags belong to the form (sliders,
-			// photo reordering), and leaving would drop the draft.
+			!hasProfileNeighbors ||
+			// Editing your own profile: horizontal drags belong to the form
+			// (sliders, photo reordering), and leaving would drop the draft.
 			isEditingOwnProfile
 		) {
 			return;
 		}
 
 		const SWIPE_THRESHOLD = 80;
-		// Pull-down-to-close, like the photo viewer: past this distance (or a
-		// quick flick) releasing closes the profile.
-		const DISMISS_THRESHOLD = 120;
-		const DISMISS_FLICK_MIN = 40;
-		const DISMISS_FLICK_VELOCITY = 0.5; // px/ms
 		const s = profileSwipeRef.current;
-		let dismissResetTimer: ReturnType<typeof setTimeout> | null = null;
 
 		const setOffset = (dx: number, animate: boolean) => {
 			el.style.transition = animate ? "transform 250ms ease-out" : "none";
 			el.style.transform = dx === 0 ? "" : `translateX(${dx}px)`;
 		};
-
-		const clearDismissStyles = () => {
-			el.style.transition = "";
-			el.style.transform = "";
-			el.style.opacity = "";
-			el.style.borderRadius = "";
-			el.style.overflow = "";
-			el.style.background = "";
-			const screen = pageScreenRef.current;
-			if (screen) {
-				screen.style.transition = "";
-				screen.style.background = "";
-			}
-		};
-
-		// Over the opening page it shows through, dimmed less the further
-		// the profile is pulled; on its own there's nothing behind it.
-		const setScreenBackdrop = (progress: number, transition: string) => {
-			const screen = pageScreenRef.current;
-			if (!screen) return;
-			screen.style.transition = transition;
-			screen.style.background = isOverBackground
-				? `rgba(0, 0, 0, ${(0.5 * (1 - progress)).toFixed(3)})`
-				: "#000";
-		};
-
-		const setDismissOffset = (dy: number, animate: boolean) => {
-			const height = el.offsetHeight || window.innerHeight;
-			const progress = Math.min(Math.max(dy, 0) / height, 1);
-			setScreenBackdrop(animate ? 0 : progress, animate ? "background 250ms ease-out" : "none");
-			el.style.background = "var(--bg)";
-			el.style.overflow = "hidden";
-			el.style.borderRadius = dy > 0 ? `${Math.min(dy / 4, 24)}px` : "";
-			el.style.transition = animate
-				? "transform 250ms ease-out, opacity 250ms ease-out, border-radius 250ms ease-out"
-				: "none";
-			el.style.transform = `translateY(${dy}px) scale(${1 - progress * 0.12})`;
-			el.style.opacity = String(1 - progress * 0.5);
-		};
-
-		const isFormField = (target: EventTarget | null) =>
-			target instanceof HTMLElement &&
-			Boolean(target.closest("input, textarea, select, [contenteditable=\"true\"]"));
 
 		const onStart = (e: TouchEvent) => {
 			if (controlsBarRef.current?.contains(e.target as Node)) return;
@@ -1247,50 +1220,23 @@ export function ProfileDetailsModal({
 			s.decided = false;
 			s.horizontal = false;
 			s.dragging = false;
-			s.dismissing = false;
 			s.lastDelta = 0;
 			s.pastThreshold = false;
-			const scroller = scrollContainerRef.current;
-			// Only from the scrolled-to-top content itself — not the header,
-			// menus or overlays layered inside the page.
-			s.canDismiss =
-				e.touches.length === 1 &&
-				!isActionsMenuOpenRef.current &&
-				Boolean(scroller?.contains(e.target as Node)) &&
-				(scroller?.scrollTop ?? 1) <= 0 &&
-				!isFormField(e.target);
+			// Horizontal scrollers (e.g. the linked profiles strip) keep their drags:
+			// decided as vertical, so onMove leaves them alone.
+			if ((e.target as Element | null)?.closest?.("[data-no-profile-swipe]")) s.decided = true;
 		};
 
 		const onMove = (e: TouchEvent) => {
 			if (pendingSwipeResetRef.current) return;
-			if (e.touches.length !== 1) return;
 			const dx = e.touches[0].clientX - s.startX;
 			const dy = e.touches[0].clientY - s.startY;
 			if (!s.decided) {
 				if (Math.abs(dx) < 10 && Math.abs(dy) < 10) return;
 				s.decided = true;
 				s.horizontal = Math.abs(dx) >= Math.abs(dy);
-				// The photo carousel handles vertical swipes itself (except on
-				// its first photo) and claims them via preventDefault.
-				if (!s.horizontal && dy > 0 && s.canDismiss && !e.defaultPrevented) {
-					s.dismissing = true;
-					s.dismissStartTime = performance.now();
-				}
 			}
-			if (s.dismissing) {
-				e.preventDefault();
-				// Dragging back above the start point just sticks at 0.
-				const offset = Math.max(dy, 0);
-				s.lastDelta = offset;
-				const past = offset > DISMISS_THRESHOLD;
-				if (past !== s.pastThreshold) {
-					s.pastThreshold = past;
-					if (past) haptic(8);
-				}
-				setDismissOffset(offset, false);
-				return;
-			}
-			if (!s.horizontal || !hasProfileNeighbors) return;
+			if (!s.horizontal) return;
 			e.preventDefault();
 			s.dragging = true;
 			const target = dx < 0 ? onNextProfileRef.current : onPrevProfileRef.current;
@@ -1305,35 +1251,7 @@ export function ProfileDetailsModal({
 			setOffset(offset, false);
 		};
 
-		const onDismissEnd = () => {
-			s.dismissing = false;
-			const dy = s.lastDelta;
-			s.lastDelta = 0;
-			s.pastThreshold = false;
-			const elapsed = Math.max(1, performance.now() - s.dismissStartTime);
-			const flick = dy > DISMISS_FLICK_MIN && dy / elapsed > DISMISS_FLICK_VELOCITY;
-			if (dy > DISMISS_THRESHOLD || flick) {
-				const height = el.offsetHeight || window.innerHeight;
-				el.style.transition = "transform 200ms ease-in, opacity 200ms ease-in";
-				el.style.transform = `translateY(${height}px) scale(0.88)`;
-				el.style.opacity = "0";
-				setScreenBackdrop(1, "background 200ms ease-in");
-				dismissResetTimer = setTimeout(() => {
-					onCloseRef.current();
-					// Still mounted (the close didn't navigate away)? Come back.
-					dismissResetTimer = setTimeout(clearDismissStyles, 300);
-				}, 200);
-				return;
-			}
-			setDismissOffset(0, true);
-			dismissResetTimer = setTimeout(clearDismissStyles, 260);
-		};
-
 		const onEnd = () => {
-			if (s.dismissing) {
-				onDismissEnd();
-				return;
-			}
 			if (!s.dragging) return;
 			s.dragging = false;
 			s.horizontal = false;
@@ -1371,14 +1289,6 @@ export function ProfileDetailsModal({
 			el.removeEventListener("touchmove", onMove);
 			el.removeEventListener("touchend", onEnd);
 			el.removeEventListener("touchcancel", onEnd);
-			if (dismissResetTimer) {
-				clearTimeout(dismissResetTimer);
-				clearDismissStyles();
-			}
-			if (s.dismissing) {
-				s.dismissing = false;
-				clearDismissStyles();
-			}
 		};
 	}, [
 		isOpen,
@@ -1386,7 +1296,6 @@ export function ProfileDetailsModal({
 		variant,
 		hasProfileNeighbors,
 		isEditingOwnProfile,
-		isOverBackground,
 		resetProfileSwipeOffset,
 	]);
 
@@ -1402,11 +1311,19 @@ export function ProfileDetailsModal({
 		}
 	}, [isOpen]);
 
-	useEffect(() => {
+	// Layout effects: on a swipe to the next profile these must land before the
+	// first paint of the new profile, or it shows for a frame at the previous
+	// one's photo index and scroll position.
+	useLayoutEffect(() => {
 		setSelectedPhotoIndex(null);
 		// While editing, adding or removing a photo keeps your place (clamped below).
 		if (!isEditingOwnProfile) setMobileCarouselPhotoIndex(0);
 	}, [activeProfile?.profileId, activeProfilePhotoHashes.length]);
+
+	useLayoutEffect(() => {
+		const el = scrollContainerRef.current;
+		if (el && el.scrollTop !== 0) el.scrollTop = 0;
+	}, [activeProfile?.profileId]);
 
 	useEffect(() => {
 		const update = () => setIsModalSplit(window.innerWidth >= 900);
@@ -1438,6 +1355,16 @@ export function ProfileDetailsModal({
 		el.addEventListener("wheel", onWheel, { passive: false });
 		return () => el.removeEventListener("wheel", onWheel);
 	}, [isModalSplit]);
+
+	// Profile videos (self-hosted server, type 2): played muted and looping over
+	// their poster, which the media hash resolves to as an image.
+	const videoUrlByHash = useMemo(() => {
+		const map: Record<string, string> = {};
+		for (const media of activeProfile?.medias ?? []) {
+			if (media.type === 2 && media.mediaHash && media.videoUrl) map[media.mediaHash] = media.videoUrl;
+		}
+		return map;
+	}, [activeProfile]);
 
 	const photoCreatedAtByHash = useMemo(() => {
 		if (!activeProfile) {
@@ -1504,7 +1431,7 @@ export function ProfileDetailsModal({
 	// Layout effects: the index is fixed before the browser paints. With a
 	// plain effect the new order showed first under the old index for a frame,
 	// so a moved photo slid away and back.
-	const shownCarouselSlideRef = useRef<{ hash: string; profileId: unknown } | null>(null);
+	const shownCarouselSlideRef = useRef<{ hash: string; profileId: unknown; slides: string[] } | null>(null);
 	// The slides jump to their new places without sliding while the set
 	// changes — a swapped neighbour would otherwise glide across the photo
 	// in view (from above it to below it). Back on two frames later.
@@ -1523,6 +1450,15 @@ export function ProfileDetailsModal({
 	useLayoutEffect(() => {
 		const shown = shownCarouselSlideRef.current;
 		if (!shown || shown.profileId !== activeProfile?.profileId) return;
+		// On the add-photo slide when a photo comes in (an upload or one picked
+		// from the pool): show that photo, not the add slide it pushed back.
+		if (shown.hash === ADD_PHOTO_SLIDE_HASH) {
+			const added = carouselHashes.findIndex((hash) => hash !== ADD_PHOTO_SLIDE_HASH && !shown.slides.includes(hash));
+			if (added !== -1) {
+				setMobileCarouselPhotoIndex(added);
+				return;
+			}
+		}
 		const found = carouselHashes.indexOf(shown.hash);
 		if (found !== -1) {
 			setMobileCarouselPhotoIndex(found);
@@ -1535,7 +1471,7 @@ export function ProfileDetailsModal({
 	// After the effect above, so it still sees the slide from before the change.
 	useLayoutEffect(() => {
 		const hash = carouselHashes[mobileCarouselPhotoIndex];
-		shownCarouselSlideRef.current = hash ? { hash, profileId: activeProfile?.profileId } : null;
+		shownCarouselSlideRef.current = hash ? { hash, profileId: activeProfile?.profileId, slides: carouselHashes } : null;
 	}, [carouselHashes, mobileCarouselPhotoIndex, activeProfile?.profileId]);
 
 	// Moves one of your photos to another slot (0 = main photo); the carousel follows it.
@@ -1796,6 +1732,11 @@ export function ProfileDetailsModal({
 	// only shown once an item is picked, and closing it returns to the sheet.
 	const [isAlbumSheetOpen, setIsAlbumSheetOpen] = useState(false);
 	const [isAlbumViewerShown, setIsAlbumViewerShown] = useState(false);
+	useAlbumContentViewCounter(
+		albumViewer != null && isAlbumViewerShown ? albumViewer.albumId : null,
+		albumViewer?.content[albumViewerIndex]?.contentId,
+		isOwnProfile,
+	);
 	const albumViewerShownRef = useRef(false);
 	albumViewerShownRef.current = albumViewer != null && isAlbumViewerShown;
 	const albumSheetOpenRef = useRef(false);
@@ -2013,7 +1954,11 @@ export function ProfileDetailsModal({
 		// Ignored once the album was closed meanwhile.
 		const isStillOpening = () => pendingAlbumOpenIdRef.current === albumId;
 		try {
-			await apiFunctions.openSharedAlbum({ albumId });
+			const opened = await apiFunctions.openSharedAlbum({ albumId });
+			// Archive mode off: a view-once share that was opened already is refused here.
+			if (opened.status === 403 && !isChatArchiveEnabled()) {
+				throw new Error(t("chat.thread.album_no_longer_viewable", { defaultValue: "This album can't be opened anymore." }));
+			}
 			const details = await apiFunctions.getAlbum(albumId);
 			if (isStillOpening()) {
 				setAlbumViewer({ ...meta, albumId: details.albumId, albumName: details.albumName, content: details.content });
@@ -2163,6 +2108,43 @@ export function ProfileDetailsModal({
 		</button>
 	) : null;
 
+	// Into chats as a ProfileLink (our server only, see profileShare). Not a saved
+	// snapshot or a blocked profile: the server refuses those anyway.
+	const shareMenuItem =
+		canShareProfiles && activeProfile && messageProfileId != null && !isSnapshotProfile && !isBlocked && !isBlockedByOther ? (
+			<button
+				type="button"
+				onClick={() => {
+					setIsActionsMenuOpen(false);
+					requestProfileShare({
+						profileId: Number(messageProfileId),
+						name: activeProfile.displayName?.trim() || null,
+						mediaHash: activeProfile.profileImageMediaHash ?? null,
+					});
+				}}
+				className="flex items-center rounded-sm px-2 py-2 text-start text-sm text-[var(--text)] transition hover-fill"
+			>
+				<Share2 className="me-2 h-4 w-4 opacity-70" />
+				{t("chat.share")}
+			</button>
+		) : null;
+
+	// Personally known + profile links (Free Grind server, flag profile-reputation).
+	const profileNetworkMenu = useProfileNetworkMenu({
+		profileId: messageProfileId != null ? String(messageProfileId) : null,
+		profileName: activeProfileName,
+		available: !!activeProfile && !isOwnProfile && !isSnapshotProfile && !isBlocked && !isBlockedByOther,
+		closeMenu: () => setIsActionsMenuOpen(false),
+	});
+
+	// Its own block, right above report / block.
+	const profileNetworkMenuBlock = profileNetworkMenu.items ? (
+		<>
+			<div className="h-px shrink-0 bg-[var(--border)]" />
+			<div className="flex flex-col gap-1 px-2">{profileNetworkMenu.items}</div>
+		</>
+	) : null;
+
 	const [isReportDialogOpen, setIsReportDialogOpen] = useState(false);
 	const closeReportDialog = useCallback(() => setIsReportDialogOpen(false), []);
 
@@ -2188,7 +2170,7 @@ export function ProfileDetailsModal({
 			isOpen={isReportDialogOpen}
 			profileId={String(messageProfileId)}
 			onClose={closeReportDialog}
-			onBlock={onBlockProfile && !isBlocked ? () => onBlockProfile(String(messageProfileId)) : undefined}
+			onBlock={onBlockProfile && !isBlocked && !blockBecomesHide ? () => onBlockProfile(String(messageProfileId)) : undefined}
 		/>
 	) : null;
 
@@ -2473,6 +2455,20 @@ export function ProfileDetailsModal({
 					className="relative h-full w-full object-cover"
 					revealed={!photoReveal.isBlurred(hash)}
 				/>
+				{videoUrlByHash[hash] && !photoReveal.isBlurred(hash) ? (
+					// Over the poster; clicks still reach the slide button above (z-10).
+					<video
+						key={videoUrlByHash[hash]}
+						src={proxyMediaUrl(videoUrlByHash[hash], { as: "video" })}
+						className="pointer-events-none absolute inset-0 h-full w-full object-cover"
+						autoPlay
+						muted
+						loop
+						playsInline
+						preload="metadata"
+						aria-hidden="true"
+					/>
+				) : null}
 			</>
 		);
 	};
@@ -2634,7 +2630,7 @@ export function ProfileDetailsModal({
 				mobileCarouselPhotoIndex={0}
 				openPhotoViewer={() => {}}
 				activeProfileName={detail.displayName?.trim() || t("common.unknown_display_name")}
-				estimatedCreatedAt={formatEstimatedAccountCreation(detail.profileId, t)}
+				accountCreatedLabel={accountCreationLabel(detail)}
 				travelPlans={queryClient.getQueryData<TravelPlan[]>(["travel-plans", String(detail.profileId)])}
 				profileStatusLabel={status.label}
 				profileStatusLevel={status.level}
@@ -2723,7 +2719,17 @@ export function ProfileDetailsModal({
 									<Star className={`h-4 w-4 ${isFavorite ? "fill-current" : ""}`} />
 								</button>
 							)}
-							{(onBlockProfile || onUnblockProfile) && !isBlockedByOther && (isBlocked || !isSnapshotProfile) && (
+							{blockBecomesHide && (onHideProfile || onUnhideProfile) && canToggleHidden && (
+								<button
+									type="button"
+									onClick={toggleHidden}
+									className={`header-icon-btn inline-flex shrink-0 items-center justify-center rounded-xl border p-2 transition-colors ${inlineScrolled ? "border-[var(--border)] bg-[var(--surface-2)] text-[var(--text-muted)] hover:text-[var(--text)]" : "border-white/45 bg-transparent text-white shadow-[0_10px_28px_-18px_rgba(0,0,0,0.95)] backdrop-blur-md drop-shadow-[0_1px_2px_rgba(0,0,0,0.85)]"}`}
+									aria-label={isHidden ? t("profile_details.unhide") : t("profile_details.hide")}
+								>
+									{isHidden ? <EyeFilled className="h-4 w-4" /> : <EyeOffFilled className="h-4 w-4" />}
+								</button>
+							)}
+							{!blockBecomesHide && (onBlockProfile || onUnblockProfile) && !isBlockedByOther && (isBlocked || !isSnapshotProfile) && (
 								<button
 									type="button"
 									onClick={() => isBlocked ? onUnblockProfile?.(String(messageProfileId)) : (messageProfileId && onBlockProfile?.(String(messageProfileId)))}
@@ -2752,6 +2758,7 @@ export function ProfileDetailsModal({
 								{actionsMenuPresence.rendered && (
 									<div data-lenis-prevent style={menuTransitionStyle(actionsMenuPresence.visible)} className="absolute end-0 top-full z-50 mt-1 flex max-h-[calc(100dvh-8rem)] min-w-[190px] flex-col gap-2 overflow-y-auto overscroll-contain rounded-lg menu-surface py-2">
 										<div className="flex flex-col gap-1 px-2">
+										{shareMenuItem}
 										{showLocate && (
 										<button
 											type="button"
@@ -2763,11 +2770,11 @@ export function ProfileDetailsModal({
 											{locateLabel ?? t("profile_details.locate")}
 										</button>
 										)}
-										{(onHideProfile || onUnhideProfile) && (
+										{!blockBecomesHide && (onHideProfile || onUnhideProfile) && (
 										<button
 											type="button"
-											disabled={isProfileUnavailable}
-											onClick={() => { setIsActionsMenuOpen(false); if (!messageProfileId || isProfileUnavailable) return; isHidden ? onUnhideProfile?.(String(messageProfileId)) : onHideProfile?.(String(messageProfileId)); }}
+											disabled={!canToggleHidden}
+											onClick={() => { setIsActionsMenuOpen(false); toggleHidden(); }}
 											className="flex items-center rounded-sm px-2 py-2 text-start text-sm text-[var(--text)] transition hover-fill disabled:opacity-50"
 										>
 											{isHidden ? <EyeFilled className="me-2 h-4 w-4 opacity-70" /> : <EyeOffFilled className="me-2 h-4 w-4 opacity-70" />}
@@ -2802,6 +2809,7 @@ export function ProfileDetailsModal({
 										)}
 										</div>
 										)}
+										{profileNetworkMenuBlock}
 										{reportMenuItem}
 									</div>
 								)}
@@ -2912,7 +2920,7 @@ export function ProfileDetailsModal({
 					) : activeProfileError ? (
 						<p className="text-sm text-[var(--text-muted)]">{activeProfileError}</p>
 					) : activeProfile && isOwnProfile && isEditingOwnProfile ? (
-						<OwnProfileEditPanel onDone={finishOwnProfileEdit} onDirtyChange={setHasUnsavedOwnEdits} onPhotoHashesChange={setEditedOwnPhotoHashes} onPhotoControlsChange={setOwnPhotoControls} />
+						<OwnProfileEditPanel onDone={finishOwnProfileEdit} onDirtyChange={setHasUnsavedOwnEdits} onPhotoHashesChange={setEditedOwnPhotoHashes} onPhotoControlsChange={setOwnPhotoControls} focusLinkedProfiles={focusLinkedProfilesOnEdit} />
 					) : activeProfile ? (
 						<ProfileDetailsContent
 							activeProfile={activeProfile}
@@ -2923,7 +2931,7 @@ export function ProfileDetailsModal({
 							mobileCarouselPhotoIndex={mobileCarouselPhotoIndex}
 							openPhotoViewer={openPhotoViewer}
 							activeProfileName={activeProfileName}
-							estimatedCreatedAt={estimatedCreatedAt}
+							accountCreatedLabel={accountCreatedLabel}
 							travelPlans={travelPlans}
 							profileStatusLabel={profileStatusLabel}
 							profileStatusLevel={profileStatusLevel}
@@ -2936,6 +2944,7 @@ export function ProfileDetailsModal({
 							onTapProfile={variant === "page" && !isOwnProfile ? onTapProfile : undefined}
 							onTagClick={onTagClick}
 							onPhotoIndexChange={setMobileCarouselPhotoIndex}
+							onManageLinkedProfiles={isOwnProfile ? manageOwnLinkedProfiles : undefined}
 							isTapDisabled={isTapDisabled}
 							isTapBlocked={isTapBlocked}
 							isTapActive={isTapActive}
@@ -2981,7 +2990,7 @@ export function ProfileDetailsModal({
 
 	if (variant === "page") {
 		return (
-			<div ref={pageScreenRef} className={`app-screen flex h-dvh flex-col w-full !px-0 !pb-0 !pt-0 overflow-x-hidden bg-[var(--bg)] ${isOverBackground ? "fixed inset-0 z-[60]" : "relative"}`}>
+			<div className={`app-screen flex h-dvh flex-col w-full !px-0 !pb-0 !pt-0 overflow-x-hidden bg-[var(--bg)] ${isOverBackground ? "fixed inset-0 z-[60]" : "relative"}`}>
 				<div
 					ref={pageWrapRef}
 					// translateX is driven by the profile swipe handler.
@@ -3003,6 +3012,7 @@ export function ProfileDetailsModal({
 				{encounterSheet}
 				{nicknamePrompt}
 				{reportDialog}
+				{profileNetworkMenu.dialog}
 				{discardEditsDialog}
 				<PromptDialog
 					isOpen={banBioPrompt !== null}
@@ -3205,7 +3215,14 @@ export function ProfileDetailsModal({
 													<Star className={`h-4 w-4 ${isFavorite ? "fill-current" : ""}`} />
 												</button>
 											)}
-											{(onBlockProfile || onUnblockProfile) && !isBlockedByOther && (isBlocked || !isSnapshotProfile) && (
+											{blockBecomesHide && (onHideProfile || onUnhideProfile) && canToggleHidden && (
+												<button type="button" onClick={toggleHidden}
+													className="header-icon-btn shrink-0 rounded-xl text-[var(--text-muted)] transition-colors hover:text-[var(--text)]"
+													aria-label={isHidden ? t("profile_details.unhide") : t("profile_details.hide")}>
+													{isHidden ? <EyeFilled className="h-4 w-4" /> : <EyeOffFilled className="h-4 w-4" />}
+												</button>
+											)}
+											{!blockBecomesHide && (onBlockProfile || onUnblockProfile) && !isBlockedByOther && (isBlocked || !isSnapshotProfile) && (
 												<button type="button" onClick={() => isBlocked ? onUnblockProfile?.(String(messageProfileId)) : (messageProfileId && onBlockProfile?.(String(messageProfileId)))} disabled={isBlockingProfile}
 													className={`header-icon-btn shrink-0 rounded-xl transition-colors disabled:opacity-60 ${isBlocked ? "text-emerald-500" : "text-red-500"}`}
 													aria-label={isBlocked ? t("profile_details.unblock") : t("profile_details.block")}>
@@ -3222,6 +3239,7 @@ export function ProfileDetailsModal({
 												{actionsMenuPresence.rendered && (
 													<div data-lenis-prevent style={menuTransitionStyle(actionsMenuPresence.visible)} className="absolute end-0 top-full z-50 mt-1 flex max-h-[calc(100dvh-8rem)] min-w-[190px] flex-col gap-2 overflow-y-auto overscroll-contain rounded-lg menu-surface py-2">
 														<div className="flex flex-col gap-1 px-2">
+														{shareMenuItem}
 														{showLocate && (
 														<button type="button" disabled={isTriangleDisabled}
 															onClick={() => { setIsActionsMenuOpen(false); if (messageProfileId) onTriangleProfile?.(String(messageProfileId)); }}
@@ -3230,11 +3248,11 @@ export function ProfileDetailsModal({
 															{locateLabel ?? t("profile_details.locate")}
 														</button>
 														)}
-														{(onHideProfile || onUnhideProfile) && (
+														{!blockBecomesHide && (onHideProfile || onUnhideProfile) && (
 														<button
 															type="button"
-															disabled={isProfileUnavailable}
-															onClick={() => { setIsActionsMenuOpen(false); if (!messageProfileId || isProfileUnavailable) return; isHidden ? onUnhideProfile?.(String(messageProfileId)) : onHideProfile?.(String(messageProfileId)); }}
+															disabled={!canToggleHidden}
+															onClick={() => { setIsActionsMenuOpen(false); toggleHidden(); }}
 															className="flex items-center rounded-sm px-2 py-2 text-start text-sm text-[var(--text)] transition hover-fill disabled:opacity-50"
 														>
 															{isHidden ? <EyeFilled className="me-2 h-4 w-4 opacity-70" /> : <EyeOffFilled className="me-2 h-4 w-4 opacity-70" />}
@@ -3269,6 +3287,7 @@ export function ProfileDetailsModal({
 														)}
 														</div>
 														)}
+														{profileNetworkMenuBlock}
 														{reportMenuItem}
 													</div>
 												)}
@@ -3285,7 +3304,7 @@ export function ProfileDetailsModal({
 									) : activeProfileError ? (
 										<p className="text-sm text-[var(--text-muted)]">{activeProfileError}</p>
 									) : activeProfile && isOwnProfile && isEditingOwnProfile ? (
-										<OwnProfileEditPanel onDone={finishOwnProfileEdit} onDirtyChange={setHasUnsavedOwnEdits} onPhotoHashesChange={setEditedOwnPhotoHashes} onPhotoControlsChange={setOwnPhotoControls} />
+										<OwnProfileEditPanel onDone={finishOwnProfileEdit} onDirtyChange={setHasUnsavedOwnEdits} onPhotoHashesChange={setEditedOwnPhotoHashes} onPhotoControlsChange={setOwnPhotoControls} focusLinkedProfiles={focusLinkedProfilesOnEdit} />
 									) : activeProfile ? (
 										<ProfileDetailsContent
 											activeProfile={activeProfile}
@@ -3296,7 +3315,7 @@ export function ProfileDetailsModal({
 											mobileCarouselPhotoIndex={mobileCarouselPhotoIndex}
 											openPhotoViewer={openPhotoViewer}
 											activeProfileName={activeProfileName}
-											estimatedCreatedAt={estimatedCreatedAt}
+											accountCreatedLabel={accountCreatedLabel}
 											travelPlans={travelPlans}
 											profileStatusLabel={profileStatusLabel}
 											profileStatusLevel={profileStatusLevel}
@@ -3307,6 +3326,7 @@ export function ProfileDetailsModal({
 											messageProfileId={messageProfileId}
 											onMessageProfile={undefined}
 											onTapProfile={undefined}
+											onManageLinkedProfiles={isOwnProfile ? manageOwnLinkedProfiles : undefined}
 											onTagClick={onTagClick}
 											isTapDisabled={isTapDisabled}
 											isTapBlocked={isTapBlocked}
@@ -3382,6 +3402,7 @@ export function ProfileDetailsModal({
 			{encounterSheet}
 			{nicknamePrompt}
 			{reportDialog}
+			{profileNetworkMenu.dialog}
 			{discardEditsDialog}
 			<PromptDialog
 				isOpen={banBioPrompt !== null}

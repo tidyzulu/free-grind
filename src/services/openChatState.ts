@@ -12,6 +12,8 @@ type OpenChat = { conversationId: string | null; profileId: string | null };
 
 let openChat: OpenChat | null = null;
 
+import { isGroupConversationId } from "../utils/groupChat";
+
 export function setOpenChat(next: OpenChat | null): void {
 	openChat = next && (next.conversationId || next.profileId) ? next : null;
 }
@@ -19,5 +21,7 @@ export function setOpenChat(next: OpenChat | null): void {
 export function isChatOpen(conversationId: string, senderId: string | number | null | undefined): boolean {
 	if (!openChat) return false;
 	if (openChat.conversationId && openChat.conversationId === conversationId) return true;
+	// A group message is only "seen" in that group, not in the sender's 1:1 chat.
+	if (isGroupConversationId(conversationId)) return false;
 	return senderId != null && openChat.profileId != null && openChat.profileId === String(senderId);
 }

@@ -20,7 +20,7 @@ Each input is pinned in one place, which both CI and local tools read:
 | Tauri CLI               | —               | `package.json` / `bun.lock`                                        |
 | Cargo dependencies      | —               | [`src-tauri/Cargo.lock`](./src-tauri/Cargo.lock), CI checks it with `--locked` |
 | Patched crates          | —               | `src-tauri/*-patched/`, [`.cargo-patches/`](./.cargo-patches)      |
-| Google OAuth extension  | —               | git submodule commit (`src-tauri/vendor/`)                         |
+| Google OAuth extension  | —               | vendored in [`src-tauri/vendor/`](./src-tauri/vendor)                  |
 | Android SDK platform    | 36              | `src-tauri/gen/android/app/build.gradle.kts`, `ci/build/Dockerfile` |
 | Android build-tools     | 36.0.0          | `src-tauri/gen/android/app/build.gradle.kts`, `ci/build/Dockerfile` |
 | Android NDK             | 29.0.14206865   | `src-tauri/gen/android/app/build.gradle.kts`, `ci/build/Dockerfile` |
@@ -33,13 +33,9 @@ To bump Rust, Bun or Node, change the version in its file. The container build t
 
 ## Getting the source
 
-The desktop and Android builds compile in a git submodule, so clone with submodules:
-
 ```bash
-git clone --recurse-submodules https://github.com/fdev8974/free-grind.git
+git clone https://github.com/tidyzulu/free-grind.git
 cd free-grind
-# for an existing checkout, or after switching tags:
-git submodule update --init
 ```
 
 ## Release builds
@@ -51,6 +47,16 @@ FG_CHANNEL=main sh ci/build/run.sh android   # or: windows, linux, frontend
 ```
 
 The outputs land in `out/<artifact>/`. [REPRODUCIBILITY.md](./REPRODUCIBILITY.md) explains `FG_CHANNEL` and how to compare the outputs with a release.
+
+## App identity
+
+The app's identity (name, identifier, user agent, update endpoint and key, repository links) comes from [`manifest/app.json`](./manifest/app.json); `manifest/android/res` holds the Android launcher icons and name.
+
+`scripts/tauri-config.mjs` turns it into the Tauri config patch (`TAURI_CONFIG`), and `vite.config.mjs` into the frontend constants `__APP_NAME__`, `__REPO_URL__` and so on (declared in `src/vite-env.d.ts`).
+
+Texts never hardcode the app's name: translations use `{{appName}}` (and `{{appFolder}}` for the export folder, as in `Downloads/{{appFolder}}`), which i18next fills in for every string.
+
+The Grindr workarounds live in `src/grindr-workarounds`, their texts in `public/locales/<locale>/grindr.json` (keys as `grindr:…`).
 
 ## Development builds
 

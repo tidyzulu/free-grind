@@ -1,0 +1,66 @@
+{
+    "profile_details": {
+        "location_finder_running": "محدد الموقع قيد التشغيل",
+        "location_finder": "محدد المواقع",
+        "location_finder_confirm_title": "محدد الموقع",
+        "location_finder_confirm_message": "يستطيع {{appName}} تحديد موقع هذا الملف بالتثليث عن طريق تغيير موقعك على الخادم مرارًا. يستغرق ذلك بضع دقائق، ثم يُستعاد موقعك.",
+        "location_finder_confirm_warning": "هذا ينتهك شروط خدمة Grindr وقد يؤدي إلى حظر حسابك. استخدمه على مسؤوليتك.",
+        "location_finder_confirm_start": "تحديد الموقع على أي حال",
+        "location_finder_error_distance": "تعذر استرداد مسافة الهدف",
+        "location_finder_start": "المسافة المستهدفة: {{distance}} متر. بنبدأ {{rounds}} جولات تثليث.",
+        "location_finder_round_complete": "الجولة {{round}} خلصت. {{lat}}، {{lon}}. المسافة المتوقعة: حوالي {{distance}} متر.",
+        "location_finder_error_estimate": "الجولة {{round}} خلصت. الخطأ المتوقع: حوالي {{error}} متر",
+        "location_finder_final_location": "المستخدم تقريبًا عند خط العرض: {{lat}}، خط الطول: {{lon}}. الخطأ المتوقع: حوالي {{error}} متر من آخر مكان متوقع.",
+        "location_finder_error_general": "حدث خطأ أثناء عملية التثليث",
+        "location_finder_error_age_verification_region": "اتوقف: البروفايل ده في منطقة أو قريب من منطقة Grindr بيطلب فيها تأكيد السن. لو نقلت مكانك هناك حسابك هيتقفل.",
+        "location_finder_location_copied": "تم نسخ الموقع إلى الحافظة",
+        "location_finder_result_title": "تم العثور على الموقع",
+        "location_finder_result_error": "هامش الخطأ التقديري: ~{{error}} م",
+        "location_finder_open_maps": "فتح في الخرائط",
+        "location_finder_copy": "نسخ الإحداثيات",
+        "location_finder_status_measuring": "جارٍ قياس المسافة الأولية…",
+        "location_finder_status_round": "الجولة {{round}}/{{rounds}} · قياس النقطة {{point}}/3",
+        "location_finder_status_cancelled": "متوقف",
+        "location_finder_initial_distance": "المسافة الأولية: {{distance}} م",
+        "location_finder_restoring": "جارٍ استعادة موقعك…",
+        "location_finder_label_initial_distance": "المسافة الأولية",
+        "location_finder_label_accuracy": "الدقة",
+        "location_finder_region_limited": "الدقة محدودة: البروفايل ده في منطقة أو قريب من منطقة Grindr بيطلب فيها تأكيد السن، ولو قرّبت أكتر حسابك هيتقفل.",
+        "location_finder_stop": "إيقاف",
+        "location_finder_busy": "تحديد الموقع شغّال بالفعل لبروفايل تاني.",
+        "locating": "تحديد الموقع",
+        "run_location_finder": "تشغيل محدد المواقع"
+    },
+    "interest_page": {
+        "onboarding": {
+            "title": "زوار البروفايل",
+            "limitation_title": "إزاي بتشتغل",
+            "limitation_desc": "جريندر عادةً بيوريك آخر زائر بس بالتفصيل. الباقي غالبًا مخفي ورا باي وول أو بيظهر كمعاينات مجهولة.",
+            "recovery_title": "استرجاع ذكي",
+            "recovery_desc": "{{appName}} بيطابق الزوار المجهولين أوتوماتيك مع السجل المحلي بتاعك. لو لقينا تطابق، البروفايل هيبان لك.",
+            "button": "Got it"
+        }
+    },
+    "entitlement_bypass": {
+        "prompt_title": "ميزة مدفوعة",
+        "prompt_message": "يمكن لـ {{appName}} محاولة تجاوز ذلك عبر تزييف موقعك إلى هندوراس للحظات.",
+        "prompt_warning": "هذا ينتهك شروط خدمة Grindr وقد يؤدي إلى حظر حسابك. استخدمه على مسؤوليتك.",
+        "prompt_confirm": "التجاوز على أي حال",
+        "prompt_cancel": "إلغاء",
+        "reason_expiring_photo": "تم بلوغ الحد اليومي للصور المؤقتة. إرسال المزيد يتطلب اشتراك Grindr.",
+        "reason_message": "إرسال هذه الرسالة يتطلب اشتراك Grindr.",
+        "reason_unsend": "إلغاء إرسال رسالة يتطلب اشتراك Grindr.",
+        "reason_album_share": "مشاركة هذا الألبوم تتطلب اشتراك Grindr.",
+        "still_refused": "لا يزال Grindr يرفض هذه الميزة المدفوعة",
+        "no_location": "حدّد موقعك قبل استخدام هذا التجاوز",
+        "failed": "فشل تجاوز هذه الميزة المدفوعة",
+        "expiring_album_no_bypass": "الألبومات المؤقتة ميزة مدفوعة في Grindr، ولا يوجد تجاوز لها."
+    },
+    "behavior": {
+        "default_expiring_photos_free_warning": "بدون اشتراك، يمكنك إرسال عدد محدود فقط من الصور ذاتية الاختفاء يوميًا. بعد ذلك يلزم تجاوز الموقع (هندوراس)، وهو ما يخالف شروط خدمة Grindr وقد يؤدي إلى حظر حسابك."
+    },
+    "customizability": {
+        "show_locate": "تحديد الموقع",
+        "show_locate_desc": "اعرض \"تحديد الموقع\" في قائمة الملف الشخصي لتقدير موقع الملف بالتثليث."
+    }
+}

@@ -14,7 +14,7 @@ import { useManagedGenders, useManagedPronouns, useBlockedProfileIds, useBlockPr
 import { extractMediaHashFromUrl, getProfileImageUrl, validateMediaHash } from "../../utils/media";
 import { ProfileDetailsModal, type ProfileSwipePreview } from "./gridpage/components/ProfileDetailsModal";
 import { useTapProfile } from "./gridpage/hooks/useTapProfile";
-import { useLocateProfile } from "./gridpage/hooks/useLocateProfile";
+import { useLocateProfile } from "../../grindr-workarounds";
 import { loadBrowseFiltersDraft } from "./browse-filters-storage";
 import {
 	getAllCachedBrowseCardsById,
@@ -32,10 +32,10 @@ import {
 	getBlockStatesByProfileIds,
 	getProfileSnapshot,
 	insertSystemMessage,
-	listHiddenProfileIds,
 } from "../../services/chatDb";
 import { profileDetailItemSchema } from "../../types/grid";
-import { hideProfile as hideProfileLocally, unhideProfile as unhideProfileLocally } from "../../services/profileHide";
+import { hideProfile, listHiddenProfileIds, unhideProfile } from "../../services/profileHide";
+import { useProfileHideMode } from "../../services/profileHideMode";
 import { unarchiveConversation, claimBlockStateTransition } from "../../services/conversationArchive";
 import { appLog } from "../../utils/logger";
 import { consumeSelfBlockAction } from "../../utils/selfBlockActions";
@@ -88,6 +88,7 @@ export function GridProfilePage() {
 	const params = useParams();
 	const [searchParams] = useSearchParams();
 	const apiFunctions = useApiFunctions();
+	const hideMode = useProfileHideMode();
 
 	const { data: managedGenders } = useManagedGenders();
 	const { data: managedPronouns } = useManagedPronouns();
@@ -141,19 +142,38 @@ export function GridProfilePage() {
 	const parsedParams = profileRouteParamsSchema.safeParse(params);
 	const profileId = parsedParams.success ? parsedParams.data.profileId : null;
 
+	// Show what's already cached for this profile in the very first frame, on
+	// open and on a swipe to a neighbour, instead of waiting for the load
+	// effect below: that runs after paint, so the loading placeholder (or the
+	// previous profile) would flash for a frame first. Updating state during
+	// render makes React redo the render before anything is painted.
+	const [shownProfileId, setShownProfileId] = useState<string | null>(null);
+	if (profileId && shownProfileId !== profileId) {
+		setShownProfileId(profileId);
+		const cachedProfile = getCachedProfileDetail(profileId);
+		if (cachedProfile) {
+			setActiveProfile(cachedProfile);
+			setIsSnapshotProfile(false);
+			setActiveProfileError(null);
+			setIsLoadingActiveProfile(false);
+		} else {
+			setIsLoadingActiveProfile(true);
+		}
+	}
+
 	useEffect(() => {
 		if (!profileId) {
 			setIsHidden(false);
 			return;
 		}
 		let cancelled = false;
-		void listHiddenProfileIds().then((ids) => {
+		void listHiddenProfileIds(apiFunctions).then((ids) => {
 			if (!cancelled) setIsHidden(ids.includes(profileId));
 		});
 		return () => {
 			cancelled = true;
 		};
-	}, [profileId]);
+	}, [profileId, apiFunctions, hideMode]);
 
 	useEffect(() => {
 		if (!profileId) {
@@ -239,12 +259,15 @@ export function GridProfilePage() {
 	const isTappingProfile = tappingProfileId === profileId;
 
 	const locationState =
-		(location.state as { returnTo?: unknown; profileIds?: unknown; fromChat?: unknown; backgroundLocation?: unknown; editOwnProfile?: unknown } | null) ?? {};
+		(location.state as { returnTo?: unknown; profileIds?: unknown; fromChat?: unknown; backgroundLocation?: unknown; editOwnProfile?: unknown; stacked?: unknown } | null) ?? {};
 	// Opened from a chat thread, which sits directly below in history.
 	const openedFromChat = locationState.fromChat === true;
 	// Shown as a modal over the page that opened it (see App.tsx), which is
 	// also directly below in history.
 	const isOverBackground = locationState.backgroundLocation != null;
+	// Opened from another profile or page that sits directly below in history
+	// (e.g. a linked profile); closing pops back to it.
+	const isStacked = locationState.stacked === true;
 	const returnToFromState =
 		typeof locationState.returnTo === "string" ? locationState.returnTo : null;
 	const profileIds: string[] = Array.isArray(locationState.profileIds)
@@ -257,7 +280,7 @@ export function GridProfilePage() {
 		returnTo.startsWith("/") &&
 		!returnTo.startsWith("//")
 			? returnTo
-			: "/browse";
+			: "/";
 
 	const currentIndex = profileId ? profileIds.indexOf(profileId) : -1;
 	const prevProfileId = currentIndex > 0 ? profileIds[currentIndex - 1] : null;
@@ -299,10 +322,10 @@ export function GridProfilePage() {
 	}, [prevProfileId, nextProfileId]);
 
 	const handlePrevProfile = prevProfileId
-		? () => navigate(`/profile/${prevProfileId}`, { replace: true, state: { returnTo: safeReturnTo, profileIds, backgroundLocation: locationState.backgroundLocation } })
+		? () => navigate(`/profile/${prevProfileId}`, { replace: true, state: { returnTo: safeReturnTo, profileIds } })
 		: undefined;
 	const handleNextProfile = nextProfileId
-		? () => navigate(`/profile/${nextProfileId}`, { replace: true, state: { returnTo: safeReturnTo, profileIds, backgroundLocation: locationState.backgroundLocation } })
+		? () => navigate(`/profile/${nextProfileId}`, { replace: true, state: { returnTo: safeReturnTo, profileIds } })
 		: undefined;
 
 	useEffect(() => {
@@ -515,15 +538,25 @@ export function GridProfilePage() {
 	};
 
 	const handleHideProfile = (targetProfileId: string) => {
-		void hideProfileLocally(targetProfileId, activeProfile?.displayName ?? null, activeProfile?.profileImageMediaHash ?? null);
-		setIsHidden(true);
-		toast.success(t("profile_details.hide_success"));
+		void hideProfile(apiFunctions, targetProfileId, activeProfile?.displayName ?? null, activeProfile?.profileImageMediaHash ?? null).then((ok) => {
+			if (!ok) {
+				toast.error(t("profile_details.hide_failed", { defaultValue: "Failed to hide profile." }));
+				return;
+			}
+			setIsHidden(true);
+			toast.success(t("profile_details.hide_success"));
+		});
 	};
 
 	const handleUnhideProfile = (targetProfileId: string) => {
-		void unhideProfileLocally(targetProfileId);
-		setIsHidden(false);
-		toast.success(t("profile_details.unhide_success"));
+		void unhideProfile(apiFunctions, targetProfileId).then((ok) => {
+			if (!ok) {
+				toast.error(t("profile_details.unhide_failed", { defaultValue: "Failed to unhide profile." }));
+				return;
+			}
+			setIsHidden(false);
+			toast.success(t("profile_details.unhide_success"));
+		});
 	};
 
 	const handleToggleFavoriteProfile = async (
@@ -606,7 +639,7 @@ export function GridProfilePage() {
 				// Settings' profile row opens your own profile straight in edit mode.
 				initialEditMode={locationState.editOwnProfile === true}
 				onClose={() => {
-					if (openedFromChat || isOverBackground) {
+					if (openedFromChat || isOverBackground || isStacked) {
 						navigateBackTo(navigate, safeReturnTo);
 					} else {
 						navigate(safeReturnTo, { replace: true });

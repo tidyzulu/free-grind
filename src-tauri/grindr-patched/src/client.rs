@@ -826,6 +826,7 @@ impl GrindrClient {
 	) -> Result<bool, GrindrError> {
 		crate::auth::recaptcha_first_party_enabled(&self.inner).await
 	}
+
 }
 
 #[cfg(test)]

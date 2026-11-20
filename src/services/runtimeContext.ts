@@ -57,7 +57,7 @@ async function getTraceRuntimeContext(): Promise<RuntimeContext | null> {
     if (platform() !== "windows") {
         return null;
     }
-    const tracePath = "AppData/Local/free-grind/manager/runtime-mode.txt";
+    const tracePath = `AppData/Local/${__APP_SLUG__}/manager/runtime-mode.txt`;
     try {
         const traceExists = await exists(tracePath, { baseDir: BaseDirectory.Home });
         if (!traceExists) {

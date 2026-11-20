@@ -235,7 +235,7 @@ export async function pickBackupFileDesktop(): Promise<string | null> {
 	const path = await openFileDialog({
 		multiple: false,
 		directory: false,
-		filters: [{ name: "Free Grind data export", extensions: ["zip"] }],
+		filters: [{ name: `${__APP_NAME__} data export`, extensions: ["zip"] }],
 	});
 	return typeof path === "string" ? path : null;
 }
@@ -399,11 +399,11 @@ export async function exportBackup(
 	destination: BackupExportDestination = "downloads",
 	remoteEntries: Partial<Record<BackupCategoryId, unknown>> = {},
 ): Promise<boolean> {
-	const fileName = `free-grind-data-${new Date().toISOString().slice(0, 10)}.zip`;
+	const fileName = `${__APP_SLUG__}-data-${new Date().toISOString().slice(0, 10)}.zip`;
 
 	if (isIos()) {
 		if (destination === "downloads") {
-			await exportBackupToFile(dbFileName, ownerUserId, await join(await documentDir(), "FreeGrind", fileName), categories, remoteEntries);
+			await exportBackupToFile(dbFileName, ownerUserId, await join(await documentDir(), __APP_FOLDER__, fileName), categories, remoteEntries);
 			return true;
 		}
 		// iOS has no "pick a path, write later" dialog: the plugin's save()
@@ -421,9 +421,9 @@ export async function exportBackup(
 	}
 
 	if (!isAndroid()) {
-		const defaultPath = await join(await downloadDir(), "FreeGrind", fileName);
+		const defaultPath = await join(await downloadDir(), __APP_FOLDER__, fileName);
 		const destPath =
-			destination === "picker" ? await save({ defaultPath, filters: [{ name: "Free Grind backup", extensions: ["zip"] }] }) : defaultPath;
+			destination === "picker" ? await save({ defaultPath, filters: [{ name: `${__APP_NAME__} backup`, extensions: ["zip"] }] }) : defaultPath;
 		if (!destPath) return false;
 		await exportBackupToFile(dbFileName, ownerUserId, destPath, categories, remoteEntries);
 		return true;
@@ -443,7 +443,7 @@ export async function exportBackup(
 			await invoke("copy_file_to_android_uri", { srcPath: tempPath, destUri: pickedUri });
 			return true;
 		}
-		const uri = await AndroidFs.createNewPublicFile(AndroidPublicGeneralPurposeDir.Download, `FreeGrind/${fileName}`, "application/zip", {
+		const uri = await AndroidFs.createNewPublicFile(AndroidPublicGeneralPurposeDir.Download, `${__APP_FOLDER__}/${fileName}`, "application/zip", {
 			isPending: true,
 		});
 		try {

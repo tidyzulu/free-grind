@@ -187,6 +187,8 @@ export interface MySettings {
 	showOnMap: boolean;
 	/** How far (meters) the map position is offset from the real one; null = server default. */
 	mapLocationFuzzRadius: number | null;
+	/** Server-side incognito: shown as offline everywhere. Paid upstream, per role on Free Grind. */
+	incognito: boolean;
 }
 
 export interface ManagedPronoun {
@@ -209,7 +211,8 @@ export interface ManagedTagCategory {
 export interface ProfileImageUploadResult {
 	hash?: string;
 	mediaHash?: string;
-	imageSizes?: Array<{ mediaHash?: string }>;
+	/** `state`: moderation state; null upstream until reviewed, "1" (approved) on a self-hosted server. */
+	imageSizes?: Array<{ mediaHash?: string; state?: string | number | null }>;
 }
 
 export interface GetSharedAlbumsInput {

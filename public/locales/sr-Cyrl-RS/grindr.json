@@ -1,0 +1,66 @@
+{
+    "profile_details": {
+        "location_finder_running": "Проналажење локације је у току",
+        "location_finder": "Проналажење локације",
+        "location_finder_confirm_title": "Проналажење локације",
+        "location_finder_confirm_message": "{{appName}} може триангулацијом утврдити положај овог профила тако што више пута мења вашу локацију на серверу. Ово траје неколико минута; ваша локација се након тога враћа.",
+        "location_finder_confirm_warning": "Ово крши услове коришћења Grindr-а и може довести до забране вашег налога. Користите на сопствени ризик.",
+        "location_finder_confirm_start": "Ипак лоцирај",
+        "location_finder_error_distance": "Преузимање удаљености циља није успело.",
+        "location_finder_start": "Удаљеност циља: {{distance}} m. Покреће се {{rounds}} кругова триангулације.",
+        "location_finder_round_complete": "Круг {{round}} је завршен. {{lat}}, {{lon}}. Процењена удаљеност: ~{{distance}} m.",
+        "location_finder_error_estimate": "Круг {{round}} је завршен. Процењена грешка: ~{{error}} m",
+        "location_finder_final_location": "Корисник се налази приближно на ш: {{lat}}, д: {{lon}}. Процењена грешка: ~{{error}} метара од коначне процењене локације.",
+        "location_finder_error_general": "Дошло је до грешке током триангулације",
+        "location_finder_error_age_verification_region": "Заустављено: овај профил је у региону или близу региона у ком Grindr захтева проверу узраста. Померање ваше локације тамо закључало би ваш налог.",
+        "location_finder_location_copied": "Локација је копирана у привремену меморију",
+        "location_finder_result_title": "Локација је пронађена",
+        "location_finder_result_error": "Процењена грешка: ~{{error}} m",
+        "location_finder_open_maps": "Отвори у Мапама",
+        "location_finder_copy": "Копирај координате",
+        "location_finder_status_measuring": "Мерење почетне удаљености…",
+        "location_finder_status_round": "Круг {{round}}/{{rounds}} · мерење тачке {{point}}/3",
+        "location_finder_status_cancelled": "Заустављено",
+        "location_finder_initial_distance": "Почетна удаљеност: {{distance}} m",
+        "location_finder_restoring": "Враћање ваше локације…",
+        "location_finder_label_initial_distance": "Почетна удаљеност",
+        "location_finder_label_accuracy": "Прецизност",
+        "location_finder_region_limited": "Прецизност је ограничена: овај профил је у региону или близу региона у ком Grindr захтева проверу узраста, а приближавање би закључало ваш налог.",
+        "location_finder_stop": "Заустави",
+        "location_finder_busy": "Лоцирање је већ покренуто за други профил.",
+        "locating": "Лоцирање…",
+        "run_location_finder": "Покрени проналажење локације"
+    },
+    "interest_page": {
+        "onboarding": {
+            "title": "Посетиоци профила",
+            "limitation_title": "Како функционише",
+            "limitation_desc": "Grindr обично у потпуности приказује само последњег посетиоца. Остали су обично скривени иза плаћене претплате или приказани као анонимни прегледи.",
+            "recovery_title": "Паметно препознавање",
+            "recovery_desc": "{{appName}} аутоматски упоређује анонимне посетиоце са вашом локалном историјом. Ако пронађемо подударање, профил ће вам бити откривен.",
+            "button": "Разумем"
+        }
+    },
+    "entitlement_bypass": {
+        "prompt_title": "Плаћена функција",
+        "prompt_message": "{{appName}} може покушати да ово заобиђе тако што ће на тренутак лажно поставити вашу локацију у Хондурас.",
+        "prompt_warning": "Ово крши услове коришћења Grindr-а и може довести до забране вашег налога. Користите на сопствени ризик.",
+        "prompt_confirm": "Ипак заобиђи",
+        "prompt_cancel": "Откажи",
+        "reason_expiring_photo": "Достигнуто је дневно ограничење нестајућих фотографија. За слање још потребна је Grindr претплата.",
+        "reason_message": "За слање ове поруке потребна је Grindr претплата.",
+        "reason_unsend": "За повлачење поруке потребна је Grindr претплата.",
+        "reason_album_share": "За дељење овог албума потребна је Grindr претплата.",
+        "still_refused": "Grindr је и даље одбио ову плаћену функцију",
+        "no_location": "Подесите локацију пре коришћења овог заобилажења",
+        "failed": "Заобилажење ове плаћене функције није успело",
+        "expiring_album_no_bypass": "Нестајући албуми су плаћена Grindr функција и за њих не постоји заобилажење."
+    },
+    "behavior": {
+        "default_expiring_photos_free_warning": "На бесплатном плану можете послати само ограничен број фотографија које нестају дневно. Након тога је потребно заобилажење локације (Хондурас), што крши Grindr-ове услове коришћења и може довести до забране вашег налога."
+    },
+    "customizability": {
+        "show_locate": "Лоцирај",
+        "show_locate_desc": "Прикажи „Лоцирај“ у менију профила за процену положаја профила триангулацијом."
+    }
+}

@@ -54,7 +54,8 @@ object ApkUpdater {
     SELF(
       "app",
       "free-grind-update.apk",
-      "https://github.com/fdev8974/free-grind/releases/download/",
+      // The app's repository (build.gradle.kts, from its manifest).
+      BuildConfig.RELEASES_DOWNLOAD_URL,
     );
 
     fun packageName(context: Context): String = when (this) {

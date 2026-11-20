@@ -10,6 +10,9 @@ import { formatRelativeTime } from "../../../utils/relativeTime";
 import { hourCycleOptions } from "../../../utils/timeFormat";
 import { ONLINE_ENDING_SOON_MINUTES } from "../gridpage/utils";
 import { sanitizeUploadFile } from "../../../services/uploadSanitize";
+import { isFeatureOn } from "../../../services/assignmentsStore";
+import { type ChatSendTarget, groupIdOfConversation, isGroupConversationId } from "../../../utils/groupChat";
+import { getGroupEventLabel } from "./groups/groupLabels";
 
 export type ChatFiltersDraft = {
 	unreadOnly: boolean;
@@ -370,13 +373,43 @@ export function conversationNeedsReply(
  * since "Sent you…" would be wrong there.
  */
 export function getPreviewText(conversation: ConversationEntry, t: TranslateFn, userId?: number | null): string {
+	const text = getPreviewTextBase(conversation, t, userId);
+	const preview = conversation.data.preview;
+	// Groups: "<sender>: <preview>" for other members' messages.
+	if (!preview || !isGroupConversation(conversation) || preview.type === "GroupEvent" || conversation.data.group?.invited) return text;
+	if (preview.senderId == null || userId == null || Number(preview.senderId) === Number(userId)) return text;
+	const sender = conversation.data.participants.find((p) => p.profileId === Number(preview.senderId));
+	const name = sender?.displayName?.trim();
+	return name ? `${name}: ${text}` : text;
+}
+
+function getPreviewTextBase(conversation: ConversationEntry, t: TranslateFn, userId?: number | null): string {
 	const preview = conversation.data.preview;
 	if (!preview) {
 		return t("chat.no_messages_yet");
 	}
+	// Local line written when we left or were removed (the chat is archived then).
+	if (preview.type === "SystemGroupLeft") return t("group_chat.system_left", { defaultValue: "You left the group" });
+	if (preview.type === "SystemGroupRemoved") return t("group_chat.system_removed", { defaultValue: "You're no longer in this group" });
+	// Group membership line: the same text as in the chat ("You joined", "Alex left", …).
+	// Checked before `text`: older local previews stored a generic label there.
+	if (preview.type === "GroupEvent") {
+		if (!preview.groupEvent) return t("group_chat.preview.event", { defaultValue: "Group updated" });
+		const names = new Map(conversation.data.participants.map((p) => [p.profileId, p.displayName?.trim() || null]));
+		const nameOf = (id: number | null | undefined) =>
+			id == null
+				? t("common.unknown_display_name")
+				: userId != null && Number(id) === Number(userId)
+					? t("group_chat.you", { defaultValue: "You" })
+					: names.get(Number(id)) || t("group_chat.former_member", { defaultValue: "Someone" });
+		return getGroupEventLabel({ body: preview.groupEvent, senderId: Number(preview.senderId ?? 0) }, t, nameOf);
+	}
 
 	if (preview.text?.trim()) {
 		return preview.text;
+	}
+	if (preview.type === "GroupEvent") {
+		return t("group_chat.preview.event", { defaultValue: "Group updated" });
 	}
 
 	const isIncoming =
@@ -408,7 +441,14 @@ export function getPreviewText(conversation: ConversationEntry, t: TranslateFn, 
 			return t("chat.preview.sent_video");
 		case "Location":
 			return t("chat.preview.sent_location");
+		case "ProfileLink":
+			return t("chat.preview.shared_profile");
+		case "ProfileLinkRequest":
+			return t("profile_network.chat.preview_request");
+		case "ProfileLinkEvent":
+			return t("profile_network.chat.preview_accepted");
 		case "RightNowRequest":
+		case "RightNowRequestIncoming":
 			return t("chat.preview.right_now_request", { defaultValue: "Right Now request" });
 		case "VideoCall":
 			return t("chat.preview.video_call");
@@ -418,6 +458,7 @@ export function getPreviewText(conversation: ConversationEntry, t: TranslateFn, 
 }
 
 export function getMessagePreviewLabel(message: Message, t: TranslateFn): string {
+	if (message.type === "GroupEvent") return t("group_chat.preview.event", { defaultValue: "Group updated" });
 	if (
 		typeof (message.body as Record<string, unknown> | null)?.text === "string"
 	) {
@@ -446,7 +487,14 @@ export function getMessagePreviewLabel(message: Message, t: TranslateFn): string
 			return t("chat.preview.sent_video");
 		case "Location":
 			return t("chat.preview.sent_location");
+		case "ProfileLink":
+			return t("chat.preview.shared_profile");
+		case "ProfileLinkRequest":
+			return t("profile_network.chat.preview_request");
+		case "ProfileLinkEvent":
+			return t("profile_network.chat.preview_accepted");
 		case "RightNowRequest":
+		case "RightNowRequestIncoming":
 			return t("chat.preview.right_now_request", { defaultValue: "Right Now request" });
 		case "VideoCall":
 			return getVideoCallStatusLabel(message, t);
@@ -471,12 +519,17 @@ const NOTIFICATION_BODY_KEYS: Record<string, string> = {
 	ExpiringAlbum: "push_notifications.chat_album_notification_body",
 	ExpiringAlbumV2: "push_notifications.chat_album_notification_body",
 	AlbumContentReaction: "push_notifications.chat_album_content_reaction_notification_body",
+	// Not a 26.21 push text: our server's own key for shared profiles (see profileShare).
+	ProfileLink: "push_notifications.chat_profile_link_notification_body",
+	// Ours (flag profile-reputation): link requests and their confirmation.
+	ProfileLinkRequest: "push_notifications.chat_profile_link_request_notification_body",
+	ProfileLinkEvent: "push_notifications.chat_profile_link_accepted_notification_body",
 };
 
 // Types that keep their own label even when incoming: the native push has
 // no wording for them, and its generic "Sent you a message" would hide what
 // actually happened.
-const INCOMING_OWN_LABEL_TYPES = new Set(["VideoCall", "RightNowRequest"]);
+const INCOMING_OWN_LABEL_TYPES = new Set(["VideoCall", "RightNowRequest", "RightNowRequestIncoming"]);
 
 /**
  * Wording for a text-less message *from the other person*, matching what the
@@ -551,6 +604,13 @@ const SELF_EXPLANATORY_PREVIEW_TYPES = new Set([
 	"PrivateVideo",
 	"NonExpiringVideo",
 	"Location",
+	"ProfileLink",
+	"ProfileLinkRequest",
+	"ProfileLinkEvent",
+	"RightNowRequestIncoming",
+	// Local group lines ("You left the group"): described by type alone.
+	"SystemGroupLeft",
+	"SystemGroupRemoved",
 ]);
 
 /**
@@ -579,6 +639,22 @@ export function isPreviewUnhelpful(
  * fallback so the inbox row shows the last real message instead of "no
  * messages yet" on a conversation that clearly has history.
  */
+/**
+ * The `text` to store on a locally built inbox preview: only the message's own
+ * text (or a label that depends on the message body, like a call's outcome).
+ * Media types stay null so getPreviewText derives their label from the type,
+ * the same way it does for the server's preview — storing our generic "Sent an
+ * image" here would override the incoming wording ("Sent you an expiring
+ * image") once the chat loads.
+ */
+export function getStoredPreviewText(message: Message, t: TranslateFn): string | null {
+	if (message.type === "GroupEvent") return null;
+	const text = (message.body as Record<string, unknown> | null)?.text;
+	if (typeof text === "string") return text;
+	if (message.type === "VideoCall") return getVideoCallStatusLabel(message, t);
+	return null;
+}
+
 export function buildPreviewFromMessage(
 	message: Message,
 	t: TranslateFn,
@@ -589,9 +665,11 @@ export function buildPreviewFromMessage(
 		senderId: message.senderId,
 		type: message.type,
 		chat1Type: message.chat1Type ?? "text",
-		text: getMessagePreviewLabel(message, t),
+		// GroupEvent: no text; the inbox describes it from groupEvent (getPreviewText).
+		text: getStoredPreviewText(message, t),
 		albumId: null,
 		imageHash: null,
+		...(message.type === "GroupEvent" ? { groupEvent: (message.body ?? null) as Record<string, unknown> | null } : {}),
 	};
 }
 
@@ -615,6 +693,31 @@ export function findPreviewFallbackMessage<T extends Message>(messages: readonly
 	return null;
 }
 
+export type ProfileLinkInfo = {
+	profileId: number;
+	/** The profile photo when it was shared; null without one. */
+	imageHash: string | null;
+	name: string | null;
+	/** Upstream's own ProfileLink messages may carry a text; ours don't. */
+	text: string | null;
+};
+
+/**
+ * A ProfileLink message's shared profile (ProfileLinkBody: profileId,
+ * imageHash, firstName, text, …), or null for any other message — or one
+ * whose body is gone (unsent) or has no usable profile id.
+ */
+export function getProfileLink(message: { type?: string; body?: unknown } | null | undefined): ProfileLinkInfo | null {
+	if (message?.type !== "ProfileLink" || !message.body || typeof message.body !== "object") return null;
+	const body = message.body as Record<string, unknown>;
+	const profileId = Number(body.profileId);
+	if (!Number.isSafeInteger(profileId) || profileId <= 0) return null;
+	const imageHash = typeof body.imageHash === "string" && validateMediaHash(body.imageHash) ? body.imageHash : null;
+	const name = typeof body.firstName === "string" && body.firstName.trim() ? body.firstName.trim() : null;
+	const text = typeof body.text === "string" && body.text.trim() ? body.text.trim() : null;
+	return { profileId, imageHash, name, text };
+}
+
 export function getMessageText(message: UiMessage, t: TranslateFn): string {
 	if (!message.body || typeof message.body !== "object") {
 		if (message.unsent) {
@@ -636,6 +739,10 @@ export function getMessageText(message: UiMessage, t: TranslateFn): string {
 	}
 
 	const body = message.body as Record<string, unknown>;
+	if (message.type === "ProfileLink") {
+		const text = typeof body.text === "string" ? body.text.trim() : "";
+		return text || t("chat.preview.shared_profile");
+	}
 	if (typeof body.text === "string" && body.text.trim().length > 0) {
 		return body.text;
 	}
@@ -1121,6 +1228,26 @@ export function videoMessageViews(maxViews: number): number {
 	return Math.min(maxViews, MAX_VIDEO_VIEWS);
 }
 
+/** Feature flag (only set by our own server): "unlimited" videos go out as
+ * NonExpiringVideo, without any view count, instead of a MAX_VIDEO_VIEWS Video. */
+export const NON_EXPIRING_VIDEOS_FLAG = "chat-non-expiring-videos";
+
+const UNLIMITED_VIDEO_VIEWS = 2147483647;
+
+/** Message type and view fields of a video sent with the expiry picker's
+ * maxViews: unlimited is a NonExpiringVideo where the flag is on, otherwise
+ * (and for any view limit) a regular Video (see videoMessageViews). */
+export function videoMessageSend(maxViews: number): {
+	type: "Video" | "NonExpiringVideo";
+	body: { maxViews: number; viewsRemaining: number };
+} {
+	if (maxViews >= MAX_VIDEO_VIEWS && isFeatureOn(NON_EXPIRING_VIDEOS_FLAG)) {
+		return { type: "NonExpiringVideo", body: { maxViews: UNLIMITED_VIDEO_VIEWS, viewsRemaining: UNLIMITED_VIDEO_VIEWS } };
+	}
+	const views = videoMessageViews(maxViews);
+	return { type: "Video", body: { maxViews: views, viewsRemaining: views } };
+}
+
 // The pickers use 2147483647 for "unlimited" (videos are sent with
 // MAX_VIDEO_VIEWS instead, see videoMessageViews). Anything below
 // MAX_VIDEO_VIEWS — 1 ("view once"), 2 ("view twice"), or any other finite
@@ -1142,6 +1269,88 @@ function isViewLimitedMessage(message: UiMessage): boolean {
 }
 
 /**
+ * Whether this photo/video can only be opened a limited number of times —
+ * also once those views are used up (isViewLimitedMessage reads 0 views left
+ * as "not limited", which is fine for capture but not for gating access).
+ */
+export function isViewLimitedMedia(message: Message | UiMessage): boolean {
+	const chat1Type = (message as UiMessage).chat1Type?.toLowerCase();
+	if (message.type === "ExpiringImage" || message.type === "PrivateVideo") return true;
+	if (chat1Type === "expiring_image" || chat1Type === "expiring_video" || chat1Type === "private_video") return true;
+	const isVideo = message.type === "Video" || chat1Type === "video";
+	if (!isVideo) return false;
+	const body = message.body as Record<string, unknown> | null | undefined;
+	if (typeof body?.maxViews === "number") return body.maxViews < MAX_VIDEO_VIEWS;
+	return typeof body?.viewsRemaining === "number" && body.viewsRemaining < MAX_VIDEO_VIEWS;
+}
+
+/**
+ * A view-once album share the recipient already opened: its viewing window
+ * (viewableUntil) only starts then. The server keeps the share until that
+ * window ends; without archive mode it counts as expired for both sides
+ * right away. A new share of the album starts over (no viewableUntil).
+ */
+export function isOnceAlbumShareOpened(message: Message | UiMessage): boolean {
+	if (message.type !== "Album" && message.type !== "ExpiringAlbum" && message.type !== "ExpiringAlbumV2") return false;
+	const body = message.body as Record<string, unknown> | null | undefined;
+	const expirationType = body?.expirationType;
+	return (expirationType === "ONCE" || expirationType === 1) && Number(body?.viewableUntil || 0) > 0;
+}
+
+/** Marker on a display copy whose view-limited media must be opened through the server. */
+export const VIEW_LIMITED_LOCK_FLAG = "_viewLimitedLocked";
+
+export function isViewLimitedLocked(message: Message | UiMessage): boolean {
+	const body = message.body as Record<string, unknown> | null | undefined;
+	return body?.[VIEW_LIMITED_LOCK_FLAG] === true;
+}
+
+/**
+ * Views left on a view-limited photo/video as the server last reported it,
+ * or null when unknown. An expiring photo with duration -1 is used up.
+ */
+export function getViewsRemaining(message: Message | UiMessage): number | null {
+	const body = message.body as Record<string, unknown> | null | undefined;
+	if (!body) return null;
+	if (typeof body.viewsRemaining === "number") return Math.max(0, body.viewsRemaining);
+	// A single-view photo already looked at, or one the server had no URL for anymore.
+	if (message.type === "ExpiringImage" && (body.duration === -1 || body.viewed === true)) return 0;
+	if (body._imageExpired === true || body._videoExpired === true) return 0;
+	return null;
+}
+
+/**
+ * How a message shows with archive mode off: unsent messages lose whatever
+ * content was kept locally, and received view-limited photos/videos lose
+ * every URL (only the counters stay) so the bubble can't show a stored or
+ * restored copy — opening one goes through the server and uses a view.
+ * Returns the message itself when nothing changes.
+ */
+export function toNonArchiveDisplayMessage<T extends Message | UiMessage>(message: T, userId: number | null): T {
+	if (message.unsent) {
+		if (message.body == null && !(message as UiMessage).localHistory) return message;
+		return { ...message, body: null, localHistory: false } as T;
+	}
+	const mine = userId != null && Number(message.senderId) === Number(userId);
+	if (mine || !isViewLimitedMedia(message)) return message;
+	const body = message.body as Record<string, unknown> | null | undefined;
+	const counters: Record<string, unknown> = {};
+	for (const [key, value] of Object.entries(body ?? {})) {
+		// Numbers and flags only: every URL field (and anything a URL could be
+		// dug out of) is a string or a nested object.
+		if (typeof value === "number" || typeof value === "boolean") counters[key] = value;
+	}
+	counters[VIEW_LIMITED_LOCK_FLAG] = true;
+	// Shown by the locked tile itself (as used up), not the expired bubbles.
+	if (counters._imageExpired === true || counters._videoExpired === true) {
+		delete counters._imageExpired;
+		delete counters._videoExpired;
+		if (typeof counters.viewsRemaining !== "number") counters.viewsRemaining = 0;
+	}
+	return { ...message, body: counters } as T;
+}
+
+/**
  * Whatever this message's media is (if any) and however its URL was
  * resolved, this is what should be eagerly captured into chatDb's
  * media_files table. Giphy is intentionally excluded — it's third-party,
@@ -1159,7 +1368,7 @@ export function getMediaCaptureTarget(message: UiMessage): MediaCaptureTarget | 
 			mediaKey: getMediaKeyForMessage(message, "image"),
 			kind: "image",
 			url: imageUrl,
-			viewOnce: isViewLimitedMessage(message),
+			viewOnce: isViewLimitedMessage(message) || isViewLimitedMedia(message),
 		};
 	}
 
@@ -1169,7 +1378,7 @@ export function getMediaCaptureTarget(message: UiMessage): MediaCaptureTarget | 
 			mediaKey: getMediaKeyForMessage(message, "video"),
 			kind: "video",
 			url: videoUrl,
-			viewOnce: isViewLimitedMessage(message),
+			viewOnce: isViewLimitedMessage(message) || isViewLimitedMedia(message),
 		};
 	}
 
@@ -1318,10 +1527,36 @@ export function getMessageAlbumCoverUrl(message: UiMessage): string | null {
 	return null;
 }
 
+export function isGroupConversation(conversation: ConversationEntry | null | undefined): boolean {
+	return isGroupConversationId(conversation?.data.conversationId);
+}
+
+/**
+ * Where a thread's messages go: the group, or the other participant (a
+ * profile without a conversation yet falls back to `fallbackProfileId`).
+ */
+export function getSendTarget(
+	conversation: ConversationEntry | null | undefined,
+	userId: number | null,
+	fallbackProfileId: number | string | null | undefined,
+): ChatSendTarget | null {
+	const groupId = groupIdOfConversation(conversation?.data.conversationId);
+	if (groupId != null) return { type: "Group", targetId: groupId };
+	const profileId = conversation ? getOtherParticipant(conversation, userId)?.profileId : fallbackProfileId;
+	const n = profileId == null ? NaN : Number(profileId);
+	return Number.isFinite(n) && n > 0 ? { type: "Direct", targetId: n } : null;
+}
+
+/**
+ * The other side of a direct conversation. Null for group conversations: they
+ * have no single other profile, so 1:1 actions (profile, block, call, unread
+ * per profile) skip them.
+ */
 export function getOtherParticipant(
 	conversation: ConversationEntry,
 	userId: number | null,
 ) {
+	if (isGroupConversation(conversation)) return null;
 	return (
 		conversation.data.participants.find(
 			(participant) => participant.profileId !== userId,

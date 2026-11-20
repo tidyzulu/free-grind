@@ -161,7 +161,7 @@ export function VersionAnnouncement({
 					>
 						<img src={logo} alt="" className="mb-6 h-16 w-16 rounded-2xl object-cover" />
 						<h1 className="text-2xl font-bold text-[var(--text)]">
-							{t("version_announcement.title", { defaultValue: "What's new in Free Grind" })}
+							{t("version_announcement.title", { defaultValue: "What's new in {{appName}}" })}
 						</h1>
 						{announcement.tagline && (
 							<p className="mt-1.5 max-w-xs text-base font-semibold text-[var(--accent)]">{announcement.tagline}</p>

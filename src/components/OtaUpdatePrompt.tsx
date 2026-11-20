@@ -22,7 +22,7 @@ import { ToggleRow } from "./ui/toggle-row";
 import { VersionCompare, VersionCompareLink, type VersionCompareSide } from "./ui/version-compare";
 import { buildDate, formatBuildTime, releaseOf } from "../utils/otaVersion";
 import { formatRelativeTime } from "../utils/relativeTime";
-import { GITHUB_OTA_SIGNING_URL, githubCompareUrl } from "../utils/githubIssues";
+import { OTA_SIGNING_URL, compareUrl as repoCompareUrl } from "../config/links-config";
 import { VersionChangesLink } from "./VersionChangesSheet";
 
 /** CI publishes bundles with notes like "Automated OTA upload for <sha> on <channel>". */
@@ -177,7 +177,7 @@ export function OtaUpdatePromptView({
 	const hideButtons = progressOnly && !failed;
 	// The running frontend is the installed build, so its commit is the diff base.
 	const newCommit = update.commit ?? noteCommit(update.notes);
-	const compareUrl = githubCompareUrl(import.meta.env.VITE_COMMIT_HASH, newCommit);
+	const compareUrl = repoCompareUrl(import.meta.env.VITE_COMMIT_HASH, newCommit);
 
 	return (
 		<FullscreenPrompt
@@ -279,7 +279,7 @@ export function OtaUpdatePromptView({
 			{compareUrl ? (
 				<VersionChangesLink from={import.meta.env.VITE_COMMIT_HASH} to={newCommit} />
 			) : (
-				<VersionCompareLink url={GITHUB_OTA_SIGNING_URL} label={t("onboarding.updates_more", { defaultValue: "More about that" })} />
+				<VersionCompareLink url={OTA_SIGNING_URL} label={t("onboarding.updates_more", { defaultValue: "More about that" })} />
 			)}
 		</FullscreenPrompt>
 	);

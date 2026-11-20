@@ -2,6 +2,7 @@ import i18n from "i18next";
 import Backend from "i18next-http-backend";
 import LanguageDetector from "i18next-browser-languagedetector";
 import { initReactI18next } from "react-i18next";
+import { CI_NAME, FORGE_NAME } from "./config/links-config";
 import { DEFAULT_LOCALE, SUPPORTED_LOCALES, matchSupportedLocale } from "./utils/locales";
 
 const i18nBackendBaseUrl = (
@@ -59,10 +60,16 @@ i18n
 		// not a region-stripped variant that doesn't exist as its own file.
 		load: "currentOnly",
 		defaultNS: "translation",
-		ns: ["translation"],
+		// "grindr": texts of the Grindr workarounds (src/grindr-workarounds,
+		// keys as "grindr:…").
+		ns: ["translation", "grindr"],
 		returnEmptyString: false,
 		interpolation: {
 			escapeValue: false,
+			// Available in every string: the app name and export folder, and where
+			// the source and its CI live (GitLab or GitHub) (manifest/app.json),
+			// so texts never hardcode them.
+			defaultVariables: { appName: __APP_NAME__, appFolder: __APP_FOLDER__, forge: FORGE_NAME, ci: CI_NAME },
 		},
 		detection: {
 			order: ["supportedLocale"],

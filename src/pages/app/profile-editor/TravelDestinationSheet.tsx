@@ -23,6 +23,13 @@ interface TravelDestinationSheetProps {
 	onConfirm: (location: LatLon) => void;
 	onClose: () => void;
 	isDesktop: boolean;
+	/** Where the map starts without `initialLocation` (default: the current location). */
+	startLocation?: LatLon | null;
+	/** Reuse for other places than trips (e.g. a cruising spot): title, search hint, confirm button, zoom. */
+	title?: string;
+	searchPlaceholder?: string;
+	confirmLabel?: string;
+	defaultZoom?: number;
 }
 
 function decodeGeohashCenter(geohash: string | null | undefined): LatLon | null {
@@ -39,8 +46,8 @@ function isSameSpot(a: LatLon | null, b: LatLon): boolean {
 	return a != null && Math.abs(a.lat - b.lat) < 1e-7 && Math.abs(a.lon - b.lon) < 1e-7;
 }
 
-/** Picks a trip's destination on the big map, like the chat's share-location sheet. */
-export function TravelDestinationSheet({ initialLocation, onConfirm, onClose, isDesktop }: TravelDestinationSheetProps) {
+/** Picks a trip's destination (or another place) on the big map, like the chat's share-location sheet. */
+export function TravelDestinationSheet({ initialLocation, onConfirm, onClose, isDesktop, startLocation, title, searchPlaceholder, confirmLabel, defaultZoom = 11 }: TravelDestinationSheetProps) {
 	const { t } = useTranslation();
 	const { geohash, locationName } = usePreferences();
 	const [savedLocations, setSavedLocations] = useState<SavedLocation[]>([]);
@@ -53,7 +60,7 @@ export function TravelDestinationSheet({ initialLocation, onConfirm, onClose, is
 
 	const currentLocation = useMemo(() => decodeGeohashCenter(geohash), [geohash]);
 	// A new trip starts on the current location, so the map isn't the whole globe.
-	const [location, setLocation] = useState<LatLon | null>(initialLocation ?? currentLocation);
+	const [location, setLocation] = useState<LatLon | null>(initialLocation ?? startLocation ?? currentLocation);
 	const pinGeohash = useMemo(() => (location ? encodeGeohash(location.lat, location.lon) : null), [location]);
 	const pinAddress = useGeohashLabel(pinGeohash, reverseGeocodeGeohash, 400);
 
@@ -66,7 +73,7 @@ export function TravelDestinationSheet({ initialLocation, onConfirm, onClose, is
 		>
 			<div className="mb-3 flex shrink-0 items-center justify-between">
 				<h3 className="text-sm font-semibold text-[var(--text)]">
-					{t("travel_plans.destination")}
+					{title ?? t("travel_plans.destination")}
 				</h3>
 				<SheetCloseButton />
 			</div>
@@ -76,7 +83,7 @@ export function TravelDestinationSheet({ initialLocation, onConfirm, onClose, is
 					<MapSheetSearch
 						search={search}
 						onSelect={(result) => setLocation({ lat: Number(result.lat), lon: Number(result.lon) })}
-						placeholder={t("travel_plans.search_placeholder")}
+						placeholder={searchPlaceholder ?? t("travel_plans.search_placeholder")}
 						focusColor="var(--accent)"
 					/>
 				}
@@ -86,7 +93,7 @@ export function TravelDestinationSheet({ initialLocation, onConfirm, onClose, is
 						onPick={(lat, lon) => setLocation({ lat, lon })}
 						onError={(msg) => toast.error(msg)}
 						className="h-full w-full"
-						defaultZoom={11}
+						defaultZoom={defaultZoom}
 					/>
 				}
 				pinLabel={
@@ -133,7 +140,7 @@ export function TravelDestinationSheet({ initialLocation, onConfirm, onClose, is
 						className={sheetButtonClass()}
 					>
 						<Check className="h-4 w-4" />
-						<span className="truncate">{t("travel_plans.use_destination", { defaultValue: "Use this destination" })}</span>
+						<span className="truncate">{confirmLabel ?? t("travel_plans.use_destination", { defaultValue: "Use this destination" })}</span>
 					</SheetClose>
 				}
 			/>

@@ -30,8 +30,11 @@ export function OwnProfileEditPanel({
 	onDirtyChange,
 	onPhotoHashesChange,
 	onPhotoControlsChange,
+	focusLinkedProfiles = false,
 }: {
 	onDone: () => void;
+	/** Opened from the profile's open link requests row: scroll to that section. */
+	focusLinkedProfiles?: boolean;
 	/** Reports unsaved changes, so the host can confirm before leaving edit mode. */
 	onDirtyChange?: (dirty: boolean) => void;
 	/** Reports the saved photo order, so the host's carousel shows it once editing ends. */
@@ -106,7 +109,7 @@ export function OwnProfileEditPanel({
 
 	return (
 		<>
-			<ProfileEditorFormSections editor={editor} />
+			<ProfileEditorFormSections editor={editor} focusLinkedProfiles={focusLinkedProfiles} />
 			{/* Pinned to the bottom of the profile's scroll area, edge to edge (out of
 			    the host's p-4 / sm:p-5), over the same dark fade as the profile view's
 			    message bar. Laid out like a bottom sheet's footer: a full-width

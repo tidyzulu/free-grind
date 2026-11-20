@@ -174,17 +174,16 @@ class MainActivity : TauriActivity() {
   ) { result ->
     val requestId = pendingRecaptchaRequestId ?: return@registerForActivityResult
     pendingRecaptchaRequestId = null
-    val data = result.data
-    val token = data?.getStringExtra(RecaptchaMintActivity.EXTRA_TOKEN)?.trim().orEmpty()
+    val (rawToken, refusal, detail) = GrindrNative.recaptchaResult(result.data)
+    val token = rawToken?.trim().orEmpty()
     val outcome = JSONObject().put("requestId", requestId)
     if (result.resultCode == RESULT_OK && token.isNotEmpty()) {
       outcome.put("token", token)
     } else {
       // RecaptchaMintActivity names its refusal ("grindr-missing",
       // "mint-failed", ...); no marker means the user backed out.
-      val refusal = data?.getStringExtra(RecaptchaMintActivity.EXTRA_ERROR)
       outcome.put("error", if (refusal.isNullOrEmpty()) "cancelled" else refusal)
-      data?.getStringExtra(RecaptchaMintActivity.EXTRA_ERROR_DETAIL)?.let { outcome.put("detail", it) }
+      detail?.let { outcome.put("detail", it) }
     }
     dispatchRecaptchaResultToWebview(outcome.toString())
   }
@@ -233,6 +232,10 @@ class MainActivity : TauriActivity() {
       window.isNavigationBarContrastEnforced = false
     }
     super.onCreate(savedInstanceState)
+    // Screenshot protection is on until the frontend says otherwise
+    // (setScreenCaptureProtection, a dev option), so the splash and the
+    // Recents card are covered before any JavaScript runs.
+    window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
     // Resolved once up front: both the splash icon below and the Recents
     // (task switcher) card need to match whichever disguise is currently
     // active, since neither otherwise picks that up on their own (see
@@ -425,6 +428,18 @@ class MainActivity : TauriActivity() {
     @JavascriptInterface
     fun markTapSeen(senderId: String?) {
       NotificationPoster.normalizeNullableString(senderId)?.let(NotificationPoster::markTapSeenInForeground)
+    }
+
+    /**
+     * FLAG_SECURE on/off: screenshots and recordings come out black and the
+     * Recents card is blank while it's set (screenCaptureProtection.ts).
+     */
+    @JavascriptInterface
+    fun setScreenCaptureProtection(enabled: Boolean) {
+      runOnUiThread {
+        if (enabled) window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        else window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+      }
     }
 
     @JavascriptInterface
@@ -674,16 +689,14 @@ class MainActivity : TauriActivity() {
      */
     @JavascriptInterface
     fun mintRecaptchaToken(action: String, requestId: String): String {
+      val intent = GrindrNative.recaptchaIntent(this@MainActivity, action) ?: return "unsupported"
       synchronized(this@MainActivity) {
         if (pendingRecaptchaRequestId != null) return "busy"
         pendingRecaptchaRequestId = requestId
       }
       runOnUiThread {
         try {
-          recaptchaLauncher.launch(
-            Intent(this@MainActivity, RecaptchaMintActivity::class.java)
-              .putExtra(RecaptchaMintActivity.EXTRA_ACTION, action)
-          )
+          recaptchaLauncher.launch(intent)
         } catch (e: Exception) {
           Log.e("Recaptcha", "Failed to launch RecaptchaMintActivity", e)
           pendingRecaptchaRequestId = null

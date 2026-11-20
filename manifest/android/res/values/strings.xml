@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Launcher name and icons. build.gradle.kts adds this folder. -->
+<resources>
+    <string name="app_name">Free Grind</string>
+    <string name="main_activity_title">Free Grind</string>
+</resources>

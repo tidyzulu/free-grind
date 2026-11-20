@@ -26,11 +26,6 @@ if [ "$xcode" != "Xcode 26.6" ]; then
 	echo "Release builds use Xcode 26.6, this is $xcode; select it with xcode-select -s" >&2
 	exit 1
 fi
-if [ ! -f "$repo/src-tauri/vendor/freegrind-google-oauth-webextension/geckoview/manifest.json" ]; then
-	echo "The git submodule is missing; run: git submodule update --init" >&2
-	exit 1
-fi
-
 export TZ=UTC LC_ALL=C LANG=C
 export FG_REPRODUCIBLE_BUILD=1 VITE_HOTSWAP_CHANNEL="$FG_CHANNEL"
 
@@ -55,6 +50,12 @@ fi
 # cargo would otherwise quietly re-resolve an outdated Cargo.lock.
 cargo metadata --locked --format-version 1 --manifest-path src-tauri/Cargo.toml >/dev/null
 bun install --frozen-lockfile
+# App identity (manifest/app.json) and the
+# build variables its manifest brings: FG_APP_NAME, FG_APP_SLUG, FG_APP_BINARY,
+# FG_APP_REPO_URL, … (scripts/manifest-env.mjs). Artifacts are named <slug>-v….
+eval "$(bun --no-env-file scripts/manifest-env.mjs)"
+TAURI_CONFIG="$(bun --no-env-file scripts/tauri-config.mjs macos)"
+export TAURI_CONFIG
 
 # Per-target flags rather than RUSTFLAGS, which would drop target.*.rustflags
 # from .cargo/config.toml; aarch64 keeps its -ld_classic from there.
@@ -81,7 +82,7 @@ trap 'rm -rf "$staging"' EXIT
 cp -R "$app" "$staging/"
 find "$staging" -exec touch -h -t "$(date -r "$SOURCE_DATE_EPOCH" +%Y%m%d%H%M.%S)" {} +
 mkdir -p "$repo/out/macos"
-zip_path="$repo/out/macos/free-grind-v$version-macos-universal.zip"
+zip_path="$repo/out/macos/$FG_APP_SLUG-v$version-macos-universal.zip"
 rm -f "$zip_path"
 (cd "$staging" && find "$(basename "$app")" | LC_ALL=C sort | /usr/bin/zip -qXy "$zip_path" -@)
 

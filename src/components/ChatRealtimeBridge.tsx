@@ -29,6 +29,7 @@ import { useTranslation } from "react-i18next";
 import { platform } from "@tauri-apps/plugin-os";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useQueryClient } from "@tanstack/react-query";
+import { markRightNowRequestsUnseen } from "../services/rightNowRequestsSignal";
 import toast from "react-hot-toast";
 import { BANNER_TOAST_CLASS } from "./AppToaster";
 import { NotificationBanner } from "./NotificationBanner";
@@ -43,6 +44,8 @@ import {
 	clearUnreadCountForProfile,
 } from "../services/chatContactIndex";
 import {
+	archiveRemovedGroup,
+	restoreRejoinedGroup,
 	toggleArchiveOnConversationDelete,
 	reconcileArchivedConversationForProfile,
 	reconcileBlockStateWithBlockedList,
@@ -64,7 +67,11 @@ import { fetchAndStoreMedia } from "../services/mediaStore";
 import { captureAlbumsForMessages } from "../services/albumStore";
 import { captureReplyPreviewsForMessages } from "../services/replyMediaStore";
 import { getConversation, getDisplayName } from "../services/conversationDirectory";
-import { hasMessage, saveProfileSnapshot } from "../services/chatDb";
+import { deleteConversationCascade, hasMessage, saveProfileSnapshot, updatePreviewTextForEditedMessage } from "../services/chatDb";
+import { GROUP_REMOVED_EVENT, type GroupRemovedDetail, applyGroupRealtimeEvent } from "../services/groupChatStore";
+import { isGroupConversationId } from "../utils/groupChat";
+import { PROFILE_LINK_EVENT } from "../services/api/reputationMethods";
+import { invalidateProfileLinks } from "../hooks/queries/useReputationQueries";
 import { runAutomationRulesForSender } from "../utils/automationRules";
 import { getTapEmoji } from "../pages/app/interest/interestUtils";
 import { looksLikeMessageUpdate } from "../utils/messageUpdates";
@@ -73,7 +80,7 @@ import { useApiFunctions } from "../hooks/useApiFunctions";
 import { useBlockedProfileIds } from "../hooks/queries/useProfileQueries";
 import { isReadReceiptsHidden } from "../utils/privacy";
 import { classifyProfileAccess } from "../utils/profileAccessStatus";
-import { interestIdentityStore } from "../services/interestIdentityStore";
+import { onViewReceived } from "../grindr-workarounds";
 import {
 	isChatNotificationsEnabled,
 	isForegroundNotificationsEnabled,
@@ -145,6 +152,12 @@ export const VIEW_RECEIVED_EVENT = "fg:view-received";
 export const TYPING_STATUS_EVENT = "fg:typing-status";
 export const VIDEO_CALL_INCOMING_EVENT = "fg:video-call-incoming";
 export const VIDEO_CALL_ENDED_EVENT = "fg:video-call-ended";
+// Fresh bodies of dynamic (album) messages after chat.v1.refresh_dynamic —
+// detail is Message[], already persisted to chatLog.
+export const CHAT_DYNAMIC_REFRESH_EVENT = "fg:chat-dynamic-refresh";
+
+const DYNAMIC_MESSAGE_TYPES = new Set(["Album", "ExpiringAlbum", "ExpiringAlbumV2", "ProfileLinkRequest", "RightNowRequestIncoming"]);
+const REFRESH_BATCH_SIZE = 100;
 // Re-exported so existing importers (e.g. ChatPage.tsx) don't need to change
 // where they pull this from — conversationArchive.ts is now the source of
 // truth since it also dispatches this event from applySelfBlockAction.
@@ -612,12 +625,17 @@ export function ChatRealtimeBridge() {
 			if (!isChatNotificationsEnabled()) return;
 
 			const conv = getConversation(m.conversationId);
+			// Groups: "<group>" as title, "<sender>: <text>" as body, the sender's photo.
+			const groupSender = isGroupConversationId(m.conversationId)
+				? conv?.data.participants.find((p) => p.profileId === Number(m.senderId)) ?? null
+				: null;
 			const senderName = conv?.data.name?.trim() || tRef.current("common.unknown_display_name");
-			const bodyText = getNotificationBodyLabel(m, tRef.current);
+			const label = getNotificationBodyLabel(m, tRef.current);
+			const bodyText = groupSender?.displayName ? `${groupSender.displayName}: ${label}` : label;
 
 			if (isAppForeground()) {
 				if (!isForegroundNotificationsEnabled()) return;
-				const other = conv ? getOtherParticipant(conv, userIdRef.current) : null;
+				const other = groupSender ?? (conv ? getOtherParticipant(conv, userIdRef.current) : null);
 				const avatarUrl = getParticipantAvatarUrl(other?.primaryMediaHash);
 				const chatPath = `/chat/${encodeURIComponent(m.conversationId)}`;
 				toast(
@@ -709,6 +727,7 @@ export function ChatRealtimeBridge() {
 		};
 
 		const manager = new ChatRealtimeManager({
+			getOwnProfileId: () => userIdRef.current,
 			onStatusChange: (status) => {
 				dispatchStatus(status);
 			},
@@ -746,17 +765,23 @@ export function ChatRealtimeBridge() {
 					}
 				}
 
+				// rightnow.v1.request — someone asked to connect about our Right Now
+				// post: refresh the requests inbox and light the Right Now nav dot
+				// (unless that page is already open).
+				if (envelope.type === "rightnow.v1.request") {
+					void queryClient.invalidateQueries({ queryKey: ["rightnow", "requests", "inbox"] });
+					const currentUserId = userIdRef.current;
+					if (currentUserId != null && !window.location.pathname.startsWith("/right-now")) {
+						markRightNowRequestsUnseen(currentUserId);
+					}
+				}
+
 				if (envelope.type === "viewed_me.v1.new_view_received") {
 					const view = parseViewPayload(envelope.payload);
 					if (view) {
 						appLog.debug(`[chat-ws:bridge] Incoming view received. Total views: ${view.viewedCount}`);
-						// The event names the real viewer even when the views list only
-						// returns a locked preview — persist it before the refetch the
-						// event triggers, so that refetch can already recover it.
-						void Promise.all([
-							interestIdentityStore.rememberViewEvent(view),
-							interestIdentityStore.rememberHashes([{ hash: view.imageHash, profileId: view.profileId }]),
-						])
+						// Grindr workarounds see the event before the refetch it triggers.
+						void onViewReceived(view)
 							.catch(() => {})
 							.finally(() => {
 								window.dispatchEvent(
@@ -790,6 +815,74 @@ export function ChatRealtimeBridge() {
 								detail: ended,
 							}),
 						);
+					}
+				}
+
+				// chat.v1.refresh_dynamic — an album was shared, unshared, its
+				// expiration changed or it was viewed. The event carries no
+				// message, only the conversation: re-fetch every dynamic message
+				// we have for it (Refresh messages) so e.g. an unshared album's
+				// message turns not-viewable without reopening the chat.
+				if (envelope.type === "chat.v1.refresh_dynamic") {
+					const record = envelope.payload as Record<string, unknown> | undefined;
+					const cid = typeof record?.conversationId === "string" ? record.conversationId : null;
+					if (cid) {
+						try {
+							const { messages: stored } = await chatLog.readLog(cid);
+							const ids = stored
+								.filter((m) => !m.unsent && (m.dynamic === true || DYNAMIC_MESSAGE_TYPES.has(m.type)))
+								.map((m) => m.messageId);
+							const refreshed: Message[] = [];
+							for (let i = 0; i < ids.length; i += REFRESH_BATCH_SIZE) {
+								refreshed.push(
+									...(await apiFunctions.refreshMessages({
+										conversationId: cid,
+										messageIds: ids.slice(i, i + REFRESH_BATCH_SIZE),
+									})),
+								);
+							}
+							if (refreshed.length > 0) {
+								await chatLog.appendMessages(cid, refreshed);
+								captureAlbumsForMessages(refreshed, cid, (id) => apiFunctions.getAlbum(id), userIdRef.current);
+								window.dispatchEvent(
+									new CustomEvent<Message[]>(CHAT_DYNAMIC_REFRESH_EVENT, { detail: refreshed }),
+								);
+							}
+						} catch (error) {
+							appLog.warn("[chat-ws:bridge] refresh_dynamic failed", error);
+						}
+					}
+				}
+
+				// Linked profiles (Free Grind server, flag profile-reputation): a link
+				// or request changed. Requests and confirmations arrive as chat
+				// messages (banner + push like any message); this only refreshes
+				// the profile sections and the links page.
+				if (envelope.type === PROFILE_LINK_EVENT) {
+					invalidateProfileLinks(queryClient);
+				}
+
+				// Group chats (Free Grind server): invites, changes, and being out of a group.
+				if (typeof envelope.type === "string" && envelope.type.startsWith("chat.v1.group.")) {
+					const removed = applyGroupRealtimeEvent(envelope.type, envelope.payload);
+					// Back in a group we'd left (re-invited and joined, maybe elsewhere): live again.
+					const updated = (envelope.payload as { group?: { conversationId?: string; myStatus?: string } } | undefined)?.group;
+					if (envelope.type === "chat.v1.group.updated" && updated?.myStatus === "ACTIVE" && updated.conversationId) {
+						await restoreRejoinedGroup(updated.conversationId);
+					}
+					if (removed) {
+						void clearChatNotifications(removed.conversationId).catch(() => {});
+						if (removed.reason === "declined") {
+							// Only an invite: there's no conversation to keep.
+							await deleteConversationCascade(removed.conversationId).catch((error: unknown) => {
+								appLog.warn("[chat-ws:bridge] dropping group conversation failed", error);
+							});
+						} else {
+							// Left (maybe on another device), removed or the group is gone:
+							// it stays readable but archived until the user deletes it.
+							await archiveRemovedGroup(removed.conversationId, removed.reason === "left" ? "left" : "removed");
+						}
+						window.dispatchEvent(new CustomEvent<GroupRemovedDetail>(GROUP_REMOVED_EVENT, { detail: removed }));
 					}
 				}
 
@@ -895,12 +988,18 @@ export function ChatRealtimeBridge() {
 
 						const fromOther = userIdRef.current != null && Number(m.senderId) !== Number(userIdRef.current);
 						if (fromOther && m.unsent) withdrawMessageNotification(m.conversationId, m.messageId);
+						// Edited (Free Grind server): the stored inbox preview follows when it shows this message.
+						if (m.editedAt != null && !m.unsent && typeof msgBody?.text === "string") {
+							void updatePreviewTextForEditedMessage(m.conversationId, m.messageId, msgBody.text).catch(() => undefined);
+						}
 						// chat.v1.message_sent also fires when a message is unsent or
 						// reacted to, re-delivering the original message (same
 						// messageId). Reacting to their message would otherwise look
 						// like a new incoming one — notification + unread bump.
+						// Group membership lines (joined, left, …) are stored but never
+						// notify or count as unread (the server doesn't count them either).
 						const isIncoming =
-							fromOther && !(await isMessageUpdate(m, userIdRef.current));
+							fromOther && m.type !== "GroupEvent" && !(await isMessageUpdate(m, userIdRef.current));
 
 						// --- CUSTOM AUTOMATION RULES ---
 						if (isIncoming && m.senderId) {
@@ -950,13 +1049,17 @@ export function ChatRealtimeBridge() {
 							const isViewingThisChat =
 								isAppForeground() && isChatOpen(m.conversationId, m.senderId);
 							if (!isViewingThisChat) {
-								await incrementUnreadCountForProfile(
-									String(m.senderId),
-									m.conversationId,
-									m.timestamp,
-								).catch((err) => {
-									appLog.warn("[chat-ws:bridge] failed to increment unread", err);
-								});
+								// The per-profile index is for 1:1 chats; a group's
+								// unread count comes from its inbox entry.
+								if (!isGroupConversationId(m.conversationId)) {
+									await incrementUnreadCountForProfile(
+										String(m.senderId),
+										m.conversationId,
+										m.timestamp,
+									).catch((err) => {
+										appLog.warn("[chat-ws:bridge] failed to increment unread", err);
+									});
+								}
 								triggerIncomingMessageNotification(m);
 							}
 						}
@@ -973,7 +1076,8 @@ export function ChatRealtimeBridge() {
 								url: target.url,
 								conversationId: cid,
 								messageId: msg.messageId,
-								viewOnce: target.viewOnce,
+								// Our own media is kept even with archive mode off.
+								viewOnce: target.viewOnce && Number(msg.senderId) !== Number(userIdRef.current),
 							});
 						}
 						captureAlbumsForMessages(msgs, cid, (id) => apiFunctions.getAlbum(id), userIdRef.current);

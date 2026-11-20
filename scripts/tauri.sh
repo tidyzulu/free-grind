@@ -25,4 +25,14 @@ if ! command -v bun >/dev/null 2>&1; then
   exit 1
 fi
 
+# The app manifest (manifest/app.json) sets the app identity (name, IDs, OTA),
+# see scripts/manifest-env.mjs and scripts/tauri-config.mjs.
+eval "$(bun --no-env-file scripts/manifest-env.mjs)"
+case "${1:-}" in
+  android|ios) target="$1" ;;
+  *) target="" ;; # desktop: the host OS
+esac
+TAURI_CONFIG="$(bun --no-env-file scripts/tauri-config.mjs $target)"
+export TAURI_CONFIG
+
 exec bunx tauri "$@"

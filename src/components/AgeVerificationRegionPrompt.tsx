@@ -29,7 +29,7 @@ export function AgeVerificationRegionPrompt() {
 			message={t("age_verification_region.message", {
 				region: regionName,
 				defaultValue:
-					"This location is in {{region}}, where Grindr requires a legal age verification with an ID document or face scan. Free Grind can't do that verification.",
+					"This location is in {{region}}, where Grindr requires a legal age verification with an ID document or face scan. {{appName}} can't do that verification.",
 			})}
 			warning={t("age_verification_region.warning", {
 				defaultValue:

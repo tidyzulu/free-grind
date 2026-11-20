@@ -317,12 +317,12 @@ export function ApiInspectorPage() {
 	const handleExport = async () => {
 		setIsExporting(true);
 		try {
-			const fileName = `free-grind-api-trace-${new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19)}.json`;
+			const fileName = `${__APP_SLUG__}-api-trace-${new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19)}.json`;
 			await saveTextFile(fileName, exportApiTraceEntries(), "application/json");
 			toast.success(
 				isAndroid() || !isIos()
-					? `Saved to Downloads/FreeGrind/${fileName}`
-					: `Saved to Files → On My iPhone/iPad → Free Grind/${fileName}`,
+					? `Saved to Downloads/${__APP_FOLDER__}/${fileName}`
+					: `Saved to Files → On My iPhone/iPad → ${__APP_NAME__}/${fileName}`,
 			);
 		} catch (error) {
 			toast.error(error instanceof Error ? error.message : "Export failed");

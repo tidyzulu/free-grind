@@ -16,6 +16,10 @@ import { createWarningsMethods } from "./api/warningsMethods";
 import { createExploreHeatmapMethods } from "./api/exploreHeatmapMethods";
 import { createSpotifyMethods } from "./api/spotifyMethods";
 import { createPushSettingsMethods } from "./api/pushSettingsMethods";
+import { createGroupMethods } from "./api/groupMethods";
+import { createReputationMethods } from "./api/reputationMethods";
+import { createCruisingMethods } from "./api/cruisingMethods";
+import { createOwnMapPositionMethods } from "./api/ownMapPositionMethods";
 import type { RightNowFeedItem, RightNowDiscreetFeedItem, RightNowFeedEntry, RightNowCreatePostRequest, RightNowCreatePostMedia, RightNowUpdatePostRequest } from "../types/right-now";
 
 export {
@@ -23,7 +27,17 @@ export {
 };
 
 export type { RightNowFeedItem, RightNowDiscreetFeedItem, RightNowFeedEntry, RightNowCreatePostRequest, RightNowCreatePostMedia, RightNowUpdatePostRequest };
-export { NoFreeRightNowPostsError, RightNowDiscreetSetupError, RightNowPostAlreadyRunningError, RightNowSessionEndedError } from "./api/feedMethods";
+export {
+	NoFreeRightNowPostsError,
+	RightNowDiscreetNotAllowedError,
+	RightNowDiscreetSetupError,
+	RightNowLimitError,
+	RightNowLocationMissingError,
+	RightNowPostAlreadyRunningError,
+	RightNowPostGoneError,
+	RightNowRequestAlreadySentError,
+	RightNowSessionEndedError,
+} from "./api/feedMethods";
 
 export function createApiFunctions(fetchRest: RestFetcher, t: (key: string) => string) {
 	const chatService = createChatService(fetchRest, t);
@@ -43,6 +57,10 @@ export function createApiFunctions(fetchRest: RestFetcher, t: (key: string) => s
 		...createExploreHeatmapMethods(fetchRest, t),
 		...createSpotifyMethods(fetchRest, t),
 		...createPushSettingsMethods(fetchRest, t),
+		...createGroupMethods(fetchRest, t),
+		...createReputationMethods(fetchRest, t),
+		...createCruisingMethods(fetchRest, t),
+		...createOwnMapPositionMethods(fetchRest, t),
 
 		async request(
 			path: string,

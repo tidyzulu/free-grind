@@ -1,7 +1,6 @@
 import z from "zod";
 import type { ProfileImageSize, ThumbImageSize } from "../types/media";
 import { demoProfileImageFor, isDemoProfileImagesEnabled } from "./demoProfileImages";
-import { getServerInfo } from "../services/serverConfig";
 
 export const mediaHashSchema = z
 	.string()
@@ -9,10 +8,9 @@ export const mediaHashSchema = z
 
 const OFFICIAL_MEDIA_BASE_URL = "https://cdns.grindr.com";
 
-/** Public-media origin of the active backend (official CDN or the self-hosted server). */
+/** Public-media origin (the official CDN). */
 export function publicMediaBaseUrl(): string {
-	const server = getServerInfo();
-	return server.kind === "custom" ? (server.mediaBase ?? server.apiBase) : OFFICIAL_MEDIA_BASE_URL;
+	return OFFICIAL_MEDIA_BASE_URL;
 }
 
 export function validateMediaHash(hash: string): boolean {

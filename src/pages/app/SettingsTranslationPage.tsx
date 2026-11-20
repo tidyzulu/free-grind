@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import toast from "react-hot-toast";
-import { AlertCircle, Bot, BrainCircuit, CheckCircle2, ChevronRight, ExternalLink, Eye, EyeOff, Languages, Loader2, Sparkles } from "lucide-react";
+import { AlertCircle, Bot, BrainCircuit, CheckCircle2, ChevronRight, ExternalLink, Eye, EyeOff, Info, Languages, Loader2, Server, Sparkles } from "lucide-react";
 import { KeyRoundFilled } from "../../components/icons/FilledIcons";
 import { PageHeader } from "../../components/PageHeader";
 import { NATIVE_SHEET_BG } from "../../components/ui/action-sheet";
@@ -12,19 +12,21 @@ import { useDesktopBreakpoint } from "../../hooks/useDesktopBreakpoint";
 import { useSettingsHighlight } from "../../hooks/useSettingsHighlight";
 import {
 	TRANSLATION_PROVIDERS,
+	type ApiKeyTranslationProvider,
 	type TranslationProvider,
 	getTranslationApiKey,
 	getTranslationProvider,
 	isTranslationApiKeyInvalid,
 	isTranslationKeyError,
 	markTranslationApiKeyValid,
+	providerUsesApiKey,
 	resolveTranslateTargetLanguage,
 	setTranslationApiKey,
 	setTranslationProvider,
 	translateTexts,
 } from "../../utils/autoTranslate";
 import { cn } from "../../utils/cn";
-import { openExternalUrl } from "../../utils/githubIssues";
+import { openExternalUrl } from "../../utils/externalUrl";
 
 type SetupStep = { key: string; title: string; desc: string; url?: string; linkLabel?: string };
 
@@ -60,6 +62,13 @@ const PROVIDER_INFO: Record<
 		desc: "AI translation by Anthropic that understands slang, abbreviations and context. Paid per use, the most expensive option here.",
 		keyLabel: "Anthropic API key",
 	},
+	default: {
+		icon: Server,
+		label: "Default",
+		tagline: "Built in · no API key",
+		desc: "Translated by the server you're signed in to, no API key needed. May require a subscription.",
+		keyLabel: "",
+	},
 };
 
 const PROVIDER_ICON_CLASSES: Record<TranslationProvider, string> = {
@@ -67,6 +76,7 @@ const PROVIDER_ICON_CLASSES: Record<TranslationProvider, string> = {
 	gemini: "bg-violet-500/15 text-violet-400",
 	openai: "bg-emerald-500/15 text-emerald-400",
 	claude: "bg-orange-500/15 text-orange-400",
+	default: "bg-amber-500/15 text-amber-400",
 };
 
 const GOOGLE_SETUP_STEPS: SetupStep[] = [
@@ -186,7 +196,7 @@ const CLAUDE_SETUP_STEPS: SetupStep[] = [
 	},
 ];
 
-const SETUP_STEPS: Record<TranslationProvider, SetupStep[]> = {
+const SETUP_STEPS: Record<ApiKeyTranslationProvider, SetupStep[]> = {
 	google: GOOGLE_SETUP_STEPS,
 	gemini: GEMINI_SETUP_STEPS,
 	openai: OPENAI_SETUP_STEPS,
@@ -202,7 +212,7 @@ function StepNumber({ value }: { value: number }) {
 }
 
 type ApiKeySheetProps = {
-	provider: TranslationProvider;
+	provider: ApiKeyTranslationProvider;
 	savedApiKey: string;
 	savedKeyInvalid: boolean;
 	targetLang: string;
@@ -400,8 +410,10 @@ export function SettingsTranslationPage() {
 	const isDesktop = useDesktopBreakpoint();
 	const providerInfo = PROVIDER_INFO[provider];
 	const ProviderIcon = providerInfo.icon;
+	// Server translation has no key: every API key row, guide and sheet is hidden.
+	const keyProvider = providerUsesApiKey(provider) ? provider : null;
 	// The final "paste" step is rendered as a row that opens the key sheet.
-	const guideSteps = SETUP_STEPS[provider].filter((step) => step.key !== "paste");
+	const guideSteps = keyProvider ? SETUP_STEPS[keyProvider].filter((step) => step.key !== "paste") : [];
 	const targetLang = resolveTranslateTargetLanguage(i18n.resolvedLanguage ?? i18n.language);
 
 	function handleSelectProvider(next: TranslationProvider) {
@@ -452,6 +464,7 @@ export function SettingsTranslationPage() {
 							<ChevronRight className="h-4 w-4 shrink-0 text-[var(--text-muted)]" />
 						</button>
 						{/* Key status at a glance; opens the key sheet. */}
+						{keyProvider ? (
 						<button
 							id="translation-api-key"
 							type="button"
@@ -491,9 +504,20 @@ export function SettingsTranslationPage() {
 							</span>
 							<ChevronRight className="h-4 w-4 shrink-0 text-[var(--text-muted)]" />
 						</button>
+						) : (
+							<div className="flex items-start gap-2.5 px-4 py-3">
+								<Info className="mt-0.5 h-3.5 w-3.5 shrink-0 text-[var(--text-muted)]" />
+								<p className="text-xs leading-relaxed text-[var(--text-muted)]">
+									{t("auto_translate.server_info_official", {
+										defaultValue: "Messages are translated by the server. This is a paid feature: without a subscription, translating fails.",
+									})}
+								</p>
+							</div>
+						)}
 					</div>
 				</div>
 
+				{keyProvider && (
 				<div>
 					<p className="mb-2 px-1 text-xs font-semibold uppercase tracking-widest text-[var(--text-muted)]">
 						{t("auto_translate.guide_section", { defaultValue: "Get an API key" })}
@@ -562,11 +586,12 @@ export function SettingsTranslationPage() {
 						</ol>
 					</div>
 				</div>
+				)}
 			</div>
 
-			{isKeySheetOpen && (
+			{isKeySheetOpen && keyProvider && (
 				<ApiKeySheet
-					provider={provider}
+					provider={keyProvider}
 					savedApiKey={savedApiKey}
 					savedKeyInvalid={savedKeyInvalid}
 					targetLang={targetLang}

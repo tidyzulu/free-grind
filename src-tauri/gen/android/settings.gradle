@@ -1,3 +1,6 @@
 include ':app'
+// Native parts that pose as Grindr (spoofed Firebase, reCAPTCHA minting):
+// see grindr/build.gradle.kts.
+include ':grindr'
 
 apply from: 'tauri.settings.gradle'

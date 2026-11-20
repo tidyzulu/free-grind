@@ -1,6 +1,7 @@
 import { useTranslation } from "react-i18next";
 import { Bug } from "lucide-react";
-import { GITHUB_NEW_ISSUE_URL, openExternalUrl } from "../../utils/githubIssues";
+import { openExternalUrl } from "../../utils/externalUrl";
+import { NEW_ISSUE_URL } from "../../config/links-config";
 
 export function BugReportButton() {
 	const { t } = useTranslation();
@@ -8,7 +9,7 @@ export function BugReportButton() {
 	return (
 		<button
 			type="button"
-			onClick={() => void openExternalUrl(GITHUB_NEW_ISSUE_URL)}
+			onClick={() => void openExternalUrl(NEW_ISSUE_URL)}
 			className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs text-[var(--text-muted)] transition-colors hover-fill hover:text-[var(--text)]"
 		>
 			<Bug className="h-3.5 w-3.5" />

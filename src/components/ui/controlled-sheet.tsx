@@ -6,6 +6,8 @@ type ControlledBottomSheetProps = Omit<ComponentProps<typeof BottomSheet>, "onCl
 	isOpen: boolean;
 	/** The user dismissed it (swipe, back, backdrop, a SheetClose) while still open. */
 	onDismiss: () => void;
+	/** After it closed (slid out, its history entry popped): e.g. to open what replaces it. */
+	onClosed?: () => void;
 };
 
 /**
@@ -15,7 +17,7 @@ type ControlledBottomSheetProps = Omit<ComponentProps<typeof BottomSheet>, "onCl
  * entry) when it turns false, instead of vanishing on unmount. Portaled to
  * the body, so it works from inside masked or transformed containers.
  */
-export function ControlledBottomSheet({ isOpen, onDismiss, ...sheetProps }: ControlledBottomSheetProps) {
+export function ControlledBottomSheet({ isOpen, onDismiss, onClosed, ...sheetProps }: ControlledBottomSheetProps) {
 	const [isMounted, setIsMounted] = useState(isOpen);
 	const closeRef = useRef<(() => void) | null>(null);
 	const isOpenRef = useRef(isOpen);
@@ -35,6 +37,7 @@ export function ControlledBottomSheet({ isOpen, onDismiss, ...sheetProps }: Cont
 			onClose={() => {
 				setIsMounted(false);
 				if (isOpenRef.current) onDismiss();
+				onClosed?.();
 			}}
 		/>,
 		document.body,

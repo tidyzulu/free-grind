@@ -7,8 +7,8 @@ import { useNavigate, useLocation } from "react-router-dom";
 import { PageHeader } from "../../components/PageHeader";
 import { PullToRefreshContainer } from "./components/PullToRefreshContainer";
 import { useApiFunctions } from "../../hooks/useApiFunctions";
-import * as chatDb from "../../services/chatDb";
-import { unhideProfile as unhideProfileLocally } from "../../services/profileHide";
+import { listHiddenProfiles, unhideAllProfiles, unhideProfile } from "../../services/profileHide";
+import { useProfileHideMode } from "../../services/profileHideMode";
 import { getThumbImageUrl, validateMediaHash } from "../../utils/media";
 import { ProfileImage } from "../../components/ui/profile-image";
 import { ConfirmDialog } from "../../components/ui/confirm-dialog";
@@ -26,6 +26,7 @@ export function SettingsHiddenPage() {
 	const navigate = useNavigate();
 	const location = useLocation();
 	const apiFunctions = useApiFunctions();
+	const hideMode = useProfileHideMode();
 
 	const [hiddenProfiles, setHiddenProfiles] = useState<HiddenProfileListItem[]>([]);
 	const [isLoading, setIsLoading] = useState(true);
@@ -39,7 +40,7 @@ export function SettingsHiddenPage() {
 		setError(null);
 
 		try {
-			const stored = await chatDb.listHiddenProfiles();
+			const stored = await listHiddenProfiles(apiFunctions);
 
 			if (stored.length === 0) {
 				setHiddenProfiles([]);
@@ -48,7 +49,7 @@ export function SettingsHiddenPage() {
 
 			// Batch-fetch fresh details via the cascade endpoint in chunks of 50,
 			// same as the Blocked page — falls back to the locally snapshotted
-			// name/avatar (see chatDb.hideProfile) if a chunk fails or a profile
+			// name/avatar (local snapshot or the /v1/hides entry) if a chunk fails or a profile
 			// has since become unresolvable (deleted/banned).
 			const CHUNK_SIZE = 50;
 			const ids = stored.map((p) => p.profileId);
@@ -116,7 +117,8 @@ export function SettingsHiddenPage() {
 		} finally {
 			setIsLoading(false);
 		}
-	}, [apiFunctions, t]);
+		// hideMode: reload when the mode switches, the list shown is the active mode's.
+	}, [apiFunctions, hideMode, t]);
 
 	useEffect(() => {
 		void loadHiddenProfiles();
@@ -127,7 +129,10 @@ export function SettingsHiddenPage() {
 
 		setMutatingProfileId(profileId);
 		try {
-			await unhideProfileLocally(profileId);
+			if (!(await unhideProfile(apiFunctions, profileId))) {
+				toast.error(t("profile_details.unhide_failed", { defaultValue: "Failed to unhide profile." }));
+				return;
+			}
 			setHiddenProfiles((previous) => previous.filter((p) => p.profileId !== profileId));
 			toast.success(t("profile_details.unhide_success"));
 		} finally {
@@ -143,7 +148,7 @@ export function SettingsHiddenPage() {
 	const handleUnhideAll = async () => {
 		setIsUnhidingAll(true);
 		try {
-			await Promise.all(hiddenProfiles.map((p) => unhideProfileLocally(p.profileId)));
+			await unhideAllProfiles(apiFunctions, hiddenProfiles.map((p) => p.profileId));
 			setHiddenProfiles([]);
 			toast.success(t("settings_hidden.unhide_all_success", { defaultValue: "All profiles unhidden." }));
 		} catch (err) {

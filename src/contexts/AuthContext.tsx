@@ -27,7 +27,7 @@ import {
 import { appLog } from "../utils/logger";
 import { setActiveChatDbUser } from "../services/chatDb";
 import { setActiveChatContactIndexAccount } from "../services/chatContactIndex";
-import { setActiveInterestStoreUser } from "../services/interestViewsStore";
+import { beforeSignOut, setActiveUser as setWorkaroundsUser } from "../grindr-workarounds";
 import { clearAllCaches } from "../pages/app/gridpage/cache";
 import { loadAutomationCache } from "../utils/autoblock";
 import { loadAutomationRulesCache } from "../utils/automationRules";
@@ -42,9 +42,7 @@ import { runRestoredBlocklist, syncOwnBlocklist } from "../services/ownBlocklist
 import { runRestoredFavorites } from "../services/restoredFavorites";
 import { runTapsAutomationSync } from "../services/tapsSync";
 import { syncSavedPhrasesFromServer } from "../services/savedPhrases";
-import { mintRecaptchaToken, RecaptchaError, type RecaptchaFailure } from "../services/recaptcha";
-import { isCustomServer } from "../services/serverConfig";
-import { restoreStrandedLocation } from "../services/entitlementBypass";
+import { mintRecaptchaToken, recaptchaFailureMessage, RecaptchaError } from "../services/recaptcha";
 import i18n from "../i18n";
 
 const AUTH_USER_ID_STORAGE_KEY = "fg-user-id";
@@ -113,7 +111,7 @@ const FACEBOOK_DIALOG_ERROR = "facebook-dialog-error";
 const FACEBOOK_HANDOFF_REFUSED = "facebook-handoff-refused";
 // Error markers from sign_in_with_transfer_code (api/auth.rs), matched verbatim.
 const TRANSFER_CODE_MESSAGES: Record<string, string> = {
-	"transfer-code-invalid": "This isn't a Free Grind sign-in code.",
+	"transfer-code-invalid": `This isn't a ${__APP_NAME__} sign-in code.`,
 	"transfer-code-expired": "This sign-in code has expired. Show a new one on the other device.",
 	"transfer-code-revoked": "The other device's session is no longer valid. Sign in there again, then show a new code.",
 };
@@ -144,6 +142,34 @@ function describeLoginError(
 	return { message: appError?.prettyMessage || fallback };
 }
 
+// Account creation refusals (POST /v8/users) that have a known meaning, shown
+// without the raw "Error <code>: ..." text.
+const SIGN_UP_ERROR_MESSAGES: Record<number, { key: string; defaultValue: string }> = {
+	[INVALID_INPUT_PARAMETERS_CODE]: {
+		key: "auth.sign_up.errors.invalid_input",
+		defaultValue: "Please check your email address and date of birth. You must be at least 18 years old.",
+	},
+	6: { key: "auth.sign_up.errors.email_taken", defaultValue: "An account with this email address already exists." },
+	17: {
+		key: "auth.sign_up.errors.password_complexity",
+		defaultValue: "This password isn't strong enough. Choose a longer one with a mix of letters, numbers and symbols.",
+	},
+	// Free Grind server extension (registration invites).
+	901: { key: "auth.sign_up.errors.invite_required", defaultValue: "This server only accepts new accounts with an invite code." },
+	902: {
+		key: "auth.sign_up.errors.invite_invalid",
+		defaultValue: "This invite code is invalid, expired or already used.",
+	},
+};
+
+function describeSignUpError(appError: AppError | null): AuthError {
+	const code = appError?.kind === "Api" && typeof appError.message === "object" ? appError.message.code : null;
+	const known = code != null ? SIGN_UP_ERROR_MESSAGES[code] : undefined;
+	if (known) return { message: i18n.t(known.key, { defaultValue: known.defaultValue }) };
+	const fallback = i18n.t("auth.sign_up.errors.failed", { defaultValue: "Sign-up failed. Please try again." });
+	return describeLoginError(appError, fallback, fallback);
+}
+
 function isInvalidCredentials(appError: AppError | null): boolean {
 	if (appError?.kind === "Unauthorized") return true;
 	return (
@@ -153,13 +179,6 @@ function isInvalidCredentials(appError: AppError | null): boolean {
 	);
 }
 
-// Shown when a sign-in or sign-up needs a reCAPTCHA token (Grindr's
-// first-party reCAPTCHA) but none could be minted.
-const CAPTCHA_MESSAGES: Partial<Record<RecaptchaFailure, string>> = {
-	unsupportedPlatform: "This account needs captcha verification, which is only available on Android.",
-	grindrMissing: "Captcha verification needs the Grindr app installed on this device.",
-};
-const CAPTCHA_FAILED_MESSAGE = "Captcha verification failed. Please try again.";
 
 type AuthAction =
 	| { type: "SET_USER"; payload: number }
@@ -382,7 +401,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 			if (error instanceof RecaptchaError) {
 				appLog.warn("[Auth] login: reCAPTCHA token unavailable", { reason: error.reason, detail: error.detail });
 				if (error.reason !== "cancelled") {
-					const message = CAPTCHA_MESSAGES[error.reason] ?? CAPTCHA_FAILED_MESSAGE;
+					const message = recaptchaFailureMessage(error.reason);
 					dispatch({ type: "SET_ERROR", payload: { message } });
 				}
 				throw error;
@@ -542,9 +561,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 			dispatch({ type: "SET_LOADING", payload: true });
 			dispatch({ type: "SET_ERROR", payload: null });
 
-			// Official servers: sign-up is Android-only (rejects with a RecaptchaError
-			// elsewhere). A self-hosted server needs no reCAPTCHA token.
-			const captchaToken = isCustomServer() ? "" : await mintRecaptchaToken("sign_up");
+			// Sign-up is Android-only (rejects with a RecaptchaError elsewhere).
+			const captchaToken = await mintRecaptchaToken("sign_up");
 			const profileId = await callMethod("create_account", {
 				email,
 				password,
@@ -558,13 +576,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 			if (error instanceof RecaptchaError) {
 				appLog.warn("[Auth] signUp: reCAPTCHA token unavailable", { reason: error.reason, detail: error.detail });
 				if (error.reason !== "cancelled") {
-					const message = CAPTCHA_MESSAGES[error.reason] ?? CAPTCHA_FAILED_MESSAGE;
+					const message = recaptchaFailureMessage(error.reason);
 					dispatch({ type: "SET_ERROR", payload: { message } });
 				}
 				throw error;
 			}
 			const appError = asAppError(error);
-			const message = describeLoginError(appError, "Sign-up failed. Please try again.", "Sign-up failed. Please try again.");
+			const message = describeSignUpError(appError);
 			appLog.error("[Auth] signUp failed", { kind: appError?.kind, message });
 			dispatch({ type: "SET_ERROR", payload: message });
 			throw error;
@@ -600,9 +618,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 	const logout = async () => {
 		try {
 			dispatch({ type: "SET_LOADING", payload: true });
-			// Repair a location left parked in Honduras before the session goes
-			// away, so the account isn't stranded there after sign-out (#446).
-			await restoreStrandedLocation();
+			// Lets Grindr workarounds clean up while the session still exists
+			// (e.g. a location left elsewhere).
+			await beforeSignOut();
+			// Unregister this device's push token while the session still
+			// exists, so the signed-out account stops notifying here. Best
+			// effort: a failure must not block the logout.
+			const pushToken = cachedPushToken();
+			if (pushToken) {
+				await callMethod("revoke_push_token", { token: pushToken }).catch((error) =>
+					appLog.warn("[PUSH_SYNC] Failed to revoke push token on logout", asAppError(error)?.prettyMessage || error),
+				);
+			}
+			// Forget the sync marker so a later sign-in registers the token again.
+			window.localStorage.removeItem(PUSH_TOKEN_SYNCED_STORAGE_KEY);
 			await callMethod("logout");
 			dispatch({ type: "CLEAR_USER" });
 			toast.success(i18n.t("auth.toasts.logged_out"));
@@ -689,7 +718,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 		}
 
 		dispatch({ type: "SET_SETTINGS_READY", payload: false });
-		setActiveInterestStoreUser(state.userId);
+		setWorkaroundsUser(state.userId);
 		setActiveChatContactIndexAccount(state.userId);
 
 		void (async () => {

@@ -9,6 +9,7 @@ import {
 	Download,
 	EllipsisVertical,
 	Languages,
+	Pencil,
 	Star,
 	GitMerge,
 	GripVertical,
@@ -31,7 +32,10 @@ import {
 	Undo2,
 	X,
 	BellOff,
+	LogOut,
 } from "lucide-react";
+import { useFeatureFlag } from "../../../services/assignmentsStore";
+import { messageText } from "./messageEdit";
 import { MediaEditSheet } from "./MediaEditSheet";
 import type { MediaEdit } from "./MediaEditStep";
 import { BananaFilled, BellOffFilled, StickerFilled, CameraPlusFilled, EyeFilled, MicFilled, EyeOffFilled, ImagesFilled, MapPinFilled, MessageCircleXFilled, MessageSquareQuoteFilled, PencilLineFilled, SendHorizontalFilled, ShieldCheckFilled, UserFilled, VideoOffFilled } from "../../../components/icons/FilledIcons";
@@ -49,7 +53,7 @@ import {
 	useModalClose,
 } from "../../../hooks/useModalClose";
 import type { AlbumListItem, AlbumMediaCount, LocalUploadProgress, UiMessage } from "../../../types/chat-page";
-import type { ConversationEntry, Message } from "../../../types/messages";
+import type { ChatGroup, ConversationEntry, Message } from "../../../types/messages";
 import type { ProfileDetail } from "../../../types/grid";
 import type { DrawerMedia } from "./ChatDrawerPanel";
 import { ChatDrawerPanel } from "./ChatDrawerPanel";
@@ -57,6 +61,8 @@ import { EncounterLogSheet } from "../sexual-health/EncounterLogSheet";
 import { isSexualHealthEnabled } from "../../../utils/optionalFeatures";
 import { decodeGeohash } from "../../../utils/geohash";
 import { ShareLocationSheet } from "./ShareLocationSheet";
+import { GroupAvatar } from "./groups/GroupAvatar";
+import { GroupInviteCard } from "./groups/GroupInviteCard";
 import { loadSavedLocations } from "../../../services/savedLocations";
 import { usePreferences } from "../../../contexts/PreferencesContext";
 import { useEffectiveColorScheme } from "../../../hooks/useEffectiveColorScheme";
@@ -65,12 +71,14 @@ import {
 	getMessageLocation,
 	getMessagePreviewLabel,
 	getOtherParticipant,
+	isGroupConversation,
 	getParticipantAvatarUrl,
 	getParticipantOnlineMeta,
 	getMessageImageUrl,
 	getMessageVideoUrl,
 	getMessageAudioUrl,
 	getMessageAlbumId,
+	isOnceAlbumShareOpened,
 	getAlbumContentReplyTarget,
 	getMessageAlbumCoverUrl,
 	getMediaCaptureTarget,
@@ -94,7 +102,7 @@ import { getShowReadReceiptToggle, isReadReceiptsHidden, toggleReadReceiptsHidde
 import { toggleAutoTranslate } from "../../../utils/autoTranslate";
 import { useMessageTranslations } from "../../../hooks/useMessageTranslations";
 import { SheetSearchInput } from "../../../components/ui/sheet-section";
-import { BottomSheet, SheetClose, SheetCloseButton } from "../../../components/ui/bottom-sheet";
+import { BottomSheet, SheetClose, SheetCloseButton, sheetButtonClass } from "../../../components/ui/bottom-sheet";
 import { NATIVE_SHEET_BG, SheetActionList } from "../../../components/ui/action-sheet";
 import {
 	DndContext,
@@ -146,6 +154,7 @@ import {
 } from "../../../services/savedPhrases";
 import { useScrollRowFade } from "../../../hooks/useScrollRowFade";
 import { AddToDrawerChip, DrawerEmptyState, ExpiryToggleButton, VideoExpiryButton } from "./drawerUi";
+import { useExpiringAllowanceInfo } from "../../../hooks/queries/useEntitlementQueries";
 import { haptic } from "../../../utils/haptics";
 import { menuTransitionStyle, usePresence } from "../../../hooks/usePresence";
 import { useNicknameNameChange } from "../../../hooks/useNicknameNameChange";
@@ -154,6 +163,7 @@ import { proxyMediaUrl } from "../../../utils/mediaProxy";
 import { getMessagePosterKey } from "../../../services/videoPosterStore";
 import { VideoFirstFrame } from "../../../components/VideoFirstFrame";
 import type { HeroRect } from "../../../components/PhotoViewer";
+import { useChatArchiveEnabled } from "../../../services/chatArchiveMode";
 
 type ChatThreadPanelProps = {
 	navigate: NavigateFunction;
@@ -174,6 +184,15 @@ type ChatThreadPanelProps = {
 	onDeleteConversation?: (conversationId: string) => void | Promise<void>;
 	isDeletingConversation?: boolean;
 	onBlockProfile?: (profileId: number) => void | Promise<void>;
+	/** Group chats: the header (avatar, name, menu) opens the group's details. */
+	onOpenGroupInfo?: () => void;
+	/** An open group invite: the thread shows it with Join / Decline instead of messages and composer. */
+	groupInvite?: ChatGroup | null;
+	/** Group chats: leave (asks first; the chat stays as an archive). */
+	onLeaveGroup?: () => void;
+	onAcceptGroupInvite?: () => void | Promise<void>;
+	onDeclineGroupInvite?: () => void | Promise<void>;
+	isAnsweringGroupInvite?: boolean;
 	isBlockingProfile?: boolean;
 	onUnblockProfile?: (profileId: number) => void | Promise<void>;
 	isUnblockingProfile?: boolean;
@@ -202,6 +221,8 @@ type ChatThreadPanelProps = {
 	endMessageLongPress: () => void;
 	messageLongPressTriggeredRef: { current: boolean };
 	openFullScreenImage: (imageUrl: string, meta?: { takenOnGrindr: boolean; createdAt: number | null; createdAtLabel: string | null; timestamp: number }, mediaType?: "image" | "video", messageId?: string, senderId?: number, heroRect?: HeroRect | null) => void;
+	/** Archive mode off: fetches a received expiring photo/video (uses one view) and opens it. */
+	openViewLimitedMedia: (message: UiMessage, heroRect?: HeroRect | null) => void | Promise<void>;
 	openAlbumViewerById: (albumId: number, isOwnAlbum?: boolean) => void | Promise<void>;
 	openProfilePhotos: (mediaHash: string, isPartnerProfile: boolean, heroRect?: HeroRect | null) => void;
 	onJumpToMessage: (messageId: string) => void;
@@ -218,6 +239,9 @@ type ChatThreadPanelProps = {
 	handleRetry: (message: Message) => void;
 	handleReply: (message: Message) => void | Promise<void>;
 	canReply: boolean;
+	/** Whether a message can be edited here (flag chat-message-edit, my own text message). */
+	canEditMessage: (message: UiMessage) => boolean;
+	handleEdit: (message: UiMessage) => void;
 	handleStopAlbumShare: (albumId: number) => void | Promise<void>;
 	handleRemoveLocalAlbum: (albumId: number) => void | Promise<void>;
 	threadBottomRef: { current: HTMLDivElement | null };
@@ -290,12 +314,18 @@ type ChatThreadPanelProps = {
 	setDraft: (value: string) => void;
 	replyTargetMessage: UiMessage | null;
 	clearReplyTarget: () => void;
+	/** The message the composer is editing; its draft is the new text. */
+	editTargetMessage: UiMessage | null;
+	cancelEdit: () => void;
+	/** Desktop arrow up: edits my last text message; false if there is none. */
+	editLastOwnMessage: () => boolean;
 	isSending: boolean;
 	selectedActionMessage: UiMessage | null;
 	selectedActionMessageMine: boolean;
 	isAlbumSheetOpen: boolean;
 	onOpenMediaSheet?: () => void;
-	isPartnerTyping?: boolean;
+	/** Who is typing in this thread right now (others only). */
+	typingProfileIds?: readonly number[];
 	isArchived?: boolean;
 	archivedReason?: ArchivedReason | null;
 	mergeableConversations?: ConversationEntry[];
@@ -445,8 +475,14 @@ function SortableSavedPhraseRow({ phrase, onUse, onLongPress, onDelete, isDeskto
 	);
 }
 
+
+/** remainingSeconds at or above this means no real limit (30 days). */
+const UNLIMITED_CALL_SECONDS = 30 * 86_400;
 export function ChatThreadPanel(props: ChatThreadPanelProps) {
 	const { t } = useTranslation();
+	// Counters / limits of the attachment dialog's expiry buttons; fetched once it opens (then cached).
+	const picsAllowance = useExpiringAllowanceInfo("pics", props.pendingAttachmentFiles != null);
+	const videosAllowance = useExpiringAllowanceInfo("videos", props.pendingAttachmentFiles != null);
 	const { chat: blurChatMedia } = useMediaBlur();
 	useAvatarCache();
     const apiFunctions = useApiFunctions();
@@ -500,6 +536,10 @@ export function ChatThreadPanel(props: ChatThreadPanelProps) {
 	// RTCPeerConnection (confirmed missing on some Linux WebKitGTK builds)
 	// instead of showing a menu item that would only fail after tapping it.
 	const [webRtcSupported] = useState(() => isWebRtcSupported());
+	// Both servers hand out video calls as the CreateVideoCall feature in the
+	// session token: without it there's no call button at all. With it but
+	// without WebRTC the button stays, disabled with a hint.
+	const canVideoCall = useFeatureFlag("CreateVideoCall");
 	const [pendingLocationShare, setPendingLocationShare] = useState<{ lat: number; lon: number } | null>(null);
 	const [banWordPrompt, setBanWordPrompt] = useState<{ text: string } | null>(null);
 	const [banNamePrompt, setBanNamePrompt] = useState<{ text: string } | null>(null);
@@ -731,6 +771,12 @@ export function ChatThreadPanel(props: ChatThreadPanelProps) {
 		onDeleteConversation,
 		isDeletingConversation = false,
 		onBlockProfile,
+		onOpenGroupInfo,
+		groupInvite = null,
+		onLeaveGroup,
+		onAcceptGroupInvite,
+		onDeclineGroupInvite,
+		isAnsweringGroupInvite = false,
 		isBlockingProfile = false,
 		onUnblockProfile,
 		isUnblockingProfile = false,
@@ -764,6 +810,7 @@ export function ChatThreadPanel(props: ChatThreadPanelProps) {
 		endMessageLongPress,
 		messageLongPressTriggeredRef,
 		openFullScreenImage,
+		openViewLimitedMedia,
 		openAlbumViewerById,
 		openProfilePhotos,
 		onJumpToMessage,
@@ -780,6 +827,8 @@ export function ChatThreadPanel(props: ChatThreadPanelProps) {
 		handleRetry,
 		handleReply,
 		canReply,
+		canEditMessage,
+		handleEdit,
 		handleStopAlbumShare,
 		handleRemoveLocalAlbum,
 		threadBottomRef,
@@ -814,12 +863,15 @@ export function ChatThreadPanel(props: ChatThreadPanelProps) {
 		setDraft,
 		replyTargetMessage,
 		clearReplyTarget,
+		editTargetMessage,
+		cancelEdit,
+		editLastOwnMessage,
 		isSending,
 		selectedActionMessage,
 		selectedActionMessageMine,
 		isAlbumSheetOpen,
 		onOpenMediaSheet,
-		isPartnerTyping = false,
+		typingProfileIds,
 		toggleDrawer,
 		isDrawerOpen,
 		isLoadingDrawer,
@@ -875,6 +927,19 @@ export function ChatThreadPanel(props: ChatThreadPanelProps) {
 			textareaRef.current?.focus();
 		}
 	}, [replyTargetMessage]);
+
+	// Editing starts with the caret after the old text.
+	const editTargetMessageId = editTargetMessage?.messageId ?? null;
+	useEffect(() => {
+		if (!editTargetMessageId) return;
+		const el = textareaRef.current;
+		if (!el) return;
+		el.focus();
+		requestAnimationFrame(() => el.setSelectionRange(el.value.length, el.value.length));
+	}, [editTargetMessageId]);
+	// One banner above the composer at a time; editing wins over a reply.
+	const showReplyBanner = !!selectedConversation && !!replyTargetMessage && !editTargetMessage;
+	const hasComposerBanner = !!selectedConversation && (!!replyTargetMessage || !!editTargetMessage);
 
 	// The gesture picked in Behavior settings sends the phrase, the other one fills the composer.
 	const handleUsePhrase = (phrase: string, gesture: "tap" | "longPress" = "tap") => {
@@ -1004,15 +1069,55 @@ export function ChatThreadPanel(props: ChatThreadPanelProps) {
 		return map;
 	}, [shareableAlbums]);
 
+	// The server's word on which of our albums are shared with this chat's
+	// profile, fetched whenever the drawer opens. The thread only holds the
+	// pages loaded so far, so a share message further up would otherwise be
+	// missed until scrolled to. Albums the server couldn't answer for fall
+	// back to what the loaded messages say.
+	const [serverAlbumShared, setServerAlbumShared] = useState<Map<number, boolean>>(() => new Map());
+	const shareableAlbumIdsKey = shareableAlbums.map((album) => album.albumId).join(",");
+	useEffect(() => {
+		setServerAlbumShared(new Map());
+		if (!isDrawerOpen || headerProfileId == null || !shareableAlbumIdsKey) return;
+		let cancelled = false;
+		const albumIds = shareableAlbumIdsKey.split(",").map(Number);
+		void Promise.all(
+			albumIds.map(async (albumId) => {
+				try {
+					const profileIds = await apiFunctions.getAlbumShares({ albumId: String(albumId) });
+					return [albumId, profileIds.includes(headerProfileId)] as const;
+				} catch {
+					return null;
+				}
+			}),
+		).then((results) => {
+			if (cancelled) return;
+			const map = new Map<number, boolean>();
+			for (const result of results) if (result) map.set(result[0], result[1]);
+			setServerAlbumShared(map);
+		});
+		return () => { cancelled = true; };
+	}, [isDrawerOpen, headerProfileId, shareableAlbumIdsKey, apiFunctions]);
+
+	const isArchiveModeEnabled = useChatArchiveEnabled();
 	const sharedAlbumIds = useMemo(() => {
 		const ids = new Set<number>();
+		// Without archive mode, a view-once share counts as ended once it was
+		// opened, even while the server still lists it (see isOnceAlbumShareOpened).
+		const usedUpIds = new Set<number>();
 		for (const msg of threadMessages) {
 			const aid = getMessageAlbumId(msg);
 			const body = msg.body as any;
 			if (aid && body?.isViewable) ids.add(aid);
+			if (aid && !isArchiveModeEnabled && isOnceAlbumShareOpened(msg)) usedUpIds.add(aid);
 		}
+		for (const [albumId, shared] of serverAlbumShared) {
+			if (shared) ids.add(albumId);
+			else ids.delete(albumId);
+		}
+		for (const albumId of usedUpIds) ids.delete(albumId);
 		return ids;
-	}, [threadMessages]);
+	}, [threadMessages, serverAlbumShared, isArchiveModeEnabled]);
 
     const [showReadReceiptToggle] = useState(() => getShowReadReceiptToggle());
     // Derived from the privacy cache so a toggle from the chat list's context menu shows up here too.
@@ -1353,6 +1458,8 @@ export function ChatThreadPanel(props: ChatThreadPanelProps) {
 				const otherParticipant = selectedConversation
 					? getOtherParticipant(selectedConversation, userId)
 					: null;
+				const isGroup = isGroupConversation(selectedConversation);
+				const groupMemberCount = selectedConversation?.data.group?.memberCount ?? (selectedConversation?.data.participants.length ?? 0) + 1;
 				const profileId = selectedConversation
 					? otherParticipant?.profileId ?? null
 					: targetProfileId;
@@ -1386,9 +1493,14 @@ export function ChatThreadPanel(props: ChatThreadPanelProps) {
 				// the existing-conversation case keys off isArchived. There's no
 				// conversation to archive yet in the new-chat case, so key off
 				// isBlockedBySelf directly there instead.
-				const showBlockGroup = selectedConversation ? !isArchived : !isBlockedBySelf;
+				// Groups: blocking is per profile (from the member list), never the whole chat.
+				const showBlockGroup = isGroup ? false : selectedConversation ? !isArchived : !isBlockedBySelf;
 				// Avatar, name and status line all open the profile (like the album viewer's header).
 				const openHeaderProfile = () => {
+					if (isGroup) {
+						onOpenGroupInfo?.();
+						return;
+					}
 					if (profileId == null) return;
 					openProfile(profileId, getProfileReturnToChatPath(profileId), true);
 				};
@@ -1489,9 +1601,9 @@ export function ChatThreadPanel(props: ChatThreadPanelProps) {
 								<button
 									type="button"
 									onClick={openHeaderProfile}
-									disabled={profileId == null}
-									aria-label={t("push_notifications.open_profile")}
-									title={onlineMeta.label}
+									disabled={profileId == null && !isGroup}
+									aria-label={isGroup ? t("group_chat.info", { defaultValue: "Group info" }) : t("push_notifications.open_profile")}
+									title={isGroup ? undefined : onlineMeta.label}
 									className={`header-back-adjacent h-10 w-10 shrink-0 overflow-hidden rounded-full border-2 bg-[var(--surface-2)] transition disabled:cursor-default disabled:opacity-80 ${
 										isOnline
 											? onlineMeta.isEndingSoon
@@ -1500,19 +1612,23 @@ export function ChatThreadPanel(props: ChatThreadPanelProps) {
 											: "border-[var(--border)] hover:border-[var(--accent)]"
 									}`}
 								>
-									<ProfileImage
-										src={resolveAvatarSrc(
-											avatarHash,
-											getParticipantAvatarUrl(avatarHash),
-										)}
-										alt={displayName}
-										className={isArchived ? "grayscale" : undefined}
-									/>
+									{isGroup ? (
+										<GroupAvatar alt={displayName} />
+									) : (
+										<ProfileImage
+											src={resolveAvatarSrc(
+												avatarHash,
+												getParticipantAvatarUrl(avatarHash),
+											)}
+											alt={displayName}
+											className={isArchived ? "grayscale" : undefined}
+										/>
+									)}
 								</button>
 								<button
 									type="button"
 									onClick={openHeaderProfile}
-									disabled={profileId == null}
+									disabled={profileId == null && !isGroup}
 									className="min-w-0 text-start transition active:opacity-70 disabled:cursor-default disabled:active:opacity-100"
 								>
 									<span className="flex items-center gap-1.5 min-w-0">
@@ -1524,12 +1640,14 @@ export function ChatThreadPanel(props: ChatThreadPanelProps) {
 									    status line text-xs); leading-tight keeps the block within the
 									    40px avatar height, so the row sits like the profile / photo viewer. */}
 									<span className="block text-xs leading-tight text-[var(--text-muted)]">
-										{[
-											onlineMeta.label,
-											distanceLabel,
-										]
-											.filter(Boolean)
-											.join(" · ")}
+										{isGroup
+											? t("group_chat.member_count", { defaultValue: "{{count}} members", count: groupMemberCount })
+											: [
+													onlineMeta.label,
+													distanceLabel,
+												]
+													.filter(Boolean)
+													.join(" · ")}
 									</span>
 								</button>
 							</div>
@@ -1603,7 +1721,7 @@ export function ChatThreadPanel(props: ChatThreadPanelProps) {
                 </button>
             )}
 
-								{isDesktop && onOpenMediaSheet && (
+								{isDesktop && onOpenMediaSheet && !groupInvite && (
 									<button
 										type="button"
 										onClick={onOpenMediaSheet}
@@ -1615,6 +1733,7 @@ export function ChatThreadPanel(props: ChatThreadPanelProps) {
 									</button>
 								)}
 
+								{!groupInvite && (
 								<div
 									ref={headerActionsMenuRef}
 									className={`relative ${!isDesktop ? "pe-0" : ""}`}
@@ -1647,14 +1766,13 @@ export function ChatThreadPanel(props: ChatThreadPanelProps) {
 												type="button"
 												onClick={() => {
 													setIsHeaderActionsMenuOpen(false);
-													if (profileId == null) return;
-													openProfile(profileId, getProfileReturnToChatPath(profileId), true);
+													openHeaderProfile();
 												}}
-												disabled={profileId == null}
+												disabled={profileId == null && !isGroup}
 												className="flex items-center rounded-sm px-2 py-2 text-start text-sm text-[var(--text)] transition hover-fill disabled:opacity-60"
 											>
 												<UserFilled className="me-2 h-4 w-4 opacity-70" />
-												{t("chat.view_profile")}
+												{isGroup ? t("group_chat.info", { defaultValue: "Group info" }) : t("chat.view_profile")}
 											</button>
 											)}
 											{!isArchived && profileId != null && showSexualHealth && (
@@ -1670,11 +1788,13 @@ export function ChatThreadPanel(props: ChatThreadPanelProps) {
 												{t("chat.log_encounter", { defaultValue: "We just hooked up" })}
 											</button>
 											)}
-											{!isArchived && profileId != null && (() => {
+											{!isArchived && profileId != null && canVideoCall && (() => {
 												const videoCallExhausted =
 													webRtcSupported && videoCallRemainingSeconds != null && videoCallRemainingSeconds <= 0;
 												const videoCallDisabled = !webRtcSupported || videoCallExhausted;
-												const remainingMinutes = videoCallRemainingSeconds != null ? Math.floor(videoCallRemainingSeconds / 60) : null;
+												// Effectively unlimited (self-hosted default): no countdown hint.
+												const remainingMinutes =
+													videoCallRemainingSeconds != null && videoCallRemainingSeconds < UNLIMITED_CALL_SECONDS ? Math.floor(videoCallRemainingSeconds / 60) : null;
 												return (
 												<button
 													type="button"
@@ -1722,7 +1842,8 @@ export function ChatThreadPanel(props: ChatThreadPanelProps) {
 													{t("chat.received_media")}
 												</button>
 											)}
-											{messageTranslations.available && (
+											{/* Nothing new arrives in an archived chat to auto-translate. */}
+											{messageTranslations.available && !isArchived && (
 											<button
 												type="button"
 												onClick={() => {
@@ -1771,6 +1892,7 @@ export function ChatThreadPanel(props: ChatThreadPanelProps) {
 													</span>
 												</button>
 											)}
+											{!isGroup && (
 											<button
 												type="button"
 												onClick={() => {
@@ -1789,7 +1911,9 @@ export function ChatThreadPanel(props: ChatThreadPanelProps) {
 													previousName={nicknameNameChange.previousName}
 												/>
 											</button>
-											{isArchived && onMergeConversation && (
+											)}
+											{/* Merging joins two chats with one person; groups have no such counterpart. */}
+											{isArchived && !isGroup && onMergeConversation && (
 												<button
 													type="button"
 													onClick={() => {
@@ -1875,7 +1999,7 @@ export function ChatThreadPanel(props: ChatThreadPanelProps) {
 											)}
 											</div>
 											{/* — Keyword banning — */}
-											{!isArchived && actualProfileName && (
+											{!isArchived && actualProfileName && !isGroup && (
 												<div className="flex shrink-0 flex-col gap-1 border-t border-[var(--border)] px-2 pt-2">
 												<button
 													type="button"
@@ -1927,6 +2051,19 @@ export function ChatThreadPanel(props: ChatThreadPanelProps) {
 													{t("profile_details.report.menu_item")}
 												</button>
 											)}
+											{isGroup && !isArchived && onLeaveGroup && (
+												<button
+													type="button"
+													onClick={() => {
+														setIsHeaderActionsMenuOpen(false);
+														onLeaveGroup();
+													}}
+													className="flex items-center rounded-sm px-2 py-2 text-start text-sm text-red-400 transition hover:bg-red-500/10"
+												>
+													<LogOut className="me-2 h-4 w-4 opacity-70" />
+													{t("group_chat.leave", { defaultValue: "Leave group" })}
+												</button>
+											)}
 											<button
 												type="button"
 												onClick={requestDeleteConversation}
@@ -1940,6 +2077,7 @@ export function ChatThreadPanel(props: ChatThreadPanelProps) {
 										</div>
 									) : null}
 								</div>
+								)}
 							</div>
 						</div>
 
@@ -2057,7 +2195,9 @@ export function ChatThreadPanel(props: ChatThreadPanelProps) {
 				);
 			})()}
 
-			{selectedConversation ? (
+			{groupInvite ? (
+				<GroupInviteCard group={groupInvite} userId={userId} />
+			) : selectedConversation ? (
 				isLoadingThread &&
 				threadConversationId !== selectedConversation.data.conversationId ? (
 				<div className="flex flex-1 items-center justify-center text-[var(--text-muted)]">
@@ -2082,6 +2222,7 @@ export function ChatThreadPanel(props: ChatThreadPanelProps) {
 			) : (
 				<ChatThreadMessages
 						isDesktop={isDesktop}
+						onOpenSenderProfile={(profileId) => openProfile(profileId, getProfileReturnToChatPath(profileId), true)}
 						bottomInset={!isDesktop ? composerHeight : 0}
 						topInset={!isDesktop ? headerHeight : 0}
 						selectedConversation={selectedConversation}
@@ -2100,8 +2241,10 @@ export function ChatThreadPanel(props: ChatThreadPanelProps) {
 						endMessageLongPress={endMessageLongPress}
 						messageLongPressTriggeredRef={messageLongPressTriggeredRef}
 						openFullScreenImage={openFullScreenImage}
+						openViewLimitedMedia={openViewLimitedMedia}
 						openAlbumViewerById={openAlbumViewerById}
 						openProfilePhotos={openProfilePhotos}
+						onOpenSharedProfile={(profileId) => openProfile(profileId, getProfileReturnToChatPath(profileId))}
 						onJumpToMessage={onJumpToMessage}
 						highlightedMessageId={highlightedMessageId}
 						selectedThreadMessageMatches={selectedThreadMessageMatches}
@@ -2116,12 +2259,14 @@ export function ChatThreadPanel(props: ChatThreadPanelProps) {
 						handleRetry={handleRetry}
 						handleReply={handleReply}
 						canReply={canReply}
+						canEditMessage={canEditMessage}
+						handleEdit={handleEdit}
 						handleStopAlbumShare={handleStopAlbumShare}
 						handleRemoveLocalAlbum={handleRemoveLocalAlbum}
 						ownAlbumMediaCountMap={albumMediaCountMap}
 						ownAlbumNameMap={ownAlbumNameMap}
 						threadBottomRef={threadBottomRef}
-						isPartnerTyping={isPartnerTyping}
+						typingProfileIds={typingProfileIds}
 						isArchived={isArchived}
 						localNickname={localNickname}
 						messageTranslations={messageTranslations}
@@ -2139,7 +2284,37 @@ export function ChatThreadPanel(props: ChatThreadPanelProps) {
 				</div>
 			)}
 
-					{isArchived ? (
+					{groupInvite ? (
+						<div
+							className={`${!isDesktop ? `shrink-0 px-[var(--app-px)] py-3 ${mobileComposerBg}` : "mt-3 pt-3 -mx-3 sm:-mx-4 px-3 sm:px-4 border-t border-[var(--border)]"}`}
+							style={
+								!isDesktop
+									? { paddingBottom: mobileKeyboardInset > 0 ? "12px" : "max(12px, var(--safe-area-bottom))" }
+									: undefined
+							}
+						>
+							<div className="flex gap-2.5">
+								<button
+									type="button"
+									onClick={() => void onDeclineGroupInvite?.()}
+									disabled={isAnsweringGroupInvite}
+									className={sheetButtonClass("secondary")}
+								>
+									<X className="h-4 w-4" />
+									<span className="truncate">{t("group_chat.decline", { defaultValue: "Decline" })}</span>
+								</button>
+								<button
+									type="button"
+									onClick={() => void onAcceptGroupInvite?.()}
+									disabled={isAnsweringGroupInvite}
+									className={sheetButtonClass()}
+								>
+									<Check className="h-4 w-4" />
+									<span className="truncate">{t("group_chat.accept", { defaultValue: "Join" })}</span>
+								</button>
+							</div>
+						</div>
+					) : isArchived ? (
 						<div
 					className={`${!isDesktop ? `shrink-0 px-[var(--app-px)] py-3 ${mobileComposerBg}` : "mt-3 pt-3 -mx-3 sm:-mx-4 px-3 sm:px-4 border-t border-[var(--border)]"}`}
 							style={
@@ -2157,7 +2332,11 @@ export function ChatThreadPanel(props: ChatThreadPanelProps) {
 										{t("chat.archived.title", { defaultValue: "Conversation archived" })}
 									</p>
 									<p className="text-xs text-[var(--text-muted)]">
-										{archivedReason === "not_found"
+										{archivedReason === "group_removed"
+											? t("group_chat.archived", {
+													defaultValue: "You're no longer in this group. You can still read the history, but can't send messages.",
+												})
+											: archivedReason === "not_found"
 											? t("chat.archived.not_found", {
 													defaultValue: "This conversation is no longer available. You can still read the history.",
 												})
@@ -2292,7 +2471,28 @@ export function ChatThreadPanel(props: ChatThreadPanelProps) {
 								</div>
 							</div>
 						)}
-                        {selectedConversation && replyTargetMessage ? (() => {
+                        {selectedConversation && editTargetMessage ? (
+							<div className={`rounded-t-[25px] p-1 pb-0 transition-colors ${composerFillClass(isRecording, recordingMs)}`}>
+								<div className="flex items-center gap-2.5 rounded-[21px] bg-[color-mix(in_srgb,var(--text)_6%,transparent)] py-1.5 ps-1.5 pe-1">
+									<div className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-[color-mix(in_srgb,var(--accent)_16%,transparent)] text-[var(--accent)]">
+										<Pencil className="h-4 w-4" />
+									</div>
+									<div className="min-w-0 flex-1">
+										<p className="truncate text-xs font-semibold text-[var(--accent)]">{t("chat.thread.editing_message")}</p>
+										<p className="truncate text-xs text-[var(--text-muted)]">{messageText(editTargetMessage)}</p>
+									</div>
+									<button
+										type="button"
+										onClick={cancelEdit}
+										className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-[var(--text-muted)] transition hover:ink-tint-8 hover:text-[var(--text)] active:scale-90"
+										aria-label={t("chat.actions.cancel")}
+									>
+										<X className="h-4 w-4" />
+									</button>
+								</div>
+							</div>
+						) : null}
+                        {showReplyBanner && replyTargetMessage ? (() => {
 							const rtm = replyTargetMessage;
 							const rtmBody = rtm.body as Record<string, unknown> | null | undefined;
 							const isAudioReply = rtm.type === "Audio" || rtm.chat1Type?.toLowerCase() === "audio";
@@ -2426,7 +2626,7 @@ export function ChatThreadPanel(props: ChatThreadPanelProps) {
 
 						{props.pendingAudioBlob ? (
 							<div className={`${composerFieldMb} flex items-center gap-2 overflow-hidden py-1 ps-1 pe-1 rounded-[25px] border border-transparent ${PENDING_AUDIO_FILL_CLASS} ${
-								selectedConversation && replyTargetMessage ? "rounded-t-none" : ""
+								hasComposerBanner ? "rounded-t-none" : ""
 							}`}>
 								{/* No fixed height: like the composer it's border + py-1 + its h-10/h-8
 								    buttons, all in rem, so the two match even when the system font
@@ -2462,8 +2662,8 @@ export function ChatThreadPanel(props: ChatThreadPanelProps) {
 							// composer's buttons take the recording icon's slot on the left.
 							isRecording || compactComposer ? "ps-1 pe-1" : "ps-3 pe-1"
 						} border-transparent ${composerFillClass(isRecording, recordingMs)} ${
-							// A reply preview sits on top as the same field's first row.
-							selectedConversation && replyTargetMessage ? "rounded-t-none" : ""
+							// A reply preview (or the message being edited) sits on top as the same field's first row.
+							hasComposerBanner ? "rounded-t-none" : ""
 						}`}>
 							{isRecording ? (
 								<>
@@ -2568,6 +2768,11 @@ export function ChatThreadPanel(props: ChatThreadPanelProps) {
 										}
 									}}
 									onKeyDown={(event) => {
+										if (event.key === "Escape" && editTargetMessage) {
+											event.preventDefault();
+											cancelEdit();
+											return;
+										}
 										if (isDesktop && event.key === "Escape" && replyTargetMessage) {
 											event.preventDefault();
 											clearReplyTarget();
@@ -2590,7 +2795,20 @@ export function ChatThreadPanel(props: ChatThreadPanelProps) {
 												return;
 											}
 										}
-										if (enterSends && event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+										// Desktop: arrow up in an empty composer edits my last text message.
+										if (
+											isDesktop &&
+											event.key === "ArrowUp" &&
+											!event.shiftKey && !event.altKey && !event.ctrlKey && !event.metaKey &&
+											draft.length === 0 &&
+											!editTargetMessage &&
+											editLastOwnMessage()
+										) {
+											event.preventDefault();
+											return;
+										}
+										// While editing, Enter saves on desktop even with "Enter sends" off.
+										if ((enterSends || (isDesktop && editTargetMessage)) && event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
 											event.preventDefault();
 											event.currentTarget.form?.requestSubmit();
 										}
@@ -2644,7 +2862,7 @@ export function ChatThreadPanel(props: ChatThreadPanelProps) {
 									<Loader2 className={`h-5 w-5 animate-spin`} />
 									<SendCountBadge progress={drawerSendProgress} />
 								</button>
-							) : draft.trim().length > 0 || isSending ? (
+							) : draft.trim().length > 0 || isSending || editTargetMessage ? (
 								// Distinct keys: if React reused one <button> across these
 								// branches, the accent background would fade out over the
 								// mic button's square corners right after sending.
@@ -2656,7 +2874,7 @@ export function ChatThreadPanel(props: ChatThreadPanelProps) {
 									// pill's edge, so a slightly-off tap still sends.
 									className={`shrink-0 inline-flex relative h-10 w-10 after:absolute after:-inset-x-3 after:-inset-y-2 after:content-[''] items-center justify-center transition hover:opacity-80 disabled:opacity-30 rounded-full bg-[var(--accent)] text-[var(--accent-contrast)]`}
 								>
-									{isSending ? <Loader2 className={`h-5 w-5 animate-spin`} /> : <SendHorizontalFilled className={"h-5 w-5"} />}
+									{isSending ? <Loader2 className={`h-5 w-5 animate-spin`} /> : editTargetMessage ? <Check className={"h-5 w-5"} /> : <SendHorizontalFilled className={"h-5 w-5"} />}
 								</button>
 							) : (
 								<button
@@ -2786,12 +3004,14 @@ export function ChatThreadPanel(props: ChatThreadPanelProps) {
 										value={attachmentMaxViews}
 										onChange={setAttachmentMaxViews}
 										isDesktop={isDesktop}
+										allowance={videosAllowance}
 									/>
 								) : (
 									// Photos: unlimited or 10s, a single toggle.
 									<ExpiryToggleButton
 										expiring={attachmentMaxViews !== 2147483647}
 										onChange={(expiring) => setAttachmentMaxViews(expiring ? 1 : 2147483647)}
+										allowance={picsAllowance}
 										expiringLabel={t("chat_drawer.expiry.ten_seconds", { defaultValue: "10s" })}
 									/>
 								)
@@ -3063,6 +3283,16 @@ export function ChatThreadPanel(props: ChatThreadPanelProps) {
 										});
 									}
 
+									if (canEditMessage(message)) {
+										rows.push({
+											key: "edit",
+											icon: <Pencil className="h-3.5 w-3.5" />,
+											label: t("chat.actions.edit"),
+											onClick: () => handleEdit(message),
+											disabled: isMutating,
+										});
+									}
+
 									if (hasText || loc) {
 										rows.push({
 											key: "copy",
@@ -3093,7 +3323,7 @@ export function ChatThreadPanel(props: ChatThreadPanelProps) {
 										});
 									}
 
-									if (mediaUrl || audioUrl) {
+									if (isArchiveModeEnabled && (mediaUrl || audioUrl)) {
 										rows.push({
 											key: "download-media",
 											icon: <Download className="h-3.5 w-3.5" />,

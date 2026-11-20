@@ -190,7 +190,7 @@ export function TransferAccountSheet({ isDesktop, onClose }: { isDesktop: boolea
 						<p className="mt-1 max-w-sm text-sm leading-relaxed text-[var(--text-muted)]">
 							{t("account_transfer.howto_desc", {
 								defaultValue:
-									"On the Free Grind sign-in screen, tap \"Use a QR code\" and scan this code. On a computer, copy the code instead and paste it there. Both devices stay signed in.",
+									"On the {{appName}} sign-in screen, tap \"Use a QR code\" and scan this code. On a computer, copy the code instead and paste it there. Both devices stay signed in.",
 							})}
 						</p>
 					</div>

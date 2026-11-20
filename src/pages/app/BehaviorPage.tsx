@@ -39,6 +39,8 @@ export function BehaviorPage() {
 	const highlightId = useSettingsHighlight();
 	const isDesktop = useDesktopBreakpoint();
 	const isFreeTier = useIsFreeTier();
+	// The free-tier warning is about Grindr's limit and the Honduras bypass.
+	const showFreeTierWarning = isFreeTier;
 	const canSendExpiringAlbums = !isFreeTier;
 	const {
 		defaultExpiringPhotos,
@@ -202,15 +204,15 @@ export function BehaviorPage() {
 							icon={<TimerFilled className="h-5 w-5" />}
 							iconClass="bg-violet-500/15 text-violet-400"
 							label={t("behavior.default_expiring_photos")}
-							iconBadge={isFreeTier ? (
+							iconBadge={showFreeTierWarning ? (
 								<span className="flex h-4 w-4 items-center justify-center rounded-full bg-amber-500 text-[10px] font-extrabold leading-none text-black ring-2 ring-[var(--card-bg,var(--surface))]">
 									!
 								</span>
 							) : undefined}
-							description={isFreeTier ? (
+							description={showFreeTierWarning ? (
 								<>
 									{t("behavior.default_expiring_photos_desc")}
-									<span className="mt-1 block text-amber-500">{t("behavior.default_expiring_photos_free_warning")}</span>
+									<span className="mt-1 block text-amber-500">{t("grindr:behavior.default_expiring_photos_free_warning")}</span>
 								</>
 							) : t("behavior.default_expiring_photos_desc")}
 							checked={defaultExpiringPhotos}

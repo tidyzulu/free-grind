@@ -110,10 +110,11 @@ pub fn show_lock_error_dialog(message: &str) {
     }
 
     let text = to_wide(&format!(
-        "Free Grind is already running for this account.\n\n{}",
+        "{} is already running for this account.\n\n{}",
+        crate::app_identity::APP_NAME,
         message
     ));
-    let caption = to_wide("Free Grind");
+    let caption = to_wide(crate::app_identity::APP_NAME);
 
     unsafe {
         MessageBoxW(

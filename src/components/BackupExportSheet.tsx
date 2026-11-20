@@ -91,8 +91,8 @@ export function BackupExportSheet({
 					: isAndroid()
 						? t("data_backup.export_success", { defaultValue: "Data exported." })
 					: isIos()
-						? t("data_backup.export_success_ios", { defaultValue: "Data exported. Find it in the Files app under On My iPhone/iPad → Free Grind." })
-						: t("data_backup.export_success_desktop", { defaultValue: "Data exported to Downloads/FreeGrind." }),
+						? t("data_backup.export_success_ios", { defaultValue: "Data exported. Find it in the Files app under On My iPhone/iPad → {{appName}}." })
+						: t("data_backup.export_success_desktop", { defaultValue: "Data exported to Downloads/{{appFolder}}." }),
 			);
 			closeRef.current?.();
 		} catch (error) {
@@ -143,9 +143,9 @@ export function BackupExportSheet({
 								{destination === "downloads"
 									? isIos()
 										? t("data_backup.export_destination_device_hint_ios", {
-												defaultValue: "Saved in the Files app under On My iPhone/iPad → Free Grind.",
+												defaultValue: "Saved in the Files app under On My iPhone/iPad → {{appName}}.",
 											})
-										: t("data_backup.export_destination_downloads_hint", { defaultValue: "Saved to Downloads/FreeGrind on this device." })
+										: t("data_backup.export_destination_downloads_hint", { defaultValue: "Saved to Downloads/{{appFolder}} on this device." })
 									: isAndroid() || isIos()
 										? t("data_backup.export_destination_picker_hint", {
 												defaultValue: "Pick any folder or cloud storage, e.g. Google Drive (requires the Drive app).",

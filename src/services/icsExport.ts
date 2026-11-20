@@ -35,7 +35,7 @@ function foldLine(line: string): string {
 
 export function encountersToIcs(encounters: Encounter[]): string {
 	const dtstamp = toIcsUtcTimestamp(Date.now());
-	const lines: string[] = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//Free Grind//Encounters Export//EN", "CALSCALE:GREGORIAN"];
+	const lines: string[] = ["BEGIN:VCALENDAR", "VERSION:2.0", `PRODID:-//${__APP_NAME__}//Encounters Export//EN`, "CALSCALE:GREGORIAN"];
 
 	for (const encounter of encounters) {
 		const descriptionParts: string[] = [];

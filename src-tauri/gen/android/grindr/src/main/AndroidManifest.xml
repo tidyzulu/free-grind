@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Merged into the app's manifest (see build.gradle.kts). -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <queries>
+        <!-- Must be installed to mint reCAPTCHA tokens, see RecaptchaMintActivity.kt -->
+        <package android:name="com.grindrapp.android" />
+    </queries>
+
+    <application>
+        <!-- Mints reCAPTCHA tokens in its own process, where
+             FreeGrindApplication poses as Grindr; not reachable from outside
+             the app. See RecaptchaMintActivity.kt. -->
+        <activity
+            android:name="dev.estopia.free_grind.RecaptchaMintActivity"
+            android:process=":recaptcha"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboardHidden|uiMode|density|fontScale|locale|layoutDirection"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:theme="@style/Theme.free_grind.RecaptchaMint" />
+    </application>
+</manifest>

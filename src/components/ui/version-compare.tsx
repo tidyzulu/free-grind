@@ -1,6 +1,6 @@
 import { ArrowDown, ExternalLink, Package, type LucideIcon } from "lucide-react";
 import type { ReactNode } from "react";
-import { openExternalUrl } from "../../utils/githubIssues";
+import { openExternalUrl } from "../../utils/externalUrl";
 
 export type VersionCompareSide = {
 	/** Small caps label above the title ("Installed build", "Latest"). */

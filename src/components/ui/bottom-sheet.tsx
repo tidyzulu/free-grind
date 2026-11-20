@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type MutableRefObject, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type CSSProperties, type MutableRefObject, type ReactNode } from "react";
 import { onBackButtonPress } from "@tauri-apps/api/app";
 import { platform } from "@tauri-apps/plugin-os";
 import { X } from "lucide-react";
@@ -48,6 +48,22 @@ export const isSheetDragHeld = () => sheetDragHolds > 0;
 
 /** Lets other back-button handlers (useAndroidBackToGrid) stand aside while a sheet handles it. */
 export const isAnyBottomSheetOpen = () => openSheets.length > 0;
+
+const openSheetListeners = new Set<() => void>();
+const notifyOpenSheets = () => {
+	for (const listener of openSheetListeners) listener();
+};
+const subscribeOpenSheets = (listener: () => void) => {
+	openSheetListeners.add(listener);
+	return () => {
+		openSheetListeners.delete(listener);
+	};
+};
+
+/** Reactive isAnyBottomSheetOpen — e.g. for floating controls that must not cover a sheet. */
+export function useIsAnyBottomSheetOpen(): boolean {
+	return useSyncExternalStore(subscribeOpenSheets, isAnyBottomSheetOpen, isAnyBottomSheetOpen);
+}
 
 /** Whether the enclosing sheet is currently the topmost one (no other sheet
  * stacked on it) — for its own keyboard shortcuts. A stable function, to call
@@ -313,9 +329,11 @@ export function BottomSheet({
 	useEffect(() => {
 		const id = sheetIdRef.current;
 		openSheets.push(id);
+		notifyOpenSheets();
 		return () => {
 			const index = openSheets.indexOf(id);
 			if (index !== -1) openSheets.splice(index, 1);
+			notifyOpenSheets();
 		};
 	}, []);
 

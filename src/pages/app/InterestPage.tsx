@@ -1,13 +1,13 @@
 import { RefreshCw } from "lucide-react";
 import { EyeFilled, FlameFilled, SendFilled } from "../../components/icons/FilledIcons";
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useTransition, type ComponentType, type TouchEvent } from "react";
+import { createElement, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useTransition, type ComponentType, type TouchEvent } from "react";
 import { useTranslation } from "react-i18next";
 import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import { useInterestData } from "../../hooks/queries/useInterestQueries";
 import { useBlockedProfileIds } from "../../hooks/queries/useProfileQueries";
 import { getBlockStatesByProfileIds, listProfileSnapshotIds } from "../../services/chatDb";
 import { markInterestSeen, getInterestTabLastSeen, markInterestTabSeen } from "../../services/seenStore";
-import { EmptyState, ErrorState } from "../../components/ui/states";
+import { FeedEmptyState, FeedErrorState } from "../../components/ui/states";
 import { PullToRefreshContainer } from "./components/PullToRefreshContainer";
 import {
 	type InterestTab,
@@ -16,8 +16,9 @@ import {
 } from "./interest/interestUtils";
 import { InterestTabs, InterestRow, type InterestTabConfig } from "./interest/InterestComponents";
 import { InterestViewsGrid, useViewsGridLayout } from "./interest/InterestViewsGrid";
+import { InterestProfileMenu, type InterestMenuTarget } from "./interest/InterestProfileMenu";
 import { getAllCachedBrowseCardsById } from "./gridpage/cache";
-import { INTEREST_ONBOARDING_SEEN_KEY, InterestOnboardingModal } from "./interest/InterestOnboardingModal";
+import { ViewsIntro } from "../../grindr-workarounds";
 import {
 	SCROLL_RESTORATION_TIMEOUT_MS,
 } from "../../config/ui-constants";
@@ -26,8 +27,6 @@ import { useDesktopBreakpoint } from "../../hooks/useDesktopBreakpoint";
 import { PageHeaderBackground } from "../../components/ui/PageHeaderBackground";
 import { FeedScrollContainer } from "../../components/ui/FeedScrollContainer";
 import { usePreferences } from "../../contexts/PreferencesContext";
-
-const ONBOARDING_KEY = INTEREST_ONBOARDING_SEEN_KEY;
 
 const TAB_ICONS: Record<InterestTab, ComponentType<{ className?: string }>> = { views: EyeFilled, taps: FlameFilled, sent: SendFilled };
 
@@ -173,14 +172,44 @@ export function InterestPage() {
 
 	const sentTaps = useMemo(() => data?.sentTaps ?? [], [data?.sentTaps]);
 
+	// Your latest sent tap type per profile — shown next to theirs on mutual taps.
+	const sentTapTypeById = useMemo(() => {
+		const map = new Map<string, number | null>();
+		const sorted = [...sentTaps].sort((a, b) => (b.timestamp ?? 0) - (a.timestamp ?? 0));
+		for (const item of sorted) {
+			if (!map.has(item.profileId)) map.set(item.profileId, item.tapType);
+		}
+		return map;
+	}, [sentTaps]);
+
 	// Views don't carry age/favorite — borrow them from the browse grid's
 	// cache for anyone we've seen there. Re-read whenever the data refreshes.
 	const browseCardsById = useMemo(() => getAllCachedBrowseCardsById(), [data]);
 
-	const itemsByTab = useMemo(
-		() => ({ views, taps, sent: sentTaps }) satisfies Record<InterestTab, InterestItem[]>,
-		[views, taps, sentTaps],
-	);
+	// Favorites toggled from the tile menu: the views' own flag stays stale until the next fetch.
+	const [favoriteOverrides, setFavoriteOverrides] = useState<ReadonlyMap<string, boolean>>(() => new Map());
+	useEffect(() => setFavoriteOverrides(new Map()), [data]);
+
+	const itemsByTab = useMemo(() => {
+		const withOverrides = (items: InterestItem[]) =>
+			favoriteOverrides.size === 0
+				? items
+				: items.map((item) => (favoriteOverrides.has(item.profileId) ? { ...item, isFavorite: favoriteOverrides.get(item.profileId) } : item));
+		return { views: withOverrides(views), taps: withOverrides(taps), sent: withOverrides(sentTaps) } satisfies Record<InterestTab, InterestItem[]>;
+	}, [views, taps, sentTaps, favoriteOverrides]);
+
+	// Long press / right-click on a tile or row: the browse grid's tile menu.
+	const [menuTarget, setMenuTarget] = useState<InterestMenuTarget | null>(null);
+	const browseCardsByIdRef = useRef(browseCardsById);
+	browseCardsByIdRef.current = browseCardsById;
+	const handleOpenMenu = useCallback((item: InterestItem, x: number, y: number) => {
+		const isFavorite = (item.isFavorite ?? browseCardsByIdRef.current.get(item.profileId)?.favorite) === true;
+		setMenuTarget({ item, isFavorite, x, y });
+	}, []);
+	const handleCloseMenu = useCallback(() => setMenuTarget(null), []);
+	const handleFavoriteChanged = useCallback((profileId: string, favorite: boolean) => {
+		setFavoriteOverrides((previous) => new Map(previous).set(profileId, favorite));
+	}, []);
 
 	const viewedCount = demoMode !== 0 ? demoAddedViews.length : (data?.viewedCount ?? 0);
 
@@ -354,27 +383,12 @@ export function InterestPage() {
 		return max;
 	}, [views, taps]);
 
-	const [showOnboarding, setShowOnboarding] = useState(() => {
-		return !localStorage.getItem(ONBOARDING_KEY);
-	});
 	const touchStartRef = useRef<{ x: number; y: number } | null>(null);
 
 	const loadMoreTriggerRef = useRef<HTMLDivElement | null>(null);
 	const feedContainerRef = useRef<HTMLDivElement | null>(null);
 	const [hasRestoredScroll, setHasRestoredScroll] = useState(false);
 	const prevTabRef = useRef<InterestTab>(activeTab);
-
-	// Re-activate onboarding when switching back to views tab if not yet acknowledged
-	useEffect(() => {
-		if (activeTab === "views" && !localStorage.getItem(ONBOARDING_KEY)) {
-			setShowOnboarding(true);
-		}
-	}, [activeTab]);
-
-	const handleAcknowledgeOnboarding = useCallback(() => {
-		setShowOnboarding(false);
-		localStorage.setItem(ONBOARDING_KEY, "true");
-	}, []);
 
 	const ITEMS_PER_PAGE = 30;
 	const [limits, setLimits] = useState<Record<InterestTab, number>>(() => ({
@@ -696,22 +710,20 @@ export function InterestPage() {
 					) : (
 						<div className="flex flex-col">
 							{(queryError || (!isLoading && activeItems.length === 0)) && (
-								<div className="px-[var(--app-px)] py-4 space-y-4">
-									{queryError ? (
-										<ErrorState
-											title={t("interest_page.error_load", { tab: t(`interest_page.tabs.${activeTab}`) })}
-											description={queryError instanceof Error ? queryError.message : String(queryError)}
-											onRetry={handleRefresh}
-										/>
-									) : null}
-
-									{!isLoading && !queryError && activeItems.length === 0 ? (
-										<EmptyState
-											title={t(`interest_page.empty_${activeTab}`)}
-											description={t(`interest_page.empty_${activeTab}_desc`)}
-										/>
-									) : null}
-								</div>
+								queryError ? (
+									<FeedErrorState
+										title={t("interest_page.error_load", { tab: t(`interest_page.tabs.${activeTab}`) })}
+										description={queryError instanceof Error ? queryError.message : String(queryError)}
+										onRetry={() => void handleRefresh()}
+										retryLabel={t("right_now.try_again")}
+									/>
+								) : (
+									<FeedEmptyState
+										icon={createElement(TAB_ICONS[activeTab])}
+										title={t(`interest_page.empty_${activeTab}`)}
+										description={t(`interest_page.empty_${activeTab}_desc`)}
+									/>
+								)
 							)}
 
 							{activeItems.length > 0 && (
@@ -726,6 +738,8 @@ export function InterestPage() {
 											hasProfileSnapshot={hasProfileSnapshot}
 											scrollContainerRef={feedContainerRef}
 											mode={activeTab}
+											sentTapTypeById={sentTapTypeById}
+											onOpenMenu={handleOpenMenu}
 										/>
 									) : displayedItems.map((item) => (
 										<InterestRow
@@ -736,6 +750,8 @@ export function InterestPage() {
 											now={nowTimestamp}
 											isBlocked={isProfileBlocked(item.profileId)}
 											canOpenWhileBlocked={hasProfileSnapshot(item.profileId)}
+											myTapType={sentTapTypeById.get(item.profileId)}
+											onOpenMenu={handleOpenMenu}
 										/>
 									))}
 
@@ -759,9 +775,13 @@ export function InterestPage() {
 				</div>
 			</FeedScrollContainer>
 		</PullToRefreshContainer>
-		{showOnboarding && activeTab === "views" && (
-			<InterestOnboardingModal onConfirm={handleAcknowledgeOnboarding} />
-		)}
+		<InterestProfileMenu
+			target={menuTarget}
+			isDesktop={isDesktop}
+			onClose={handleCloseMenu}
+			onFavoriteChanged={handleFavoriteChanged}
+		/>
+		<ViewsIntro visible={activeTab === "views"} />
 	</>
 	);
 }

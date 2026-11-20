@@ -1,6 +1,8 @@
 import type { ConversationEntry, Message } from "./messages";
 
-export type ArchivedReason = "not_found" | "ws_delete";
+// group_removed: we were removed from a group chat (or it was deleted) —
+// kept read-only with its history, like other archived chats.
+export type ArchivedReason = "not_found" | "ws_delete" | "group_removed";
 
 // Explicit, durable record of who blocked whom for this conversation — the
 // source of truth for archiving/system-message decisions instead of

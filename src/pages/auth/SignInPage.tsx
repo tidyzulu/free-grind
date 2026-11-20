@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { Link, useNavigate, useSearchParams } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { useAuth } from "../../contexts/useAuth";
 import { AuthShell } from "../../components/ui/auth-shell";
-import { AuthAltAction, AuthErrorBox, AuthSubmitSection, IconInput } from "./auth-form";
+import { AuthAltAction, AuthCancelAction, AuthErrorBox, AuthSubmitSection, IconInput } from "./auth-form";
+import { useAddProfileMode } from "./useAddProfileMode";
 import { Button } from "../../components/ui/button";
 import { BugReportButton } from "../../components/ui/BugReportButton";
 import type { SignInMethod } from "../../types/auth";
@@ -10,7 +11,6 @@ import { useTranslation } from "react-i18next";
 import { Mail, Lock, KeyRound, Eye, EyeOff, UserPlus, ChevronDown, QrCode, ScanLine } from "lucide-react";
 import { SmsVerificationRequiredError, type SignInRefusal } from "../../contexts/auth-context";
 import { SmsVerificationPanel } from "./SmsVerificationPanel";
-import { ServerFooterButton, ServerSelectSheet } from "./ServerSelectSheet";
 import { isAndroid } from "../../services/saveMedia";
 import { isTauriRuntime } from "../../services/tauriWebSocket";
 import { cancelQrScan, isQrScanSupported, QrScanError, scanQrCode } from "../../services/qrScanner";
@@ -149,7 +149,7 @@ function TransferSignInSheet({ isDesktop, onClose }: { isDesktop: boolean; onClo
 			if (error instanceof QrScanError && error.reason === "cancelled") return;
 			setScanError(
 				error instanceof QrScanError && error.reason === "permissionDenied"
-					? t("auth.sign_in.qr_camera_denied", { defaultValue: "Free Grind needs camera access to scan the code." })
+					? t("auth.sign_in.qr_camera_denied", { defaultValue: "{{appName}} needs camera access to scan the code." })
 					: t("auth.sign_in.qr_scan_failed", { defaultValue: "Couldn't scan the code. Please try again." }),
 			);
 			return;
@@ -208,7 +208,7 @@ function TransferSignInSheet({ isDesktop, onClose }: { isDesktop: boolean; onClo
 						step={1}
 						title={t("auth.sign_in.qr_step_show", { defaultValue: "Show the code on your signed-in device" })}
 						hint={t("auth.sign_in.qr_step_show_hint", {
-							defaultValue: "In Free Grind on that device, open Settings and tap \"Sign in on another device\".",
+							defaultValue: "In {{appName}} on that device, open Settings and tap \"Sign in on another device\".",
 						})}
 					/>
 					<Step
@@ -281,8 +281,7 @@ function TransferSignInSheet({ isDesktop, onClose }: { isDesktop: boolean; onClo
 
 export function SignInPage() {
 	const { t } = useTranslation();
-	const [searchParams] = useSearchParams();
-	const addProfileMode = searchParams.get("mode") === "add-profile";
+	const { addProfileMode, cancel: cancelAddProfile, goTo } = useAddProfileMode();
 	const [method, setMethod] = useState<SignInMethod>("password");
 
 	const [email, setEmail] = useState("");
@@ -302,7 +301,6 @@ export function SignInPage() {
 	// Signing in with a code from another device: a secondary flow, so it
 	// opens in a sheet instead of being one of the method tabs.
 	const [showTransfer, setShowTransfer] = useState(false);
-	const [showServer, setShowServer] = useState(false);
 	const isDesktop = useDesktopBreakpoint();
 
 	// Set when an email sign-in is refused until the account verifies by SMS.
@@ -462,7 +460,6 @@ export function SignInPage() {
 							<QrCode className="h-3.5 w-3.5" />
 							{t("auth.sign_in.qr_entry_title", { defaultValue: "Sign in with a QR code" })}
 						</button>
-						{addProfileMode ? null : <ServerFooterButton onClick={() => setShowServer(true)} />}
 						{addProfileMode ? null : <BugReportButton />}
 					</div>
 				}
@@ -551,7 +548,7 @@ export function SignInPage() {
 								step={1}
 								title={t("auth.sign_in.facebook_step_open", { defaultValue: "Sign in on Facebook" })}
 								hint={t("auth.sign_in.facebook_step_open_hint", {
-									defaultValue: "A Facebook window opens. Your password goes to Facebook only, never to Free Grind.",
+									defaultValue: "A Facebook window opens. Your password goes to Facebook only, never to {{appName}}.",
 								})}
 							/>
 							<Step
@@ -586,7 +583,7 @@ export function SignInPage() {
 								step={1}
 								title={t("auth.sign_in.google_step_open", { defaultValue: "Sign in on Google" })}
 								hint={t("auth.sign_in.google_step_open_hint", {
-									defaultValue: "A Google window opens. Your password goes to Google only, never to Free Grind.",
+									defaultValue: "A Google window opens. Your password goes to Google only, never to {{appName}}.",
 								})}
 							/>
 							<Step
@@ -607,21 +604,14 @@ export function SignInPage() {
 						/>
 					</form>
 				)}
-				{addProfileMode ? (
-					<AuthAltAction
-						onClick={() => navigate(-1)}
-						label={t("common.cancel", { defaultValue: "Cancel" })}
-					/>
-				) : (
-					<AuthAltAction
-						to="/auth/sign-up"
-						icon={<UserPlus className="h-4 w-4" />}
-						label={t("auth.sign_in.no_account_action")}
-					/>
-				)}
+				<AuthAltAction
+					onClick={() => goTo("/auth/sign-up")}
+					icon={<UserPlus className="h-4 w-4" />}
+					label={t("auth.sign_in.no_account_action")}
+				/>
+				{addProfileMode ? <AuthCancelAction onClick={() => void cancelAddProfile()} /> : null}
 			</AuthShell>
 			{showTransfer ? <TransferSignInSheet isDesktop={isDesktop} onClose={() => toggleTransfer(false)} /> : null}
-			{showServer ? <ServerSelectSheet isDesktop={isDesktop} onClose={() => setShowServer(false)} /> : null}
 		</>
 	);
 }

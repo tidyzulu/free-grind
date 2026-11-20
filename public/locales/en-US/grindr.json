@@ -1,0 +1,70 @@
+{
+  "profile_details": {
+    "location_finder_running": "Location finder running",
+    "location_finder": "Location finder",
+    "location_finder_confirm_title": "Location finder",
+    "location_finder_confirm_message": "{{appName}} can triangulate this profile's position by repeatedly changing your location on the server. This takes a few minutes; your location is restored afterwards.",
+    "location_finder_confirm_warning": "This violates Grindr's terms of service and can get your account banned. Use at your own risk.",
+    "location_finder_confirm_start": "Locate anyway",
+    "location_finder_error_distance": "Could not retrieve target distance.",
+    "location_finder_start": "Target distance: {{distance}}m. Starting {{rounds}} triangulation rounds.",
+    "location_finder_round_complete": "Round {{round}} complete. {{lat}}, {{lon}}. Estimated distance: ~{{distance}}m.",
+    "location_finder_error_estimate": "Round {{round}} complete. Estimated error: ~{{error}}m",
+    "location_finder_final_location": "The user is at approximately lat:{{lat}}, lon:{{lon}}. Estimated error: ~{{error}} meters from the final estimated location.",
+    "location_finder_error_general": "An error occurred during triangulation",
+    "location_finder_error_age_verification_region": "Stopped: this profile is in or near a region where Grindr requires age verification. Moving your location there would lock your account.",
+    "location_finder_location_copied": "Location copied to clipboard",
+    "location_finder_result_title": "Location found",
+    "location_finder_result_error": "Estimated error: ~{{error}} m",
+    "location_finder_open_maps": "Open in Maps",
+    "location_finder_copy": "Copy coordinates",
+    "location_finder_status_measuring": "Measuring initial distance…",
+    "location_finder_status_round": "Round {{round}} of {{rounds}} · point {{point}} of 3",
+    "location_finder_status_cancelled": "Stopped",
+    "location_finder_initial_distance": "Initial distance: {{distance}} m",
+    "location_finder_restoring": "Restoring your location…",
+    "location_finder_label_initial_distance": "Initial distance",
+    "location_finder_label_accuracy": "Accuracy",
+    "location_finder_region_limited": "Accuracy is limited: this profile is in or near a region where Grindr requires age verification, and moving closer would lock your account.",
+    "location_finder_stop": "Stop",
+    "location_finder_busy": "Locate is already running for another profile.",
+    "locating": "Locating…",
+    "run_location_finder": "Run location finder"
+  },
+  "interest_page": {
+    "onboarding": {
+      "title": "Profile Visitors",
+      "limitation_title": "How it works",
+      "limitation_desc": "Grindr normally only shows the very last visitor in full. Others are typically hidden behind a paywall or shown as anonymous previews.",
+      "recovery_title": "Smart Recovery",
+      "recovery_desc": "{{appName}} automatically matches anonymous visitors with your local history. If we find a match, the profile will be revealed to you.",
+      "button": "Got it"
+    }
+  },
+  "entitlement_bypass": {
+    "prompt_title": "Paid feature",
+    "prompt_message": "{{appName}} can attempt to bypass this by momentarily spoofing your location to Honduras.",
+    "prompt_warning": "This violates Grindr's terms of service and can get your account banned. Use at your own risk.",
+    "prompt_confirm": "Bypass anyway",
+    "prompt_cancel": "Cancel",
+    "reason_expiring_photo": "Daily expiring photo limit reached. Sending more requires a Grindr subscription.",
+    "reason_message": "Sending this message requires a Grindr subscription.",
+    "reason_unsend": "Unsending a message requires a Grindr subscription.",
+    "reason_album_share": "Sharing this album requires a Grindr subscription.",
+    "still_refused": "Grindr still refused this paid feature",
+    "no_location": "Set your location before using this bypass",
+    "failed": "Failed to bypass this paid feature",
+    "expiring_album_no_bypass": "Expiring albums are a paid Grindr feature, and there's no bypass for them.",
+    "reason_expiring_video": "Expiring video limit reached. Sending more requires a Grindr subscription."
+  },
+  "behavior": {
+    "default_expiring_photos_free_warning": "On the Free plan you can only send a limited number of expiring photos per day. After that, the location bypass (Honduras) is needed, which breaks Grindr's terms of service and can get your account banned."
+  },
+  "expiring_allowance": {
+    "exhausted_bypass": "Expiring limit reached. Grindr wants a subscription for more; sending offers the Honduras bypass."
+  },
+  "customizability": {
+    "show_locate": "Locate",
+    "show_locate_desc": "Show \"Locate\" in the profile menu to estimate a profile's position by triangulation."
+  }
+}

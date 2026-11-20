@@ -20,10 +20,11 @@
  * request that resolves after the fact, or another call site altogether.
  */
 
+import { directConversationProfiles } from "../utils/groupChat";
 import * as chatDb from "./chatDb";
 import { clearUnreadCountForProfile } from "./chatContactIndex";
 import type { ArchivedReason, BlockState } from "../types/chat-db";
-import type { Message } from "../types/messages";
+import type { ConversationEntry, Message } from "../types/messages";
 import { appLog } from "../utils/logger";
 import { consumeSelfBlockAction, takeSelfBlockAction } from "../utils/selfBlockActions";
 
@@ -188,8 +189,9 @@ export function deriveOtherProfileIdFromConversationId(
 	currentUserId: number | string | null | undefined,
 ): string | null {
 	if (currentUserId == null) return null;
-	const parts = conversationId.split(":");
-	if (parts.length !== 2) return null;
+	// Group conversations ("group:<id>") have no single other profile.
+	const parts = directConversationProfiles(conversationId);
+	if (!parts) return null;
 	const ownId = String(currentUserId);
 	if (parts[0] === ownId) return parts[1];
 	if (parts[1] === ownId) return parts[0];
@@ -764,4 +766,50 @@ export async function reconcileBlockStateWithBlockedList(
 			new CustomEvent<Message[]>(CHAT_SYSTEM_MESSAGE_EVENT, { detail: messages }),
 		);
 	}
+}
+
+/**
+ * Group chats: we left, were removed, or the group was deleted. The chat stays
+ * readable but archived — no more sending — with a system line saying so,
+ * until the user deletes the conversation. Idempotent: an already archived
+ * group isn't marked again.
+ */
+export async function archiveRemovedGroup(conversationId: string, how: "removed" | "left" = "removed"): Promise<void> {
+	const stored = await chatDb.getConversation(conversationId).catch(() => null);
+	if (!stored || stored.archived) return;
+	await archiveConversation(conversationId, "group_removed", null);
+	try {
+		const message = await chatDb.insertSystemMessage(conversationId, how === "left" ? "SystemGroupLeft" : "SystemGroupRemoved");
+		// The inbox row reads "You left the group" too, not the last group event before it.
+		await chatDb.setConversationPreview(conversationId, groupSystemPreview(message), message.timestamp);
+		if (typeof window !== "undefined") {
+			window.dispatchEvent(new CustomEvent<Message[]>(CHAT_SYSTEM_MESSAGE_EVENT, { detail: [message] }));
+		}
+	} catch (error) {
+		appLog.warn(`[conversation-archive] group removal marker failed for ${conversationId}`, error);
+	}
+}
+
+/** Inbox preview for a local "you left / you're no longer in this group" line. */
+export function groupSystemPreview(message: Message): NonNullable<ConversationEntry["data"]["preview"]> {
+	return {
+		conversationId: { value: message.conversationId },
+		messageId: message.messageId,
+		senderId: message.senderId,
+		type: message.type,
+		chat1Type: null,
+		text: null,
+		albumId: null,
+		imageHash: null,
+	};
+}
+
+/**
+ * Group chats: we're (back) in a group whose chat was archived when we left or
+ * were removed — e.g. re-invited and joined again. It becomes a live chat
+ * again; the local history from before stays.
+ */
+export async function restoreRejoinedGroup(conversationId: string): Promise<void> {
+	const stored = await chatDb.getConversation(conversationId).catch(() => null);
+	if (stored?.archived && stored.archivedReason === "group_removed") await unarchiveConversation(conversationId);
 }

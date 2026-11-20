@@ -4,6 +4,7 @@ import tailwindcss from "@tailwindcss/vite";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { loadManifest } from "./scripts/manifest.mjs";
 
 // @ts-expect-error process is a nodejs global
 const host = process.env.TAURI_DEV_HOST;
@@ -23,15 +24,39 @@ function shortCommitHash() {
 }
 const commitHash = shortCommitHash();
 
+// App identity (manifest/app.json).
+const manifest = loadManifest();
+
+/** `%APP_NAME%` in index.html: the app name. */
+function appNameInHtml() {
+	const escaped = manifest.appName.replace(/[&<>"]/g, (c) => `&#${c.charCodeAt(0)};`);
+	return {
+		name: "app-name-in-html",
+		transformIndexHtml: (html) => html.replaceAll("%APP_NAME%", escaped),
+	};
+}
+
 // https://vite.dev/config/
 export default defineConfig(async () => ({
-	plugins: [react(), tailwindcss()],
+	plugins: [react(), tailwindcss(), appNameInHtml()],
 	// Release builds (ci/build) must not pick up local .env files.
 	// @ts-expect-error process is a nodejs global
 	envDir: process.env.FG_REPRODUCIBLE_BUILD ? false : undefined,
 	define: {
 		"import.meta.env.VITE_APP_VERSION": JSON.stringify(appVersion),
 		"import.meta.env.VITE_COMMIT_HASH": JSON.stringify(commitHash),
+		__APP_NAME__: JSON.stringify(manifest.appName),
+		__APP_SLUG__: JSON.stringify(manifest.appSlug),
+		__APP_FOLDER__: JSON.stringify(manifest.folderName),
+		// Main binary name (Tauri default: the Cargo package name).
+		__APP_BINARY__: JSON.stringify(manifest.mainBinaryName ?? "free-grind"),
+		__REPO_FORGE__: JSON.stringify(manifest.repoForge),
+		__REPO_API_URL__: JSON.stringify(manifest.repoApiUrl),
+		__REPO_URL__: JSON.stringify(manifest.repoUrl),
+		__WEBSITE_URL__: JSON.stringify(manifest.websiteUrl),
+		// Release feed and page (manifest updates).
+		__RELEASES_FEED_URL__: JSON.stringify(manifest.updates?.feedUrl ?? ""),
+		__RELEASES_PAGE_URL__: JSON.stringify(manifest.updates?.pageUrl ?? ""),
 	},
 	build: {
 		outDir: "dist",

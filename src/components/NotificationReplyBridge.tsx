@@ -11,6 +11,7 @@
  * surprising the other person with a stale message.
  */
 
+import { groupIdOfConversation } from "../utils/groupChat";
 import { useEffect, useRef } from "react";
 import { useAuth } from "../contexts/useAuth";
 import { useApiFunctions } from "../hooks/useApiFunctions";
@@ -74,10 +75,15 @@ export function NotificationReplyBridge() {
 				return;
 			}
 			try {
-				const sent = await apiFunctionsRef.current.sendText({
-					targetProfileId: Number(reply.targetProfileId),
-					text,
-				});
+				// A group notification's reply goes to the group, not to its sender.
+				const groupId = groupIdOfConversation(reply.conversationId);
+				const sent =
+					groupId != null
+						? await apiFunctionsRef.current.sendMessage({ type: "Text", target: { type: "Group", targetId: groupId }, body: { text } })
+						: await apiFunctionsRef.current.sendText({
+								targetProfileId: Number(reply.targetProfileId),
+								text,
+							});
 				await chatDb.upsertMessages(sent.conversationId, [sent]).catch(() => {});
 				reportResult(reply, true);
 			} catch (error) {

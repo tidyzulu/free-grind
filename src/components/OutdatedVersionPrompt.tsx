@@ -11,7 +11,7 @@ import { areUpdateChecksEnabled } from "../services/updateChecks";
 import { formatRelativeTime } from "../utils/relativeTime";
 import { VersionCompare } from "./ui/version-compare";
 import { VersionChangesLink } from "./VersionChangesSheet";
-import { RELEASES_URL } from "../config/links-config";
+import { RELEASES_URL, fetchReleases, type Release } from "../config/links-config";
 
 const DEFAULT_RELEASES_URL = RELEASES_URL;
 // Used when the release lookup fails: assume the running version is current,
@@ -79,73 +79,47 @@ function buildDismissStorageKey(appVersion: string): string {
 
 /**
  * The main app's APK (arm64-v8a only) is published as
- * `free-grind-v<version>.apk`. Prefers the exact name for this release, then
- * any `free-grind-v<x.y.z[-pre]>.apk` — never some other `.apk` that might
- * get attached to a release later.
+ * `<slug>-v<version>.apk` (the app slug, e.g. `free-grind`). Prefers
+ * the exact name for this release, then any `<slug>-v<x.y.z[-pre]>.apk` —
+ * never some other `.apk` that might get attached to a release later.
  */
-function pickApkAsset(
-    assets: { name?: string; browser_download_url?: string }[],
-    version: string,
-): string | undefined {
-    const usable = assets.filter(
-        (asset): asset is { name: string; browser_download_url: string } =>
-            typeof asset.name === "string" && typeof asset.browser_download_url === "string",
-    );
-    const exact = usable.find((asset) => asset.name === `free-grind-v${version}.apk`);
-    if (exact) return exact.browser_download_url;
-    return usable.find((asset) => /^free-grind-v\d+(\.\d+)*(-[0-9A-Za-z.-]+)?\.apk$/.test(asset.name))
-        ?.browser_download_url;
+function pickApkAsset(assets: Release["assets"], version: string): string | undefined {
+    const exact = assets.find((asset) => asset.name === `${__APP_SLUG__}-v${version}.apk`);
+    if (exact) return exact.url;
+    const prefix = `${__APP_SLUG__}-v`;
+    return assets.find(
+        (asset) =>
+            asset.name.startsWith(prefix) &&
+            /^\d+(\.\d+)*(-[0-9A-Za-z.-]+)?\.apk$/.test(asset.name.slice(prefix.length)),
+    )?.url;
 }
 
-type GitHubRelease = {
-    name?: string;
-    html_url?: string;
-    draft?: boolean;
-    prerelease?: boolean;
-    published_at?: string | null;
-    assets?: { name?: string; browser_download_url?: string }[];
-};
-
-/** Release names look like `Free Grind v1.0.0-beta.0 (abc1234)`. */
-function parseReleaseVersion(release: GitHubRelease): string | null {
-    const raw = release.name?.split(" ")[2];
+/** Release names look like `<App Name> v1.0.0-beta.0 (abc1234)`; the app name may have any number of words. */
+function parseReleaseVersion(release: Release): string | null {
+    const raw = release.name?.match(/(?:^|\s)(v\d\S*)/)?.[1];
     if (!raw) return null;
     const version = normalizeVersion(raw);
     return semver.valid(version) ? version : null;
 }
 
-function parseReleaseCommit(release: GitHubRelease): string | undefined {
+function parseReleaseCommit(release: Release): string | undefined {
     return release.name?.match(/\(([0-9a-f]{7,40})\)\s*$/)?.[1];
 }
 
 /**
- * Highest published release by semver. GitHub's `releases/latest` skips
- * pre-releases entirely, so this walks the release list instead and only lets
+ * Highest published release by semver: walks the release list (GitHub's
+ * `releases/latest` would skip pre-releases entirely) and only lets
  * pre-releases through when `includePrerelease` is set (non-stable channels).
  */
 export async function fetchLatestRelease(signal: AbortSignal, includePrerelease: boolean): Promise<ReleaseInfo> {
-    const response = await fetch(
-        "https://api.github.com/repos/fdev8974/free-grind/releases?per_page=30",
-        {
-            headers: {
-                Accept: "application/vnd.github+json",
-            },
-            signal,
-        },
-    );
+    const releases = await fetchReleases(signal);
 
-    if (!response.ok) {
-        throw new Error(`GitHub release lookup failed (${response.status})`);
-    }
-
-    const releases = (await response.json()) as GitHubRelease[];
-
-    let latest: { release: GitHubRelease; version: string } | null = null;
+    let latest: { release: Release; version: string } | null = null;
     const channelReleases: { version: string; publishedAt: string | null }[] = [];
     for (const release of releases) {
         if (release.draft || (release.prerelease && !includePrerelease)) continue;
         const version = parseReleaseVersion(release);
-        if (version) channelReleases.push({ version, publishedAt: release.published_at ?? null });
+        if (version) channelReleases.push({ version, publishedAt: release.publishedAt });
         // Strictly greater keeps the newest of several releases sharing a version
         // (the list is ordered newest first).
         if (version && (!latest || semver.gt(version, latest.version))) {
@@ -159,11 +133,8 @@ export async function fetchLatestRelease(signal: AbortSignal, includePrerelease:
 
     return {
         latestVersion: latest.version,
-        releasesUrl:
-            typeof latest.release.html_url === "string" && latest.release.html_url.length > 0
-                ? latest.release.html_url
-                : DEFAULT_RELEASES_URL,
-        apkUrl: pickApkAsset(latest.release.assets ?? [], latest.version),
+        releasesUrl: latest.release.url || DEFAULT_RELEASES_URL,
+        apkUrl: pickApkAsset(latest.release.assets, latest.version),
         releases: channelReleases,
         commit: parseReleaseCommit(latest.release),
     };
@@ -222,7 +193,7 @@ export function OutdatedVersionPromptView({
 			{phase === "needs-permission" && (
 				<p className="mb-1 text-center text-xs leading-relaxed text-[var(--text-muted)]">
 					{t("update_prompt.needs_permission_hint", {
-						defaultValue: "Allow Free Grind to install apps, then come back here — the update continues automatically.",
+						defaultValue: "Allow {{appName}} to install apps, then come back here — the update continues automatically.",
 					})}
 				</p>
 			)}
@@ -263,7 +234,7 @@ export function OutdatedVersionPromptView({
 					rel="noreferrer"
 					className={`${fullscreenSecondaryButtonClass} inline-flex flex-1 items-center justify-center gap-1.5`}
 				>
-					{t("update_prompt.open_github", { defaultValue: "Open on GitHub" })}
+					{t("update_prompt.open_github", { defaultValue: "Open on {{forge}}" })}
 					<ExternalLink className="h-3.5 w-3.5" />
 				</a>
 				<button type="button" onClick={onDismiss} disabled={isBusy} className={`${fullscreenSecondaryButtonClass} flex-1`}>

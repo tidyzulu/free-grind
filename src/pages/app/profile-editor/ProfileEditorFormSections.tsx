@@ -34,6 +34,7 @@ import { cn } from "../../../utils/cn";
 import { SelectSheet } from "../../../components/ui/select-sheet";
 import { TravelPlansSection } from "./TravelPlansSection";
 import { SpotifyFavoritesSection } from "./SpotifyFavoritesSection";
+import { LinkedProfilesSection } from "./LinkedProfilesSection";
 import { TagsPickerDialog } from "./TagsPickerDialog";
 import {
 	FieldSection,
@@ -128,7 +129,14 @@ function LastTestedField({
 	);
 }
 
-export function ProfileEditorFormSections({ editor }: { editor: ProfileEditorState }) {
+export function ProfileEditorFormSections({
+	editor,
+	focusLinkedProfiles = false,
+}: {
+	editor: ProfileEditorState;
+	/** Scrolls to the linked profiles once (opened from the profile's open link requests row). */
+	focusLinkedProfiles?: boolean;
+}) {
 	const { t } = useTranslation();
 	const { testReminderDisabled, setPreferences } = usePreferences();
 	const {
@@ -486,6 +494,7 @@ export function ProfileEditorFormSections({ editor }: { editor: ProfileEditorSta
 				disabled={profileId == null}
 				onChange={setSpotifyDraft}
 			/>
+			<LinkedProfilesSection scrollIntoView={focusLinkedProfiles} />
 			{accountSection}
 		</>
 	);

@@ -12,8 +12,8 @@ android=/work/src-tauri/gen/android
 rm -rf "$out/android" "$android/app/build"
 mkdir -p "$out/android"
 
-if [ -e /work/src-tauri/certs/free-grind-dev.jks ]; then
-	echo "src-tauri/certs/free-grind-dev.jks exists; move it aside, this build must stay unsigned" >&2
+if [ -e "/work/src-tauri/certs/$FG_APP_SLUG-dev.jks" ] || [ -n "${FG_KEYSTORE_PATH:-}" ]; then
+	echo "src-tauri/certs/$FG_APP_SLUG-dev.jks exists or FG_KEYSTORE_PATH is set; this build must stay unsigned" >&2
 	exit 1
 fi
 
@@ -29,13 +29,17 @@ cp ci/build/android/network_security_config.xml "$nsc"
 # A fresh Gradle home per build, so nothing cached from another project leaks in.
 export GRADLE_USER_HOME=/root/.gradle
 
+# App identity patch (scripts/tauri-config.mjs).
+TAURI_CONFIG="$(bun --no-env-file scripts/tauri-config.mjs android)"
+export TAURI_CONFIG
+
 bunx tauri android init --ci --skip-targets-install
 # arm64-v8a only: GeckoView (Google sign-in) adds ~85 MB per ABI.
 bunx tauri android build --apk --split-per-abi --target aarch64
 
 set -- "$android"/app/build/outputs/apk/arm64/release/*-unsigned.apk
 [ "$#" -eq 1 ] && [ -f "$1" ] || { echo "expected one unsigned APK, found $#" >&2; exit 1; }
-cp "$1" "$out/android/free-grind-v$version-android-arm64-unsigned.apk"
+cp "$1" "$out/android/$FG_APP_SLUG-v$version-android-arm64-unsigned.apk"
 
 echo
 (cd "$out/android" && sha256sum -- *)

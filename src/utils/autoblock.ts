@@ -17,7 +17,7 @@ export async function notifyAutoBlock(profileName: string, reason: string) {
 
         if (permissionGranted) {
             sendNotification({
-                title: "Free Grind Auto-Blocker",
+                title: `${__APP_NAME__} Auto-Blocker`,
                 body: `Blocked: ${profileName}\n${reason}`, // Shows the full message now!
             });
         }

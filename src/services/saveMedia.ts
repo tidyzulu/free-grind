@@ -21,9 +21,9 @@ import * as chatDb from "./chatDb";
 import type { DownloadedMediaEntry } from "../types/chat-db";
 import { appLog } from "../utils/logger";
 
-const ALBUM_NAME = "Free Grind";
+const ALBUM_NAME = __APP_NAME__;
 const SAVE_DIR = "fg-media-save";
-const FOLDER_NAME = "FreeGrind";
+const FOLDER_NAME = __APP_FOLDER__;
 
 export function isIos(): boolean {
 	if (!isTauriRuntime()) return false;

@@ -1,6 +1,6 @@
 [package]
 name = "free-grind"
-version = "1.0.0-beta.48"
+version = "1.0.0"
 description = "Free Grind is a Grindr Client"
 authors = ["Jay Brammeld <jay@imaoreo.dev>"]
 edition = "2021"
@@ -23,6 +23,8 @@ tokio = { version = "1", features = ["test-util", "rt-multi-thread"] }
 tauri-build = { version = "2", features = [] }
 # Compiles the Linux video extension (webkit-extension/fgmedia.c).
 cc = "1"
+# Reads the app manifest (manifest/app.json).
+serde_json = "1"
 
 [features]
 # This feature is used for production builds to enable custom protocol support (tauri://).
@@ -53,7 +55,7 @@ tauri-plugin-notification = { path = "notification-patched" }
 tauri-plugin-http = "2"
 tauri-plugin-sql = { version = "2", features = ["sqlite"] }
 wreq = { version = "0.15", features = ["gzip", "json"] }
-# Vendored 0.32.1 plus account creation and SMS verification, the banned
+# Vendored 0.34.0 plus account creation and SMS verification, the banned
 # profile's id in BanInfo and a settable API language (L-Locale) until they
 # land upstream (grindr-patched/account-creation-and-sms-verification.patch,
 # ban-profile-id.patch, api-locale.patch).

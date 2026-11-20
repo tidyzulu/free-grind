@@ -1,0 +1,567 @@
+import { useSyncExternalStore } from "react";
+import { useTranslation } from "react-i18next";
+import toast from "react-hot-toast";
+import { useApiFunctions } from "../../hooks/useApiFunctions";
+import { useDesktopBreakpoint } from "../../hooks/useDesktopBreakpoint";
+import { usePreferences } from "../../contexts/PreferencesContext";
+import { decodeGeohash, encodeGeohash } from "../../utils/geohash";
+import { getAgeVerificationRegion } from "../../utils/ageVerificationRegions";
+import { appLog } from "../../utils/logger";
+import { ConfirmDialog } from "../../components/ui/confirm-dialog";
+import { afterSheetClose } from "../../components/ui/action-sheet";
+import { LocateResultSheet, locatePercent, type LocateProgress, type LocateRoundResult } from "./LocateResultSheet";
+
+// One "Locate" (trilateration) run at a time, app-wide: the state lives here
+// rather than in each page, so every menu (grid tile, profile, chat list)
+// shows the same run and a second one can't start from another page while
+// the server location is still being moved around. <LocateProfileHost /> is
+// mounted once in App.tsx and renders the confirm dialog and result sheet.
+
+type LocateState = {
+	/** Profile the current run is locating; null when nothing runs. */
+	runningProfileId: string | null;
+	/** Profile waiting in the confirm dialog. */
+	pendingProfileId: string | null;
+	progress: LocateProgress | null;
+	isSheetOpen: boolean;
+};
+
+// --- Spherical helpers ------------------------------------------------------
+// Probe offsets and trilateration span up to thousands of kilometres for far
+// away profiles, where flat lat/lon maths walks past the poles. Everything
+// below works on a sphere and always returns valid coordinates.
+
+const EARTH_RADIUS_M = 6371008.8;
+const DEG = Math.PI / 180;
+/** Probe offsets beyond this distort the local projection too much. */
+const MAX_PROBE_OFFSET_M = 1_000_000;
+
+const normalizeLon = (lon: number) => ((((lon + 180) % 360) + 360) % 360) - 180;
+
+/** Point `meters` away from (lat, lon) in direction `bearingRad` (0 = north). */
+function destinationPoint(lat: number, lon: number, meters: number, bearingRad: number) {
+	const angular = meters / EARTH_RADIUS_M;
+	const lat1 = lat * DEG;
+	const lon1 = lon * DEG;
+	const lat2 = Math.asin(
+		Math.sin(lat1) * Math.cos(angular) + Math.cos(lat1) * Math.sin(angular) * Math.cos(bearingRad),
+	);
+	const lon2 =
+		lon1 +
+		Math.atan2(
+			Math.sin(bearingRad) * Math.sin(angular) * Math.cos(lat1),
+			Math.cos(angular) - Math.sin(lat1) * Math.sin(lat2),
+		);
+	return { lat: lat2 / DEG, lon: normalizeLon(lon2 / DEG) };
+}
+
+/** Azimuthal equidistant projection around `center`, in metres (x = east, y = north). */
+function projectFrom(center: { lat: number; lon: number }, p: { lat: number; lon: number }) {
+	const lat1 = center.lat * DEG;
+	const lat2 = p.lat * DEG;
+	const dLon = (p.lon - center.lon) * DEG;
+	const a =
+		Math.sin((lat2 - lat1) / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2;
+	const angular = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+	const bearing = Math.atan2(
+		Math.sin(dLon) * Math.cos(lat2),
+		Math.cos(lat1) * Math.sin(lat2) - Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLon),
+	);
+	const dist = angular * EARTH_RADIUS_M;
+	return { x: dist * Math.sin(bearing), y: dist * Math.cos(bearing) };
+}
+
+function unprojectFrom(center: { lat: number; lon: number }, x: number, y: number) {
+	return destinationPoint(center.lat, center.lon, Math.hypot(x, y), Math.atan2(x, y));
+}
+
+let locateState: LocateState ={ runningProfileId: null, pendingProfileId: null, progress: null, isSheetOpen: false };
+let locateCancelled = false;
+const listeners = new Set<() => void>();
+
+function setLocateState(patch: Partial<LocateState>) {
+	locateState = { ...locateState, ...patch };
+	listeners.forEach((listener) => listener());
+}
+
+function subscribeLocate(listener: () => void) {
+	listeners.add(listener);
+	return () => { listeners.delete(listener); };
+}
+
+const getLocateState = () => locateState;
+
+// --- Dev-only UI demo ---------------------------------------------------------
+// Plays a fake run through the result sheet without touching the server:
+//   __locateDemo()          full run, ending in "done"
+//   __locateDemo("region")  ends with the age-verification accuracy note
+//   __locateDemo("error")   stops with an error mid-run
+// Call it from the DevTools console (Android: chrome://inspect).
+
+type LocateDemoOutcome = "done" | "region" | "error";
+
+async function runLocateDemo(outcome: LocateDemoOutcome = "done") {
+	if (locateState.runningProfileId) return;
+	const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+	const origin = { lat: -23.55052, lon: -46.633308 };
+	const target = { lat: -32.0346, lon: -52.0986 };
+	const initialDistance = 1_018_000;
+	const totalRounds = 4;
+	const errors = [320_000, 41_000, 2_300, 14];
+
+	locateCancelled = false;
+	setLocateState({
+		runningProfileId: "demo",
+		isSheetOpen: true,
+		progress: {
+			status: "measuring", isRestoring: false, initialDistance: null, totalRounds: 0,
+			round: 0, step: 0, lat: origin.lat, lon: origin.lon, errorMeters: null, rounds: [], errorMessage: null,
+		},
+	});
+	const update = (patch: Partial<LocateProgress>) => {
+		if (locateState.progress) setLocateState({ progress: { ...locateState.progress, ...patch } });
+	};
+	const stillRunning = () => !locateCancelled;
+
+	try {
+		await sleep(1500);
+		if (!stillRunning()) return;
+		update({ status: "running", initialDistance, totalRounds });
+
+		const rounds: LocateRoundResult[] = [];
+		for (let i = 0; i < totalRounds; i++) {
+			for (let step = 0; step < 3; step++) {
+				update({ round: i, step });
+				await sleep(900);
+				if (!stillRunning()) return;
+			}
+			if (outcome === "error" && i === 1) {
+				update({ status: "error", isRestoring: true, errorMessage: "Failed to update server location across all payload types." });
+				return;
+			}
+			const f = errors[i] / initialDistance;
+			const lat = target.lat + (origin.lat - target.lat) * f;
+			const lon = target.lon + (origin.lon - target.lon) * f;
+			rounds.push({ round: i + 1, lat, lon, errorMeters: errors[i], failed: false });
+			update({ lat, lon, errorMeters: errors[i], rounds: [...rounds] });
+			if (outcome === "region" && i === 1) {
+				update({
+					errorMessage: "Accuracy is limited: this profile is in or near a region where Grindr requires age verification, and moving closer would lock your account.",
+				});
+				break;
+			}
+		}
+		update({ status: "done", isRestoring: true });
+		setLocateState({ isSheetOpen: true });
+	} finally {
+		await sleep(3000);
+		update({ isRestoring: false });
+		setLocateState({ runningProfileId: null });
+	}
+}
+
+if (import.meta.env.DEV) {
+	(window as unknown as { __locateDemo?: typeof runLocateDemo }).__locateDemo = runLocateDemo;
+}
+
+/** For the Locate entry points: start (via the confirm dialog) and per-profile menu labels. */
+export function useLocateProfile() {
+	const { t } = useTranslation();
+	const { geohash } = usePreferences();
+	const { runningProfileId, progress } = useSyncExternalStore(subscribeLocate, getLocateState);
+
+	const handleTriangleProfile = (targetProfileId: string) => {
+		if (locateState.runningProfileId) {
+			if (locateState.runningProfileId !== targetProfileId) {
+				toast(t("grindr:profile_details.location_finder_busy", {
+					defaultValue: "Locate is already running for another profile.",
+				}));
+			}
+			// Bring the running run's sheet back.
+			setLocateState({ isSheetOpen: true });
+			return;
+		}
+
+		if (!geohash) {
+			toast.error(t("browse_page.errors.location_required"));
+			return;
+		}
+
+		setLocateState({ pendingProfileId: targetProfileId });
+	};
+
+	/** "Locating… 45%" for the profile being located, "Locate" for any other. */
+	const locateLabelFor = (profileId: string | number | null | undefined) =>
+		runningProfileId !== null && profileId != null && String(profileId) === runningProfileId && progress
+			? `${t("grindr:profile_details.locating")} ${locatePercent(progress)}%`
+			: t("profile_details.locate");
+
+	return { locatingProfileId: runningProfileId, handleTriangleProfile, locateLabelFor };
+}
+
+export function LocateProfileHost() {
+	const { t } = useTranslation();
+	const apiFunctions = useApiFunctions();
+	const { geohash } = usePreferences();
+	const isDesktop = useDesktopBreakpoint();
+	const { pendingProfileId, progress, isSheetOpen } = useSyncExternalStore(subscribeLocate, getLocateState);
+
+    const solveTrilateration = (points: { lat: number, lon: number, dist: number }[]) => {
+        // 1. Project onto a metre grid centred on the first point (azimuthal
+        // equidistant, so distances from p1 stay exact even over long ranges)
+        const p1 = points[0];
+        const p2 = points[1];
+        const p3 = points[2];
+
+        const { x: x2, y: y2 } = projectFrom(p1, p2);
+        const { x: x3, y: y3 } = projectFrom(p1, p3);
+
+        const r1 = p1.dist;
+        const r2 = p2.dist;
+        const r3 = p3.dist;
+
+        // 2. Standard Trilateration Formula for 2D intersection
+        // Derived from (x-x1)^2 + (y-y1)^2 = r1^2 ... etc
+        const A = 2 * x2;
+        const B = 2 * y2;
+        const C = Math.pow(r1, 2) - Math.pow(r2, 2) + Math.pow(x2, 2) + Math.pow(y2, 2);
+        const D = 2 * x3;
+        const E = 2 * y3;
+        const F = Math.pow(r1, 2) - Math.pow(r3, 2) + Math.pow(x3, 2) + Math.pow(y3, 2);
+
+        const denom = A * E - D * B;
+        if (Math.abs(denom) < 1e-10) {
+            throw new Error("Trilateration failed: measurement points are collinear or too close together. Try again with a larger initial offset.");
+        }
+        const x = (C * E - F * B) / denom;
+        const y = (A * F - D * C) / denom;
+
+        if (!Number.isFinite(x) || !Number.isFinite(y)) {
+            throw new Error("Trilateration failed: measurements are inconsistent.");
+        }
+
+        // 3. Convert XY back to Lat/Lon
+        return unprojectFrom(p1, x, y);
+    };
+
+    const runLocate = async (targetProfileId: string) => {
+        if (locateState.runningProfileId) return;
+        if (!geohash) {
+            toast.error(t("browse_page.errors.location_required"));
+            return;
+        }
+
+        let originalLat: number;
+        let originalLon: number;
+
+        try {
+            // Decode starting position
+            const decoded = decodeGeohash(geohash);
+            originalLat = (decoded.lat[0] + decoded.lat[1]) / 2;
+            originalLon = (decoded.lon[0] + decoded.lon[1]) / 2;
+        } catch (error) {
+            toast.error(
+                error instanceof Error
+                    ? error.message
+                    : t("browse_page.errors.location_read_failed"),
+            );
+            return;
+        }
+
+        locateCancelled = false;
+        setLocateState({ runningProfileId: targetProfileId, isSheetOpen: true, progress: {
+            status: "measuring",
+            isRestoring: false,
+            initialDistance: null,
+            totalRounds: 0,
+            round: 0,
+            step: 0,
+            lat: originalLat,
+            lon: originalLon,
+            errorMeters: null,
+            rounds: [],
+            errorMessage: null,
+        } });
+
+        const updateProgress = (patch: Partial<LocateProgress>) => {
+            if (locateState.progress) setLocateState({ progress: { ...locateState.progress, ...patch } });
+        };
+
+        const waitMs = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+        class LocateCancelledError extends Error {}
+        const throwIfCancelled = () => {
+            if (locateCancelled) throw new LocateCancelledError();
+        };
+
+        // Probe points are offsets around the target profile, so locating
+        // someone in e.g. the UK would park the account there — which locks
+        // it behind Grindr's age verification (see utils/ageVerificationRegions.ts).
+        // An account that already sits in any of these regions has passed
+        // verification, so then every region is safe to probe.
+        const alreadyVerified = getAgeVerificationRegion(originalLat, originalLon) !== null;
+
+        const isSafeLocation = (lat: number, lon: number) =>
+            alreadyVerified || getAgeVerificationRegion(lat, lon) === null;
+
+        const putServerLocation = async (lat: number, lon: number, targetGeohash: string) => {
+            if (!isSafeLocation(lat, lon)) {
+                throw new Error(t("grindr:profile_details.location_finder_error_age_verification_region", {
+                    defaultValue: "Stopped: this profile is in or near a region where Grindr requires age verification. Moving your location there would lock your account.",
+                }));
+            }
+            const payloads = [
+                { lat, lon },
+                { latitude: lat, longitude: lon },
+                { geohash: targetGeohash },
+                { nearbyGeoHash: targetGeohash },
+            ];
+
+            for (const payload of payloads) {
+                try {
+                    const response = await apiFunctions.request("/v4/location", {
+                        method: "PUT",
+                        body: payload,
+                    });
+                    if (response.status >= 200 && response.status < 300) return;
+                } catch (e) {
+                    continue;
+                }
+            }
+            throw new Error("Failed to update server location across all payload types.");
+        };
+
+        const getDistanceFromProfile = async (): Promise<number | null> => {
+            try {
+                const profile = await apiFunctions.getProfileDetail(targetProfileId);
+                return typeof profile.distance === "number" && Number.isFinite(profile.distance)
+                    ? profile.distance
+                    : null;
+            } catch {
+                return null;
+            }
+        };
+
+        const measureAt = async (lat: number, lon: number): Promise<number | null> => {
+            await putServerLocation(lat, lon, encodeGeohash(lat, lon));
+            throwIfCancelled();
+            await waitMs(5000); // Wait for distance calculation to propagate on server
+            throwIfCancelled();
+            const d = await getDistanceFromProfile();
+            throwIfCancelled();
+            return d;
+        };
+
+        // Point `meters` away from (lat, lon) in direction `bearingDeg` (0 = north)
+        const offsetPoint = (lat: number, lon: number, meters: number, bearingDeg: number) =>
+            destinationPoint(lat, lon, meters, bearingDeg * DEG);
+
+        // Two probe points around the anchor, ~120° apart, that stay out of
+        // age-verification regions: rotates the pair first (keeps the geometry),
+        // then shrinks the offset. null if every candidate lands in a region.
+        const pickProbePoints = (center: { lat: number, lon: number }, offsetMeters: number) => {
+            for (const scale of [1, 0.6, 0.35, 0.2]) {
+                for (let rotation = 0; rotation < 360; rotation += 20) {
+                    for (const spread of [120, 90, 150]) {
+                        const a = offsetPoint(center.lat, center.lon, offsetMeters * scale, rotation);
+                        const b = offsetPoint(center.lat, center.lon, offsetMeters * scale, rotation + spread);
+                        if (isSafeLocation(a.lat, a.lon) && isSafeLocation(b.lat, b.lon)) {
+                            return { points: [a, b], offsetMeters: offsetMeters * scale };
+                        }
+                    }
+                }
+            }
+            return null;
+        };
+
+        // If `target` lies in a blocked region, the closest point on the way
+        // back to the (safe) anchor that doesn't; null if none is found.
+        const pullOutOfRegion = (from: { lat: number, lon: number }, target: { lat: number, lon: number }) => {
+            if (isSafeLocation(target.lat, target.lon)) return target;
+            const { x, y } = projectFrom(from, target);
+            for (let f = 0.95; f > 0.05; f -= 0.05) {
+                const p = unprojectFrom(from, x * f, y * f);
+                if (isSafeLocation(p.lat, p.lon)) return p;
+            }
+            return null;
+        };
+
+        // Shown as the detail line of the finished result, not as an error.
+        const notifyRegionLimit = () => {
+            updateProgress({
+                errorMessage: t("grindr:profile_details.location_finder_region_limited", {
+                    defaultValue: "Accuracy is limited: this profile is in or near a region where Grindr requires age verification, and moving closer would lock your account.",
+                }),
+            });
+        };
+
+        try {
+            const initialDist = await getDistanceFromProfile();
+            throwIfCancelled();
+            if (initialDist === null) {
+                throw new Error(t("grindr:profile_details.location_finder_error_distance"));
+            }
+
+            const targetPrecision = 15;
+            let rounds = Math.ceil(Math.log(initialDist / targetPrecision) / Math.log(3));
+            rounds = Math.max(2, Math.min(rounds, 6));
+
+            // Each round trilaterates from a known point (the user's own position in round 1,
+            // the previous estimate afterwards) plus two jumps around it. Measuring the previous
+            // estimate tells us its real error, so we can stop as soon as it is close enough.
+            let anchor = { lat: originalLat, lon: originalLon, dist: initialDist };
+            let currentLat = originalLat;
+            let currentLon = originalLon;
+            let hasUnverifiedEstimate = false;
+
+            const roundResults: LocateRoundResult[] = [];
+            updateProgress({ status: "running", initialDistance: initialDist, totalRounds: rounds });
+
+            for (let i = 0; i < rounds; i++) {
+                updateProgress({ round: i, step: 0 });
+
+                if (hasUnverifiedEstimate) {
+                    // The estimate may sit in a blocked region (the profile
+                    // might be there): measure the nearest safe point instead.
+                    const safe = pullOutOfRegion(anchor, { lat: currentLat, lon: currentLon });
+                    if (!safe) {
+                        notifyRegionLimit();
+                        break;
+                    }
+                    if (safe.lat !== currentLat || safe.lon !== currentLon) {
+                        currentLat = safe.lat;
+                        currentLon = safe.lon;
+                        const last = roundResults[roundResults.length - 1];
+                        last.lat = currentLat;
+                        last.lon = currentLon;
+                        updateProgress({ lat: currentLat, lon: currentLon, rounds: [...roundResults] });
+                    }
+                    const d = await measureAt(currentLat, currentLon);
+                    updateProgress({ step: 1 });
+                    if (d === null) {
+                        roundResults.push({ round: i + 1, lat: currentLat, lon: currentLon, errorMeters: Math.round(anchor.dist), failed: true });
+                        updateProgress({ rounds: [...roundResults] });
+                        continue;
+                    }
+                    hasUnverifiedEstimate = false;
+                    roundResults[roundResults.length - 1].errorMeters = Math.round(d);
+
+                    if (d >= anchor.dist) {
+                        // No improvement — fall back to the closer known point
+                        currentLat = anchor.lat;
+                        currentLon = anchor.lon;
+                        updateProgress({ lat: currentLat, lon: currentLon, errorMeters: Math.round(anchor.dist), rounds: [...roundResults] });
+                        break;
+                    }
+                    anchor = { lat: currentLat, lon: currentLon, dist: d };
+                    updateProgress({ errorMeters: Math.round(d), rounds: [...roundResults] });
+                    if (d <= targetPrecision) break;
+                } else {
+                    updateProgress({ step: 1 });
+                }
+
+                const probes = pickProbePoints(
+                    anchor,
+                    Math.min(Math.max(anchor.dist * 1.5, targetPrecision * 2), MAX_PROBE_OFFSET_M),
+                );
+                if (!probes) {
+                    notifyRegionLimit();
+                    break;
+                }
+                const { points, offsetMeters } = probes;
+
+                const results: { lat: number, lon: number, dist: number }[] = [anchor];
+
+                for (const [pointIndex, p] of points.entries()) {
+                    const d = await measureAt(p.lat, p.lon);
+                    if (d !== null) results.push({ lat: p.lat, lon: p.lon, dist: d });
+                    updateProgress({ step: pointIndex + 2 });
+                }
+
+                if (results.length === 3) {
+                    const estimate = solveTrilateration(results);
+                    currentLat = estimate.lat;
+                    currentLon = estimate.lon;
+                    hasUnverifiedEstimate = true;
+
+                    const errorMeters = Math.round(offsetMeters / 3);
+                    roundResults.push({ round: i + 1, lat: currentLat, lon: currentLon, errorMeters, failed: false });
+                    updateProgress({
+                        lat: currentLat,
+                        lon: currentLon,
+                        errorMeters,
+                        rounds: [...roundResults],
+                    });
+                } else {
+                    roundResults.push({ round: i + 1, lat: currentLat, lon: currentLon, errorMeters: Math.round(offsetMeters / 3), failed: true });
+                    updateProgress({ rounds: [...roundResults] });
+                }
+            }
+
+            updateProgress({ status: "done", isRestoring: true });
+            // Pop the sheet back up if the user dismissed it mid-run.
+            setLocateState({ isSheetOpen: true });
+        } catch (error) {
+            if (error instanceof LocateCancelledError) {
+                updateProgress({ status: "cancelled", isRestoring: true });
+            } else {
+                updateProgress({
+                    status: "error",
+                    isRestoring: true,
+                    errorMessage: error instanceof Error ? error.message : t("grindr:profile_details.location_finder_error_general"),
+                });
+            }
+        } finally {
+            if (!locateCancelled) {
+                await waitMs(10000);
+            }
+            try {
+                await putServerLocation(originalLat, originalLon, geohash);
+            } catch (error) {
+                appLog.error("Failed to restore server location after locate", error);
+                toast.error(t("browse_page.errors.location_read_failed"));
+            }
+            updateProgress({ isRestoring: false });
+            setLocateState({ runningProfileId: null });
+        }
+    };
+
+	return (
+		<>
+			<ConfirmDialog
+				isOpen={pendingProfileId !== null}
+				title={t("grindr:profile_details.location_finder_confirm_title", { defaultValue: "Location finder" })}
+				message={t("grindr:profile_details.location_finder_confirm_message", {
+					defaultValue:
+						"{{appName}} can triangulate this profile's position by repeatedly changing your location on the server. This takes a few minutes; your location is restored afterwards.",
+				})}
+				warning={t("grindr:profile_details.location_finder_confirm_warning", {
+					defaultValue:
+						"This violates Grindr's terms of service and can get your account banned. Use at your own risk.",
+				})}
+				confirmLabel={t("grindr:profile_details.location_finder_confirm_start", { defaultValue: "Locate anyway" })}
+				confirmTone="danger"
+				cancelLabel={t("grindr:entitlement_bypass.prompt_cancel", { defaultValue: "Cancel" })}
+				onConfirm={() => {
+					const targetProfileId = pendingProfileId;
+					setLocateState({ pendingProfileId: null });
+					// Let the confirm sheet pop its history entry first, or the
+					// locate sheet takes that back step as its own dismissal.
+					if (targetProfileId) afterSheetClose(() => void runLocate(targetProfileId));
+				}}
+				onCancel={() => setLocateState({ pendingProfileId: null })}
+			/>
+			{progress && isSheetOpen ? (
+				<LocateResultSheet
+					progress={progress}
+					onClose={() => setLocateState({ isSheetOpen: false })}
+					onCancel={() => {
+						locateCancelled = true;
+						if (locateState.progress) setLocateState({ progress: { ...locateState.progress, status: "cancelled", isRestoring: true } });
+					}}
+					isDesktop={isDesktop}
+				/>
+			) : null}
+		</>
+	);
+}

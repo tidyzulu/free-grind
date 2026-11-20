@@ -1,4 +1,3 @@
-import { getServerInfo } from "../services/serverConfig";
 import { convertFileSrc, isTauri } from "@tauri-apps/api/core";
 import { demoProfileImageForUrl } from "./demoProfileImages";
 
@@ -34,21 +33,9 @@ function isProxiedHost(hostname: string): boolean {
 	return hostname === "cdns.grindr.com" || hostname.endsWith(".cloudfront.net") || GIPHY_HOSTS.has(hostname);
 }
 
-/** The self-hosted server's media origin, which grindr.rs also allows (exact origin). */
-function isCustomServerMedia(url: URL): boolean {
-	const server = getServerInfo();
-	if (server.kind !== "custom") return false;
-	try {
-		return new URL(server.mediaBase ?? server.apiBase).origin === url.origin;
-	} catch {
-		return false;
-	}
-}
-
 function isProxiable(url: string): boolean {
 	try {
 		const parsed = new URL(url);
-		if (isCustomServerMedia(parsed)) return true;
 		return parsed.protocol === "https:" && isProxiedHost(parsed.hostname);
 	} catch {
 		return false;

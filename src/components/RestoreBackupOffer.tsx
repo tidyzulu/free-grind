@@ -193,7 +193,7 @@ export function RestoreBackupOffer({ userId, onDone }: { userId: number; onDone:
 						) : (
 							<span className="flex items-center justify-center gap-1.5 text-xs text-[var(--text-muted)]">
 								<FileArchive className="h-3.5 w-3.5" />
-								{t("restore_offer.file_hint", { defaultValue: "Free Grind data export (.zip)" })}
+								{t("restore_offer.file_hint", { defaultValue: "{{appName}} data export (.zip)" })}
 							</span>
 						)}
 					</span>

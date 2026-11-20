@@ -11,15 +11,26 @@ import {
 } from "node:fs";
 import path from "node:path";
 import { resolveAutoMinBinaryVersion } from "./min-binary-version.mjs";
+import { loadManifest } from "./manifest.mjs";
 
-// Publishes the frontend as a signed OTA bundle to surge.sh.
+// Publishes the frontend as a signed OTA bundle: `latest.json` plus the bundle,
+// next to each other at the app's OTA endpoint (manifest/app.json
+// ota.endpoint, e.g. https://example.org/ota/{{channel}}/latest.json).
 //
-// Every channel is its own surge project (see OTA_SURGE_DOMAIN_TEMPLATE), because
-// a surge deploy replaces the whole site — this way a development deploy never
-// wipes the main channel. The app reads `https://<domain>/latest.json`
-// (see `plugins.hotswap.endpoint` in src-tauri/tauri.conf.json).
+// - surge.sh endpoint: deployed to surge. Every channel is its own surge
+//   project, because a surge deploy replaces the whole site; this way a
+//   development deploy never wipes the main channel.
+// - any other endpoint (your own web server): the files are written to
+//   OTA_OUT_DIR, and the caller uploads that folder to the endpoint's
+//   directory for the channel.
 
-const DEFAULT_DOMAIN_TEMPLATE = "freegrind-ota-{channel}.surge.sh";
+const OTA_ENDPOINT_TEMPLATE = (() => {
+  const endpoint = loadManifest().ota.endpoint;
+  if (!/^https:\/\/[^/]+\/(.+\/)?latest\.json$/.test(endpoint) || !endpoint.includes("{{channel}}")) {
+    throw new Error(`manifest ota.endpoint ${endpoint}: expected https://…{{channel}}…/latest.json`);
+  }
+  return endpoint;
+})();
 
 function parseCliArgs(argv) {
   let channelOverride;
@@ -31,8 +42,8 @@ function parseCliArgs(argv) {
       console.log("  -development   Publish to the development OTA channel");
       console.log("  --channel      Publish to a custom OTA channel");
       console.log();
-      console.log("Required env (.env.local): SURGE_LOGIN, SURGE_TOKEN,");
-      console.log("  HOTSWAP_PRIVATE_KEY or HOTSWAP_PRIVATE_KEY_PATH");
+      console.log("Required env (.env.local): HOTSWAP_PRIVATE_KEY or HOTSWAP_PRIVATE_KEY_PATH,");
+      console.log("  and SURGE_LOGIN, SURGE_TOKEN (surge endpoint) or OTA_OUT_DIR (own server)");
       console.log("Optional env: HOTSWAP_PRIVATE_KEY_PASSWORD, OTA_NOTES, OTA_MANDATORY,");
       console.log("  OTA_MIN_BINARY_VERSION, OTA_SKIP_BUILD, OTA_BUNDLE, OTA_SURGE_DOMAIN_TEMPLATE");
       process.exit(0);
@@ -108,7 +119,14 @@ function requireEnv(name) {
 }
 
 function run(command, args) {
-  execFileSync(command, args, { stdio: "inherit" });
+  try {
+    execFileSync(command, args, { stdio: "inherit" });
+  } catch (error) {
+    // The error lists every argument, the signing key and its password
+    // included; report the command and exit status only (no `cause` either).
+    // eslint-disable-next-line preserve-caught-error
+    throw new Error(`${command} ${args[0] ?? ""} failed (exit ${error?.status ?? "?"})`);
+  }
 }
 
 const otaChannel = channelOverride || process.env.OTA_CHANNEL || "development";
@@ -116,11 +134,21 @@ if (!/^[a-z0-9-]{1,40}$/.test(otaChannel)) {
   throw new Error(`Invalid OTA channel "${otaChannel}" (must be a valid hostname label)`);
 }
 
-requireEnv("SURGE_LOGIN");
-requireEnv("SURGE_TOKEN");
-
-const domainTemplate = process.env.OTA_SURGE_DOMAIN_TEMPLATE || DEFAULT_DOMAIN_TEMPLATE;
-const domain = domainTemplate.replace("{channel}", otaChannel);
+// Where latest.json lives for this channel; the bundle goes next to it.
+const surgeOverride = process.env.OTA_SURGE_DOMAIN_TEMPLATE;
+const endpoint = surgeOverride
+  ? `https://${surgeOverride.replace("{channel}", otaChannel)}/latest.json`
+  : OTA_ENDPOINT_TEMPLATE.replaceAll("{{channel}}", otaChannel);
+const baseUrl = endpoint.slice(0, -"latest.json".length);
+const endpointHost = new URL(endpoint).host;
+const surgeDomain = endpointHost.endsWith(".surge.sh") ? endpointHost : null;
+const outDir = process.env.OTA_OUT_DIR;
+if (surgeDomain) {
+  requireEnv("SURGE_LOGIN");
+  requireEnv("SURGE_TOKEN");
+} else if (!outDir) {
+  throw new Error(`OTA_OUT_DIR is required: ${endpoint} isn't on surge.sh, upload the folder there yourself`);
+}
 
 const pkg = JSON.parse(readFileSync("package.json", "utf8"));
 const appVersion = pkg.version;
@@ -133,11 +161,13 @@ console.log(`min_binary_version=${minBinaryVersion}`);
 const notes = process.env.OTA_NOTES || `OTA ${otaChannel} ${new Date().toISOString()}`;
 const mandatory = process.env.OTA_MANDATORY === "true";
 
-let keyValue = process.env.HOTSWAP_PRIVATE_KEY?.trim();
+// A key file named explicitly wins over HOTSWAP_PRIVATE_KEY, which may come
+// from .env.local and belong to another app.
 const keyPath = process.env.HOTSWAP_PRIVATE_KEY_PATH;
-if (!keyValue && keyPath && existsSync(path.resolve(keyPath))) {
-  keyValue = readFileSync(path.resolve(keyPath), "utf8").trim();
-}
+let keyValue =
+  keyPath && existsSync(path.resolve(keyPath))
+    ? readFileSync(path.resolve(keyPath), "utf8").trim()
+    : process.env.HOTSWAP_PRIVATE_KEY?.trim();
 if (!keyValue) {
   throw new Error(
     "HOTSWAP private key not found. Set HOTSWAP_PRIVATE_KEY or HOTSWAP_PRIVATE_KEY_PATH.",
@@ -145,7 +175,7 @@ if (!keyValue) {
 }
 const keyPassword = process.env.HOTSWAP_PRIVATE_KEY_PASSWORD ?? "";
 
-console.log(`Publishing OTA channel=${otaChannel} version=${otaVersion} -> https://${domain}`);
+console.log(`Publishing OTA channel=${otaChannel} version=${otaVersion} -> ${endpoint}`);
 
 // CI passes the bundle ci/build/run.sh frontend built (and two builders agreed
 // on), so what gets signed is exactly what anyone can rebuild from the commit.
@@ -167,8 +197,8 @@ const signature = readFileSync("frontend.tar.gz.sig", "utf8").trim();
 // Bundle file name carries the sequence so a client that fetched the previous
 // manifest never downloads a mismatched bundle mid-deploy from a CDN edge cache.
 const bundleName = `frontend-${sequence}.tar.gz`;
-const bundleUrl = `https://${domain}/${bundleName}`;
-const siteDir = path.resolve(".ota-surge");
+const bundleUrl = `${baseUrl}${bundleName}`;
+const siteDir = surgeDomain ? path.resolve(".ota-surge") : path.resolve(outDir);
 
 rmSync(siteDir, { recursive: true, force: true });
 mkdirSync(siteDir, { recursive: true });
@@ -187,10 +217,14 @@ const manifest = {
 };
 writeFileSync(path.join(siteDir, "latest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
 
-try {
-  run("bunx", ["surge", siteDir, domain]);
-} finally {
-  rmSync(siteDir, { recursive: true, force: true });
+if (surgeDomain) {
+  try {
+    run("bunx", ["surge", siteDir, surgeDomain]);
+  } finally {
+    rmSync(siteDir, { recursive: true, force: true });
+  }
+} else {
+  console.log(`Wrote ${siteDir}; upload it to ${baseUrl}`);
 }
 
 console.log("OTA published successfully:");

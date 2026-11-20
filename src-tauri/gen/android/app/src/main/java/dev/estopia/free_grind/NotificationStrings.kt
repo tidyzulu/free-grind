@@ -61,6 +61,10 @@ object NotificationStrings {
         "CHAT_VIDEO_NOTIFICATION_BODY" to "Sent you a video",
         "CHAT_ALBUM_NOTIFICATION_BODY" to "Shared their album",
         "CHAT_ALBUM_CONTENT_REACTION_NOTIFICATION_BODY" to "Liked your album content",
+        // Ours (Free Grind server), not a 26.21 text.
+        "CHAT_PROFILE_LINK_NOTIFICATION_BODY" to "Shared a profile with you",
+        "CHAT_PROFILE_LINK_REQUEST_NOTIFICATION_BODY" to "Wants to connect with you",
+        "CHAT_PROFILE_LINK_ACCEPTED_NOTIFICATION_BODY" to "Accepted your connection request",
         "CHAT_MESSAGE_REACTION_NOTIFICATION_BODY" to "%1\$s reacted to your message",
     )
 

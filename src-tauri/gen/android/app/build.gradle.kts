@@ -1,3 +1,5 @@
+import java.net.URI
+import java.net.URLEncoder
 import java.util.Properties
 import javax.inject.Inject
 
@@ -8,7 +10,7 @@ plugins {
 }
 
 /**
- * Copies the Free Grind Google OAuth WebExtension (git submodule) into the
+ * Copies the Free Grind Google OAuth WebExtension (src-tauri/vendor) into the
  * APK's assets as `grindr-google-oauth/`, laid out as GeckoView loads a
  * built-in extension (see GoogleOAuthActivity.kt).
  */
@@ -77,9 +79,38 @@ val tauriProperties = Properties().apply {
     }
 }
 
+/**
+ * The app manifest (manifest/app.json): it sets the application ID, and
+ * manifest/android/res adds the launcher icons and name.
+ */
+val repoRoot = file("../../../..")
+val manifestDir = repoRoot.resolve("manifest")
+@Suppress("UNCHECKED_CAST")
+val appManifest = groovy.json.JsonSlurper().parse(manifestDir.resolve("app.json")) as Map<String, Any?>
+@Suppress("UNCHECKED_CAST")
+val appApplicationId = (appManifest["android"] as Map<String, Any?>)["applicationId"] as String
+val appSlug = appManifest["appSlug"] as String
+// Repository web URL, GitLab (also self-hosted) or GitHub, see scripts/manifest.mjs.
+val appRepoUrl = (appManifest["repository"] as String).trimEnd('/')
+val appRepoHost = URI(appRepoUrl).host
+val appRepoPath = URI(appRepoUrl).path.trim('/')
+// APKs the in-app updater may install: the app's own download location
+// (manifest updates.downloadUrl), else where its repository's release CI puts
+// them (GitLab: the project's generic package registry; GitHub: releases).
+@Suppress("UNCHECKED_CAST")
+val appDownloadUrl = ((appManifest["updates"] as Map<String, Any?>?)?.get("downloadUrl") as String?)
+    ?: if (appRepoHost == "github.com") {
+        "https://github.com/$appRepoPath/releases/download/"
+    } else {
+        "https://$appRepoHost/api/v4/projects/${URLEncoder.encode(appRepoPath, "UTF-8")}/packages/generic/"
+    }
+
 // Without the keystore (ci/build/android.sh) the release APK comes out
 // unsigned; CI signs it once two independent builds produced the same bytes.
-val releaseKeystore = file("../../../../src-tauri/certs/free-grind-dev.jks")
+// Local release builds: src-tauri/certs/<appSlug>-dev.jks, or FG_KEYSTORE_*.
+val releaseKeystore = System.getenv("FG_KEYSTORE_PATH")?.takeIf { it.isNotBlank() }?.let { file(it) }
+    ?: repoRoot.resolve("src-tauri/certs/$appSlug-dev.jks")
+fun signingEnv(name: String) = System.getenv(name)?.takeIf { it.isNotEmpty() } ?: "opengrind"
 
 android {
     // Keep in sync with ci/build/Dockerfile. Left unset, AGP picks (and
@@ -90,7 +121,9 @@ android {
     namespace = "dev.estopia.free_grind"
     defaultConfig {
         manifestPlaceholders["usesCleartextTraffic"] = "false"
-        applicationId = "dev.estopia.free_grind"
+        applicationId = appApplicationId
+        // ApkUpdater only installs APKs downloaded from this repository's releases.
+        buildConfigField("String", "RELEASES_DOWNLOAD_URL", "\"$appDownloadUrl\"")
         // GeckoView (Google sign-in, see GoogleOAuthActivity.kt) needs Android 8.0.
         minSdk = 26
         targetSdk = 36
@@ -100,10 +133,13 @@ android {
     signingConfigs {
         create("release") {
             storeFile = releaseKeystore
-            storePassword = "opengrind"
-            keyAlias = "opengrind"
-            keyPassword = "opengrind"
+            storePassword = signingEnv("FG_KEYSTORE_PASSWORD")
+            keyAlias = signingEnv("FG_KEY_ALIAS")
+            keyPassword = signingEnv("FG_KEY_PASSWORD")
         }
+    }
+    sourceSets.getByName("main") {
+        res.srcDir(manifestDir.resolve("android/res"))
     }
     buildTypes {
         getByName("debug") {
@@ -192,8 +228,8 @@ dependencies {
     implementation("androidx.core:core-splashscreen:1.0.1")
     implementation("com.google.android.material:material:1.12.0")
     implementation("com.google.firebase:firebase-messaging-ktx:24.1.2")
-    // Proprietary, see RecaptchaMint.java.
-    implementation("com.google.android.recaptcha:recaptcha:18.9.2")
+    // Native parts that pose as Grindr (spoofed Firebase, reCAPTCHA minting).
+    implementation(project(":grindr"))
     // Google sign-in, see GoogleOAuthActivity.kt. ~85 MB of the APK; releases
     // ship arm64-v8a only (see release.yml).
     implementation("org.mozilla.geckoview:geckoview:152.0.20260629141727")

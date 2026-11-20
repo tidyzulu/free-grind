@@ -114,3 +114,15 @@ export function mintRecaptchaToken(action: RecaptchaAction): Promise<string> {
 		}
 	});
 }
+
+/** What to tell the user when no token could be minted. */
+export function recaptchaFailureMessage(reason: RecaptchaFailure): string {
+	switch (reason) {
+		case "unsupportedPlatform":
+			return "This account needs captcha verification, which is only available on Android.";
+		case "grindrMissing":
+			return "Captcha verification needs the Grindr app installed on this device.";
+		default:
+			return "Captcha verification failed. Please try again.";
+	}
+}

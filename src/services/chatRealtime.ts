@@ -20,6 +20,7 @@ import type {
 	RealtimeEnvelope,
 	RealtimeStatus,
 } from "../types/chat-realtime";
+import { directConversationProfiles } from "../utils/groupChat";
 import { appLog } from "../utils/logger";
 import { logWsEventToTerminal } from "./tauriWebSocket";
 import { setWsConnectionState, traceWsFrame, traceWsStatus } from "./wsTrace";
@@ -38,13 +39,14 @@ const COMMAND_TIMEOUT_MS = 10_000;
 // on a newer send to the same person.
 const SEND_MATCH_WINDOW_MS = 60_000;
 
-type PendingSend = { ref: string; targetId: string | null; type: unknown; sentAt: number };
+type PendingSend = { ref: string; targetId: string | null; group: boolean; type: unknown; sentAt: number };
 
-function messageSendTarget(payload: unknown): { targetId: string | null; type: unknown } {
-	const p = payload as { type?: unknown; target?: { targetId?: unknown } } | null;
+function messageSendTarget(payload: unknown): { targetId: string | null; group: boolean; type: unknown } {
+	const p = payload as { type?: unknown; target?: { type?: unknown; targetId?: unknown } } | null;
 	const targetId = p?.target?.targetId;
 	return {
 		targetId: targetId == null ? null : String(targetId),
+		group: p?.target?.type === "Group",
 		type: p?.type,
 	};
 }
@@ -282,15 +284,15 @@ export class ChatRealtimeManager {
 			const msg = envelope.payload as
 				| { senderId?: unknown; conversationId?: unknown; type?: unknown }
 				| undefined;
-			const participants =
-				typeof msg?.conversationId === "string" ? msg.conversationId.split(":") : [];
-			const index = this.pendingSends.findIndex(
-				(p) =>
-					p.targetId != null &&
-					String(msg?.senderId) !== p.targetId &&
-					participants.includes(p.targetId) &&
-					msg?.type === p.type,
-			);
+			const conversationId = typeof msg?.conversationId === "string" ? msg.conversationId : null;
+			const participants: string[] = directConversationProfiles(conversationId) ?? [];
+			const ownId = this.options.getOwnProfileId?.() ?? null;
+			const index = this.pendingSends.findIndex((p) => {
+				if (p.targetId == null || msg?.type !== p.type) return false;
+				// Group: only our own echo in that group (needs our id; without it, no fallback).
+				if (p.group) return ownId != null && conversationId === `group:${p.targetId}` && String(msg?.senderId) === String(ownId);
+				return String(msg?.senderId) !== p.targetId && participants.includes(p.targetId);
+			});
 			if (index !== -1) {
 				const [match] = this.pendingSends.splice(index, 1);
 				const pending = this.pendingCommands.get(match.ref);

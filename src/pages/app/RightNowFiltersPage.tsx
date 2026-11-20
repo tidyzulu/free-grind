@@ -1,4 +1,5 @@
 import { Star } from "lucide-react";
+import { CruisingLayerToggle } from "./gridpage/cruising/CruisingLayerToggle";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { RangeSlider } from "../../components/ui/range-slider";
@@ -49,6 +50,7 @@ export function RightNowFiltersPage({ onClose, onApply, initialDraft }: RightNow
 
 			<div className="-mx-4 min-h-0 flex-1 overflow-y-auto px-4" data-lenis-prevent>
 				<div className="space-y-5 pb-2">
+					<CruisingLayerToggle accentColor="var(--right-now)" />
 					<SheetSection title={t("browse_filters.quick_filters")}>
 						<div className="flex flex-wrap gap-2">
 							<SheetChip active={hostingOnly} onClick={() => setHostingOnly((v) => !v)} accentColor="var(--right-now)">

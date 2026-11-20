@@ -293,7 +293,8 @@ fn decode_jwt(token: &str) -> Result<JwtClaims, AppError> {
 // a less secure file.
 // ---------------------------------------------------------------------------
 
-const SERVICE: &str = "free-grind";
+// Keyring service: the app slug.
+const SERVICE: &str = crate::app_identity::APP_SLUG;
 const ACTIVE_SESSION_SLOT: &str = "session";
 
 #[cfg(any(target_os = "windows", target_os = "macos"))]
@@ -350,7 +351,7 @@ fn app_support_file(name: &str) -> Result<PathBuf, AppError> {
     Ok(PathBuf::from(home)
         .join("Library")
         .join("Application Support")
-        .join("free-grind")
+        .join(crate::app_identity::APP_SLUG)
         .join(name))
 }
 
@@ -384,7 +385,7 @@ pub(crate) fn clear_slot(slot: &str) -> Result<(), AppError> {
 }
 
 #[cfg(not(any(target_os = "windows", all(target_os = "macos", debug_assertions))))]
-pub(crate) fn get_slot_bytes(slot: &str) -> Result<Option<Vec<u8>>, AppError> {
+fn get_keyring_slot(slot: &str) -> Result<Option<Vec<u8>>, AppError> {
     let entry = Entry::new(SERVICE, slot).map_err(|e| AppError::Auth(e.to_string()))?;
     match entry.get_secret() {
         Ok(bytes) => Ok(Some(bytes)),
@@ -394,7 +395,7 @@ pub(crate) fn get_slot_bytes(slot: &str) -> Result<Option<Vec<u8>>, AppError> {
 }
 
 #[cfg(not(any(target_os = "windows", all(target_os = "macos", debug_assertions))))]
-pub(crate) fn set_slot_bytes(slot: &str, bytes: &[u8]) -> Result<(), AppError> {
+fn set_keyring_slot(slot: &str, bytes: &[u8]) -> Result<(), AppError> {
     let entry = Entry::new(SERVICE, slot).map_err(|e| AppError::Auth(e.to_string()))?;
     entry
         .set_secret(bytes)
@@ -402,12 +403,60 @@ pub(crate) fn set_slot_bytes(slot: &str, bytes: &[u8]) -> Result<(), AppError> {
 }
 
 #[cfg(not(any(target_os = "windows", all(target_os = "macos", debug_assertions))))]
-pub(crate) fn clear_slot(slot: &str) -> Result<(), AppError> {
+fn clear_keyring_slot(slot: &str) -> Result<(), AppError> {
     let entry = Entry::new(SERVICE, slot).map_err(|e| AppError::Auth(e.to_string()))?;
     match entry.delete_credential() {
         Ok(()) | Err(keyring_core::Error::NoEntry) => Ok(()),
         Err(e) => Err(AppError::Auth(e.to_string())),
     }
+}
+
+// macOS release builds keep slots in the keychain, which refuses writes when
+// the build lacks the keychain entitlements. Each slot then falls back to a
+// file, like the active session does (macos_fallback_path); without it the
+// saved accounts and their index were never stored, so adding an account
+// dropped the previous one.
+#[cfg(all(target_os = "macos", not(debug_assertions)))]
+fn slot_fallback_path(slot: &str) -> Result<PathBuf, AppError> {
+    app_support_file(&format!("{slot}.fallback.msgpack"))
+}
+
+#[cfg(not(any(target_os = "windows", all(target_os = "macos", debug_assertions))))]
+pub(crate) fn get_slot_bytes(slot: &str) -> Result<Option<Vec<u8>>, AppError> {
+    let keyring = get_keyring_slot(slot);
+    #[cfg(target_os = "macos")]
+    if !matches!(keyring, Ok(Some(_))) {
+        return read_file(&slot_fallback_path(slot)?);
+    }
+    keyring
+}
+
+#[cfg(not(any(target_os = "windows", all(target_os = "macos", debug_assertions))))]
+pub(crate) fn set_slot_bytes(slot: &str, bytes: &[u8]) -> Result<(), AppError> {
+    let keyring = set_keyring_slot(slot, bytes);
+    #[cfg(target_os = "macos")]
+    let keyring = match keyring {
+        Ok(()) => {
+            let _ = remove_file(&slot_fallback_path(slot)?);
+            Ok(())
+        }
+        Err(e) => {
+            eprintln!("[auth] keychain write for {slot} failed, using a file: {e}");
+            write_file(&slot_fallback_path(slot)?, bytes)
+        }
+    };
+    keyring
+}
+
+#[cfg(not(any(target_os = "windows", all(target_os = "macos", debug_assertions))))]
+pub(crate) fn clear_slot(slot: &str) -> Result<(), AppError> {
+    let keyring = clear_keyring_slot(slot);
+    #[cfg(target_os = "macos")]
+    let keyring = {
+        let _ = keyring;
+        remove_file(&slot_fallback_path(slot)?)
+    };
+    keyring
 }
 
 // --- the active session slot ---
@@ -444,7 +493,7 @@ fn macos_fallback_path() -> Result<PathBuf, AppError> {
 
 #[cfg(not(any(target_os = "windows", all(target_os = "macos", debug_assertions))))]
 fn read_active() -> Result<Option<Vec<u8>>, AppError> {
-    let keyring = get_slot_bytes(ACTIVE_SESSION_SLOT);
+    let keyring = get_keyring_slot(ACTIVE_SESSION_SLOT);
     #[cfg(target_os = "macos")]
     if !matches!(keyring, Ok(Some(_))) {
         return read_file(&macos_fallback_path()?);
@@ -454,7 +503,7 @@ fn read_active() -> Result<Option<Vec<u8>>, AppError> {
 
 #[cfg(not(any(target_os = "windows", all(target_os = "macos", debug_assertions))))]
 fn write_active(bytes: &[u8]) -> Result<(), AppError> {
-    let keyring = set_slot_bytes(ACTIVE_SESSION_SLOT, bytes);
+    let keyring = set_keyring_slot(ACTIVE_SESSION_SLOT, bytes);
     #[cfg(target_os = "macos")]
     let keyring = match keyring {
         Ok(()) => {
@@ -468,7 +517,7 @@ fn write_active(bytes: &[u8]) -> Result<(), AppError> {
 
 #[cfg(not(any(target_os = "windows", all(target_os = "macos", debug_assertions))))]
 fn clear_active() -> Result<(), AppError> {
-    let keyring = clear_slot(ACTIVE_SESSION_SLOT);
+    let keyring = clear_keyring_slot(ACTIVE_SESSION_SLOT);
     #[cfg(target_os = "macos")]
     let keyring = {
         let _ = keyring;
@@ -542,7 +591,7 @@ const SIGN_UP_COUNT_SLOT: &str = "sign-up-count";
 #[cfg(target_os = "windows")]
 fn sign_up_count_path() -> PathBuf {
     crate::windows_instance::windows_app_data_root_dir()
-        .join("free-grind")
+        .join(crate::app_identity::APP_SLUG)
         .join(format!("{SIGN_UP_COUNT_SLOT}.msgpack"))
 }
 
@@ -741,13 +790,6 @@ fn persist(session: &grindr::Session, device: &grindr::DeviceInfo) {
     if let Err(e) = AuthStorage::save_account(session, device) {
         eprintln!("[auth] failed to register account in switcher: {e}");
     }
-    // Remember which backend this account lives on, so switching to it later
-    // talks to the right server.
-    if let Some(profile_id) = session.credentials.profile_id.as_deref() {
-        if let Err(e) = super::server::ServerStorage::save_for_account(profile_id, &grindr::server_config()) {
-            eprintln!("[auth] failed to remember the account's server: {e}");
-        }
-    }
 }
 
 fn session_profile_id(client: &grindr::GrindrClient) -> Option<String> {
@@ -791,7 +833,7 @@ fn frontend_restriction(session: Option<&grindr::Session>) -> Option<Restriction
 /// command returns. The session-watch task in `spawn_persistence_tasks` does
 /// the same, but asynchronously — the frontend lists the saved accounts right
 /// after `login` resolves and would otherwise miss the account it just added.
-async fn persist_current_session(client: &grindr::GrindrClient) {
+pub(super) async fn persist_current_session(client: &grindr::GrindrClient) {
     let session = client.session_receiver().borrow().clone();
     if let Some(session) = session {
         let device = client.current_device().await;
@@ -1007,20 +1049,15 @@ pub async fn create_account(
     captcha_token: String,
     push_token: Option<String>,
 ) -> Result<String, AppError> {
-    // The local sign-up limit and the reCAPTCHA requirement protect accounts on
-    // the official servers. A self-hosted server uses neither (it rate-limits
-    // and gates registration itself).
-    let official = grindr::server_config().is_official();
-
     // Enforced here, not just in the UI. An unreadable count refuses too.
-    if official && SignUpCounter::count()? >= SIGN_UP_LIMIT {
+    if SignUpCounter::count()? >= SIGN_UP_LIMIT {
         return Err(AppError::SignUpLimitReached);
     }
 
     let client = state.client()?;
 
     let captcha = captcha_token.trim();
-    if official && captcha.is_empty() {
+    if captcha.is_empty() {
         return Err(AppError::Api {
             code: 400,
             message: "A reCAPTCHA token is required to create an account".to_owned(),
@@ -1047,9 +1084,6 @@ pub async fn create_account(
         .map_err(|e| AppError::from_client_error(e, &client))?;
 
     // The account exists either way; a failed write only loses the count.
-    if !official {
-        return Ok(profile_id);
-    }
     if let Err(e) = SignUpCounter::record() {
         eprintln!("[auth] failed to record sign-up: {e}");
     }
@@ -1302,13 +1336,22 @@ pub async fn accept_ban_agreement(state: tauri::State<'_, AppState>) -> Result<L
     }
 }
 
+/// The saved accounts of this app's backend. Accounts of the other backend
+/// (saved by a build with the old server picker) stay stored but hidden.
 #[tauri::command]
-pub async fn list_saved_accounts()-> Result<Vec<SavedAccountMeta>, AppError> {
-    AuthStorage::list_saved_accounts()
+pub async fn list_saved_accounts() -> Result<Vec<SavedAccountMeta>, AppError> {
+    Ok(AuthStorage::list_saved_accounts()?
+        .into_iter()
+        .filter(|meta| super::server::ServerStorage::belongs_here(&meta.profile_id))
+        .collect())
 }
 
 #[tauri::command]
 pub async fn switch_account(app: tauri::AppHandle, profile_id: String) -> Result<LoginResult, AppError> {
+    // Never send another backend's session to this app's server.
+    if !super::server::ServerStorage::belongs_here(&profile_id) {
+        return Err(AppError::Auth("No saved session for this account".to_owned()));
+    }
     let (session, device) = AuthStorage::get_account(&profile_id)?
         .ok_or_else(|| AppError::Auth("No saved session for this account".to_owned()))?;
 
@@ -1317,8 +1360,6 @@ pub async fn switch_account(app: tauri::AppHandle, profile_id: String) -> Result
         restriction: frontend_restriction(Some(&session)),
     };
 
-    // The account's own backend must be active before its session is used.
-    super::server::activate(super::server::ServerStorage::load_for_account(&profile_id))?;
     AuthStorage::set_session(&session)?;
     let _ = DeviceStorage::save(&device);
     adopt_client(&app, Some(device), Some(session))?;
@@ -1526,6 +1567,41 @@ pub async fn sync_push_token(state: tauri::State<'_, AppState>, token: String) -
             "vendorProvidedIdentifier": identifier,
             "token": trimmed,
         }))
+        .send()
+        .await
+        .map_err(|e| AppError::from_client_error(e, &client))?;
+
+    if (200..300).contains(&response.status) {
+        Ok(())
+    } else {
+        Err(AppError::from(grindr::GrindrError::from_response(
+            response.status,
+            &response.body,
+        )))
+    }
+}
+
+/// Stops push delivery to `token` for the active account. Called before
+/// logout, while the session that registered it still exists.
+#[tauri::command]
+pub async fn revoke_push_token(state: tauri::State<'_, AppState>, token: String) -> Result<(), AppError> {
+    let trimmed = token.trim();
+    if trimmed.is_empty() {
+        return Ok(());
+    }
+
+    // FCM tokens are path-safe; encode anything else so the segment survives.
+    let encoded: String = trimmed
+        .bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b':' => (b as char).to_string(),
+            _ => format!("%{b:02X}"),
+        })
+        .collect();
+
+    let client = state.client()?;
+    let response = client
+        .request(grindr::Method::DELETE, &format!("/v3/push-tokens/{encoded}"))
         .send()
         .await
         .map_err(|e| AppError::from_client_error(e, &client))?;

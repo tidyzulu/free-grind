@@ -5,6 +5,7 @@
  * the new value on the next mount. A component that stays mounted across
  * routes would need a change event instead.
  */
+import { LOCATE_PROFILE_AVAILABLE } from "../grindr-workarounds";
 
 export const SHOW_VIDEO_GALLERY_KEY = "fg-show-video-gallery";
 export const SHOW_SEXUAL_HEALTH_KEY = "fg-show-sexual-health";
@@ -28,9 +29,12 @@ export function isSexualHealthEnabled(): boolean {
 	return readFlag(SHOW_SEXUAL_HEALTH_KEY) !== "false";
 }
 
-/** "Locate" (position triangulation) in the profile menu — off unless explicitly enabled. */
+/**
+ * "Locate" (position triangulation) in the profile menu — off unless
+ * explicitly enabled, and never in builds without it (a Grindr workaround).
+ */
 export function isLocateEnabled(): boolean {
-	return readFlag(SHOW_LOCATE_KEY) === "true";
+	return LOCATE_PROFILE_AVAILABLE && readFlag(SHOW_LOCATE_KEY) === "true";
 }
 
 export function setOptionalFeatureEnabled(key: string, enabled: boolean): void {

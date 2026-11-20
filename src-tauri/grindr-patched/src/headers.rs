@@ -10,7 +10,7 @@ use crate::error::GrindrError;
 /// version mirrors this string but means nothing to Cargo on its own.
 pub const APP_VERSION: &str = "26.24.0.195444";
 pub(crate) const BUILD_NUMBER: &str = "195444";
-const OKHTTP_USER_AGENT: &str = "okhttp/5.5.0";
+const OKHTTP_USER_AGENT: &str = "okhttp/5.5.1";
 
 const MEDIA_ACCEPT: &str = "image/webp,image/*;q=0.8";
 
@@ -22,8 +22,9 @@ pub fn build_user_agent(
 	device: &DeviceInfo,
 	subscription_tier: &str,
 ) -> String {
+	let (product, version, build) = crate::identity::client_identity();
 	format!(
-		"grindr3/{APP_VERSION};{BUILD_NUMBER};{subscription_tier};{};{};{}",
+		"{product}/{version};{build};{subscription_tier};{};{};{}",
 		device.os, device.device_model, device.manufacturer
 	)
 }
@@ -174,13 +175,11 @@ impl GrindrHeaders {
 
 	/// Build the header set a plain OkHttp client sends.
 	pub fn build_plain(range: Option<&str>) -> Result<Self, GrindrError> {
-		let items = vec![
-			range_or_gzip(range)?,
-			(
-				HeaderName::from_static("user-agent"),
-				HeaderValue::from_static(OKHTTP_USER_AGENT),
-			),
-		];
+		let mut items = vec![range_or_gzip(range)?];
+		items.push((
+			HeaderName::from_static("user-agent"),
+			HeaderValue::from_static(OKHTTP_USER_AGENT),
+		));
 		Ok(Self { items })
 	}
 

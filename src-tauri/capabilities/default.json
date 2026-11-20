@@ -11,7 +11,9 @@
 			"identifier": "opener:allow-open-url",
 			"allow": [
 				{ "url": "geo:*" },
-				{ "url": "https://www.google.com/maps/*" }
+				{ "url": "https://www.google.com/maps/*" },
+				{ "url": "https://lens.google.com/uploadbyurl*" },
+				{ "url": "https://yandex.com/images/search*" }
 			]
 		},
 		"notification:default",

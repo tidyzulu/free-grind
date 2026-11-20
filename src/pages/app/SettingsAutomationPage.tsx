@@ -50,7 +50,7 @@ function ForbiddenKeywordsSheet({
 		const url = URL.createObjectURL(blob);
 		const a = document.createElement("a");
 		a.href = url;
-		a.download = "free-grind-keywords.txt";
+		a.download = `${__APP_SLUG__}-keywords.txt`;
 		a.click();
 		URL.revokeObjectURL(url);
 		toast.success(t("settings_automation.keywords_exported"));

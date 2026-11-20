@@ -1,21 +1,32 @@
 import { useAuth } from "../../contexts/useAuth";
-import { Navigation, ArrowUpDown, Search, RefreshCw, X, UserSearch, ChevronRight, Loader2 } from "lucide-react";
+import { Navigation, ArrowUpDown, Search, RefreshCw, X, UserSearch, ChevronRight, Loader2, Settings2 } from "lucide-react";
+import { useIsBrowseMapEnabled } from "../../services/assignmentsStore";
+import { requestProfileShare, useCanShareProfiles } from "../../services/profileShare";
+import { MapVisibilityControls, useDistanceMode } from "./MapPrivacySettings";
+import { GridMap, hasCardPosition, type MapCard } from "./gridpage/components/GridMap";
+import { readGridViewMode, writeGridViewMode, type GridViewMode } from "./gridpage/gridViewMode";
+import { ownMapPositionKey } from "../../hooks/queries/useOwnMapPosition";
+import { useQueryClient } from "@tanstack/react-query";
+import { CruisingMapOverlay, useCruisingMapState, useOwnMapPresence } from "./gridpage/cruising/CruisingMapOverlay";
+import { CruisingAutoCheckInSection } from "./gridpage/cruising/CruisingAutoCheckInToggle";
 import { SlidersHorizontal as PhosphorSlidersHorizontal } from "@phosphor-icons/react";
-import { EyeOffFilled, LocateApproximateFilled, LocateFixedFilled, MapPinFilled, UserFilled, UserSearchFilled } from "../../components/icons/FilledIcons";
+import { LayoutGridFilled, MapFilled, MapPinFilled, UserFilled, UserSearchFilled } from "../../components/icons/FilledIcons";
+import { IconTabs, type IconTabConfig } from "../../components/ui/icon-tabs";
 import { useLocation, useNavigate } from "react-router-dom";
 import toast from "react-hot-toast";
 import { useApiFunctions } from "../../hooks/useApiFunctions";
 import { useScrollRowFade } from "../../hooks/useScrollRowFade";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { encodeGeohash } from "../../utils/geohash";
+import { decodeGeohash, encodeGeohash } from "../../utils/geohash";
 import { reverseGeocodeGeohash } from "./gridpage/geocoding";
-import { getThumbImageUrl, validateMediaHash } from "../../utils/media";
+import { extractMediaHashFromUrl, getThumbImageUrl, validateMediaHash } from "../../utils/media";
 import { usePreferences } from "../../contexts/PreferencesContext";
 import { useExploreMode } from "../../contexts/ExploreModeContext";
 import { type BrowseCard, type ProfileDetail } from "./GridPage.types";
 import { BrowseGrid } from "./gridpage/components/BrowseGrid";
 import { GridTileContextMenu } from "./gridpage/components/GridTileContextMenu";
+import { useCanBlockProfile, useLocateProfile } from "../../grindr-workarounds";
 import { getDisplayName, mergeBrowseCardImages } from "./gridpage/utils";
 import { FeedScrollContainer } from "../../components/ui/FeedScrollContainer";
 import { ProfileDetailsModal } from "./gridpage/components/ProfileDetailsModal";
@@ -25,8 +36,10 @@ import {
 	removeProfileFromBrowseCache,
 	setCachedBrowseCards,
 	setCachedProfileDetail,
+	invalidateFavoritesBrowseCache,
 } from "./gridpage/cache";
 import { setSavedAccountDisplayName, setSavedAccountPhotoHash } from "../../services/savedAccountProfiles";
+import { FAVORITES_CHANGED_EVENT, type FavoritesChangedDetail } from "../../services/api/favoritesMethods";
 import {
 	type BrowseSortOption,
 	getCachedBrowseFiltersDraft,
@@ -36,19 +49,17 @@ import {
 import { PullToRefreshContainer } from "./components/PullToRefreshContainer";
 import { PageHeaderBackground } from "../../components/ui/PageHeaderBackground";
 import { FilterPill } from "../../components/ui/FilterPill";
-import { SelectSheet, type SelectSheetOption } from "../../components/ui/select-sheet";
+import { SelectSheet, SELECT_SHEET_SECTION_LABEL_CLASS } from "../../components/ui/select-sheet";
 import { useBrowseFilters } from "./gridpage/hooks/useBrowseFilters";
 import { sanitizeQuickFilters, useGridQuickFilterDefs } from "../../components/quick-filters/quickFilterDefs";
 import { GRID_QUICK_FILTER_KEYS } from "../../config/quick-filters";
 import { useTapProfile } from "./gridpage/hooks/useTapProfile";
 import { useGridTapStatus } from "./gridpage/hooks/useGridTapStatus";
 import { GridGesturesIntro, hasSeenGridGesturesIntro, markGridGesturesIntroSeen } from "./gridpage/components/GridGesturesIntro";
-import { useLocateProfile } from "./gridpage/hooks/useLocateProfile";
 import { isLocateEnabled } from "../../utils/optionalFeatures";
 import { useDesktopBreakpoint } from "../../hooks/useDesktopBreakpoint";
 import { useManagedGenders, useManagedPronouns, useBlockedProfileIds, useBlockProfile, useUnblockProfile, useMyOwnProfile } from "../../hooks/queries/useProfileQueries";
-import { useQueryClient } from "@tanstack/react-query";
-import { getProfilePhotoHash, unwrapOwnProfile } from "./profile-editor/profileEditorUtils";
+import { getProfilePhotoHash } from "./profile-editor/profileEditorUtils";
 import {
 	getChatContactIndexForProfiles,
 	getLocalNicknamesForProfiles,
@@ -71,7 +82,8 @@ import { useIsRightNowLive } from "../../hooks/useIsRightNowLive";
 import type { BrowseFiltersDraft } from "./browse-filters-storage";
 import { SKIP_BLOCK_CONFIRM_KEY, isBlockConfirmSkipped } from "../../utils/blockConfirm";
 import * as chatDb from "../../services/chatDb";
-import { hideProfile as hideProfileLocally, unhideProfile as unhideProfileLocally, GRID_HIDE_STATE_EVENT, type GridHideStateChangeDetail } from "../../services/profileHide";
+import { hideProfile, unhideProfile } from "../../services/profileHide";
+import { useHiddenProfileIds } from "../../hooks/useHiddenProfileIds";
 import { usePresence } from "../../hooks/usePresence";
 import {
 	acknowledgeNicknameRename,
@@ -105,7 +117,6 @@ function readStoredExploreLocation(userId: number | null | undefined): ExploreLo
 // keep auto-pagination running indefinitely trying to find more matches.
 const NICKNAME_FILTER_MAX_PAGES = 7;
 
-type DistanceMode = "precise" | "approximate" | "hidden";
 
 // Overrides for the grid while a public Right Now session is live (see GridPage's root).
 const RIGHT_NOW_LIVE_VARS = {
@@ -266,17 +277,10 @@ export function GridPage() {
 	const { mutateAsync: blockProfileMutation, isPending: isBlockingProfile } = useBlockProfile();
 	const { mutateAsync: unblockProfileMutation, isPending: isUnblockingProfile } = useUnblockProfile();
 	const { data: myProfile } = useMyOwnProfile();
-	const queryClient = useQueryClient();
 
 	const profileImageHash = useMemo(() => getProfilePhotoHash(myProfile), [myProfile]);
 	const ownDisplayName = myProfile?.displayName ?? null;
-	// Same three modes as the official app's "Distance & Visibility" screen.
-	const distanceMode: DistanceMode = !(myProfile?.showDistance ?? true)
-		? "hidden"
-		: myProfile?.approximateDistance
-			? "approximate"
-			: "precise";
-	const DistanceModeIcon = distanceMode === "approximate" ? LocateApproximateFilled : LocateFixedFilled;
+	const { distanceMode, selectDistanceMode, distanceOptions } = useDistanceMode();
 
 	const genderOptions = useMemo(() => {
 		return managedGenders?.map((item) => ({
@@ -301,38 +305,7 @@ export function GridPage() {
 
 	const blockedProfileIds = useMemo(() => new Set(blockedProfileIdsData ?? []), [blockedProfileIdsData]);
 
-	// Local-only, like the chat inbox's hidden-conversation flag — reloaded
-	// whenever the active account's chatDb becomes ready (settingsReady), so
-	// switching accounts also switches which profiles are hidden instead of
-	// leaking the previous account's hidden set into the newly active one.
-	const [hiddenProfileIds, setHiddenProfileIds] = useState<Set<string>>(new Set());
-
-	useEffect(() => {
-		if (!settingsReady) return;
-		void chatDb.listHiddenProfileIds().then((ids) => {
-			setHiddenProfileIds(new Set(ids));
-		});
-	}, [userId, settingsReady]);
-
-	useEffect(() => {
-		const onHideStateChange = (event: Event) => {
-			const detail = (event as CustomEvent<GridHideStateChangeDetail>).detail;
-			if (!detail) return;
-			setHiddenProfileIds((previous) => {
-				const alreadyMatches = previous.has(detail.profileId) === detail.hidden;
-				if (alreadyMatches) return previous;
-				const next = new Set(previous);
-				if (detail.hidden) {
-					next.add(detail.profileId);
-				} else {
-					next.delete(detail.profileId);
-				}
-				return next;
-			});
-		};
-		window.addEventListener(GRID_HIDE_STATE_EVENT, onHideStateChange as EventListener);
-		return () => window.removeEventListener(GRID_HIDE_STATE_EVENT, onHideStateChange as EventListener);
-	}, []);
+	const hiddenProfileIds = useHiddenProfileIds();
 
 	const [mutatingFavoriteProfileId, setMutatingFavoriteProfileId] = useState<string | null>(
 		null,
@@ -355,6 +328,26 @@ export function GridPage() {
 	const [isDistanceSheetOpen, setIsDistanceSheetOpen] = useState(false);
 
 	const isDesktop = useDesktopBreakpoint();
+	// Viewport y of the header's bottom edge: the full-bleed grid map is pulled
+	// up by this much (like Right Now's map) and keeps its center below it.
+	const [headerBottom, setHeaderBottom] = useState(0);
+	useLayoutEffect(() => {
+		const header = headerRef.current;
+		if (!header) return;
+		const measure = () => setHeaderBottom(Math.round(header.getBoundingClientRect().bottom));
+		measure();
+		const observer = "ResizeObserver" in window ? new ResizeObserver(measure) : null;
+		observer?.observe(header);
+		window.addEventListener("resize", measure);
+		return () => {
+			observer?.disconnect();
+			window.removeEventListener("resize", measure);
+		};
+	}, []);
+	// The map runs on under the desktop nav rail.
+	const railWidth = isDesktop
+		? parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--nav-rail-width")) || 0
+		: 0;
 	const [hasSeenGesturesIntro, setHasSeenGesturesIntro] = useState(hasSeenGridGesturesIntro);
 
 	const handleFetchNotes = useCallback(async () => {
@@ -441,6 +434,26 @@ export function GridPage() {
 			void handleFetchNotes();
 		}
 	}, [browseFilters.favorites, hasAttemptedFetchNotes, handleFetchNotes]);
+
+	// A favorite or note changed somewhere (grid, profile, chat): drop cached
+	// favorites pages, refetch notes, and reload now if the favorites filter is on.
+	const favoritesFilterOnRef = useRef(browseFilters.favorites);
+	favoritesFilterOnRef.current = browseFilters.favorites;
+	const loadBrowseCardsRef = useRef<((opts?: { preferCache?: boolean; showLoadingState?: boolean }) => Promise<void>) | null>(null);
+	useEffect(() => {
+		const onChanged = (event: Event) => {
+			const { profileId, favorite } = (event as CustomEvent<FavoritesChangedDetail>).detail;
+			// An unfavorited profile leaves the favorites grid at once, before the reload.
+			if (favoritesFilterOnRef.current && favorite === false) {
+				setCards((previous) => previous.filter((card) => card.profileId !== profileId));
+			}
+			invalidateFavoritesBrowseCache();
+			setHasAttemptedFetchNotes(false);
+			if (favoritesFilterOnRef.current) void loadBrowseCardsRef.current?.({ preferCache: false, showLoadingState: false });
+		};
+		window.addEventListener(FAVORITES_CHANGED_EVENT, onChanged);
+		return () => window.removeEventListener(FAVORITES_CHANGED_EVENT, onChanged);
+	}, []);
 
 	// Reload whenever the active account's chatDb is ready (settingsReady),
 	// so switching accounts from GridPage's own account switcher also
@@ -549,56 +562,6 @@ export function GridPage() {
 		setSavedAccountDisplayName(String(userId), ownDisplayName);
 	}, [userId, myProfile, profileImageHash, ownDisplayName]);
 
-	// Mirrors the official app: the mode goes onto the profile
-	// (showDistance + approximateDistance), and approximateDistance is also
-	// written to the account settings. Rejects on failure so the sheet stays open.
-	// The profile write has to be the full PUT /v3.1/me/profile — PATCH /v4
-	// ignores approximateDistance — so the current profile is fetched fresh and
-	// sent back whole with just these two fields changed.
-	const handleSelectDistanceMode = useCallback(async (mode: DistanceMode) => {
-		const fields = {
-			showDistance: mode !== "hidden",
-			approximateDistance: mode === "approximate",
-		};
-		const previous = queryClient.getQueryData<typeof myProfile>(["my-own-profile"]);
-		queryClient.setQueryData(["my-own-profile"], (current: typeof myProfile) =>
-			current ? { ...current, ...fields } : current,
-		);
-		try {
-			const current = unwrapOwnProfile(await apiFunctions.getMyOwnProfile());
-			if (!current) throw new Error("Own profile unavailable");
-			await apiFunctions.replaceMyProfile({ ...current, ...fields });
-			await apiFunctions.updateMySettings({ approximateDistance: fields.approximateDistance });
-		} catch (error) {
-			queryClient.setQueryData(["my-own-profile"], previous);
-			toast.error(t("browse_page.errors.toggle_distance_failed", { defaultValue: "Could not update distance setting." }));
-			throw error;
-		}
-	}, [apiFunctions, queryClient, t]);
-
-	const distanceOptions = useMemo<SelectSheetOption<DistanceMode>[]>(() => [
-		{
-			value: "precise",
-			icon: LocateFixedFilled,
-			iconClassName: "accent-tint-15 text-[var(--accent)]",
-			label: t("browse_page.share_distance.precise", { defaultValue: "Precise" }),
-			description: t("browse_page.share_distance.precise_desc", { defaultValue: "Exact distance, e.g. \"250 m away\"." }),
-		},
-		{
-			value: "approximate",
-			icon: LocateApproximateFilled,
-			iconClassName: "bg-sky-500/15 text-sky-400",
-			label: t("browse_page.share_distance.approximate", { defaultValue: "Approximate" }),
-			description: t("browse_page.share_distance.approximate_desc", { defaultValue: "Rounded, e.g. \"< 5 km away\"." }),
-		},
-		{
-			value: "hidden",
-			icon: EyeOffFilled,
-			label: t("browse_page.share_distance.hidden", { defaultValue: "Hidden" }),
-			description: t("browse_page.share_distance.hidden_desc", { defaultValue: "No distance shown. Your position in others' grid still hints at roughly how far away you are." }),
-		},
-	], [t]);
-
 	const browseCacheKey = useMemo(() => {
 		if (!geohash) {
 			return "";
@@ -671,6 +634,97 @@ export function GridPage() {
 		},
 		[browseRequestFilters, getBrowseCardsWithTimeout],
 	);
+
+	// Grid map view (experiment "cascade-browse": treatment / treatment-2)
+	const isMapFlagOn = useIsBrowseMapEnabled();
+	const canShareProfiles = useCanShareProfiles();
+	const canBlockProfile = useCanBlockProfile();
+	const [gridViewMode, setGridViewMode] = useState<GridViewMode>(() => readGridViewMode(userId));
+	useEffect(() => {
+		setGridViewMode(readGridViewMode(userId));
+	}, [userId]);
+	const showGridMap = isMapFlagOn && gridViewMode === "map";
+	const changeGridViewMode = useCallback(
+		(mode: GridViewMode) => {
+			setGridViewMode(mode);
+			writeGridViewMode(userId, mode);
+		},
+		[userId],
+	);
+	const gridViewModeTabs: IconTabConfig<GridViewMode>[] = useMemo(
+		() => [
+			{ key: "list", label: t("browse_page.view_list", { defaultValue: "Grid" }), icon: LayoutGridFilled },
+			{ key: "map", label: t("browse_page.view_map", { defaultValue: "Map" }), icon: MapFilled },
+		],
+		[t],
+	);
+	const [mapCards, setMapCards] = useState<MapCard[]>([]);
+	const queryClient = useQueryClient();
+	// Free Grind server: where others see us on the map (and, with GPS, the anchor at the real position).
+	const { selfMapPosition, selfFuzzRadiusMeters } = useOwnMapPresence(showGridMap);
+	// Explore mode on the map: a tap anywhere drops the pin there and makes
+	// that spot the explore location, so the pill, the location picker and the
+	// grid all follow the pin. Outside explore mode the map shows the cascade
+	// around the user's own location.
+	const explorePin = useMemo<{ lat: number; lon: number } | null>(() => {
+		if (!exploreLocation) return null;
+		try {
+			const { lat, lon } = decodeGeohash(exploreLocation.geohash);
+			return { lat: (lat[0] + lat[1]) / 2, lon: (lon[0] + lon[1]) / 2 };
+		} catch {
+			return null;
+		}
+	}, [exploreLocation]);
+	const pinGeocodeRequestRef = useRef(0);
+	const handlePlaceExplorePin = useCallback(
+		(point: { lat: number; lon: number }) => {
+			const pinGeohash = encodeGeohash(point.lat, point.lon);
+			const request = ++pinGeocodeRequestRef.current;
+			setExploreLocation({
+				geohash: pinGeohash,
+				label: t("browse_location.lat_lon_label", { lat: point.lat.toFixed(4), lon: point.lon.toFixed(4) }),
+			});
+			void reverseGeocodeGeohash(pinGeohash)
+				.catch(() => null)
+				.then((label) => {
+					// A newer pin (or another explore pick) supersedes this lookup.
+					if (!label || request !== pinGeocodeRequestRef.current) return;
+					setExploreLocation({ geohash: pinGeohash, label });
+				});
+		},
+		[setExploreLocation, t],
+	);
+	useEffect(() => {
+		if (!showGridMap || !geohash) return;
+		let cancelled = false;
+		void (async () => {
+			try {
+				// The same cascade as the grid; the server adds positions only for
+				// profiles that share one, so cards without fuzzedLat/Lon stay off the map.
+				const parsed = await getBrowseCardsWithTimeout({
+					geohash,
+					exploreGeohash: exploreLocation?.geohash,
+					page: 1,
+					filters: browseRequestFilters,
+				});
+				if (cancelled) return;
+				setMapCards(parsed.cards.filter(hasCardPosition));
+				// The cascade moved us to `geohash`: the server re-derived our public point.
+				void queryClient.invalidateQueries({ queryKey: ownMapPositionKey });
+				// …and may have checked us in or out of a cruising spot.
+				void queryClient.invalidateQueries({ queryKey: ["cruising-spots"] });
+			} catch {
+				// The map stays up; a failed load just reads as nobody nearby.
+				if (!cancelled) setMapCards([]);
+			}
+		})();
+		return () => {
+			cancelled = true;
+		};
+	}, [showGridMap, geohash, exploreLocation, browseRequestFilters, getBrowseCardsWithTimeout, queryClient]);
+
+	// Cruising spots on the map (Free Grind server, flag `cruising-spots`).
+	const cruisingMap = useCruisingMapState(showGridMap, explorePin);
 
 	const refreshLocation = useCallback(async () => {
 		if (!useAutoLocation || !("geolocation" in navigator)) {
@@ -884,6 +938,8 @@ export function GridPage() {
 			fetchGridCards,
 		],
 	);
+
+	loadBrowseCardsRef.current = loadBrowseCards;
 
 	useEffect(() => {
 		if (!isLoadingPreferences && useAutoLocation && !initialLocationChecked && !hasRefreshedLocationThisAppLaunch) {
@@ -1379,14 +1435,24 @@ export function GridPage() {
 				state: {
 					returnTo: `${location.pathname}${location.search}`,
 					profileIds: sortedCards.map((c) => c.profileId),
-					// Keep the grid rendered underneath (see App.tsx): it shows
-					// through while the profile is swiped down to close.
-					backgroundLocation: location,
 				},
 			});
 			return;
 		}
 
+		setActiveProfileId(profileId);
+	};
+
+	// From the map (markers, cruising spots): like Right Now's map — full screen
+	// on mobile with the map kept mounted underneath (backgroundLocation, see
+	// App.tsx), so closing returns to the same map view; the modal on desktop.
+	const openProfileFromMap = (profileId: string) => {
+		if (window.matchMedia("(max-width: 639px)").matches) {
+			navigate(`/profile/${profileId}`, {
+				state: { returnTo: `${location.pathname}${location.search}`, backgroundLocation: location },
+			});
+			return;
+		}
 		setActiveProfileId(profileId);
 	};
 
@@ -1526,18 +1592,22 @@ export function GridPage() {
 			const isActive = String(activeProfile?.profileId) === targetProfileId;
 			const displayName = (isActive ? activeProfile?.displayName : null) ?? card?.displayName ?? null;
 			const avatarMediaHash = (isActive ? activeProfile?.profileImageMediaHash : null) ?? null;
-			void hideProfileLocally(targetProfileId, displayName, avatarMediaHash);
-			toast.success(t("profile_details.hide_success"));
+			void hideProfile(apiFunctions, targetProfileId, displayName, avatarMediaHash).then((ok) => {
+				if (ok) toast.success(t("profile_details.hide_success"));
+				else toast.error(t("profile_details.hide_failed", { defaultValue: "Failed to hide profile." }));
+			});
 		},
-		[activeProfile, cards, t],
+		[activeProfile, apiFunctions, cards, t],
 	);
 
 	const handleUnhideProfile = useCallback(
 		(targetProfileId: string) => {
-			void unhideProfileLocally(targetProfileId);
-			toast.success(t("profile_details.unhide_success"));
+			void unhideProfile(apiFunctions, targetProfileId).then((ok) => {
+				if (ok) toast.success(t("profile_details.unhide_success"));
+				else toast.error(t("profile_details.unhide_failed", { defaultValue: "Failed to unhide profile." }));
+			});
 		},
-		[t],
+		[apiFunctions, t],
 	);
 
 	const handleToggleFavoriteProfile = useCallback(
@@ -1729,7 +1799,8 @@ export function GridPage() {
 						overrideGeohash: activeGeohash || undefined
 					});
 				}}
-				isDisabled={isLoadingCards || isLoadingMoreCards || isIncognitoActive}
+				// Dragging the map must pan it, not pull to refresh.
+				isDisabled={isLoadingCards || isLoadingMoreCards || isIncognitoActive || showGridMap}
 				refreshingLabel={t("browse_page.refreshing_feed")}
 			>
 				<header ref={headerRef} className="relative z-20 flex shrink-0 flex-col pb-2 pointer-events-none">
@@ -1812,19 +1883,16 @@ export function GridPage() {
 									<button
 										type="button"
 										onClick={(e) => { e.stopPropagation(); setIsDistanceSheetOpen(true); }}
-										title={t("browse_page.share_distance.title", { defaultValue: "Share Distance" })}
-										aria-label={t("browse_page.share_distance.title", { defaultValue: "Share Distance" })}
+										title={isMapFlagOn ? t("browse_page.location_preferences", { defaultValue: "Location Preferences" }) : t("browse_page.share_distance.title", { defaultValue: "Share Distance" })}
+										aria-label={isMapFlagOn ? t("browse_page.location_preferences", { defaultValue: "Location Preferences" }) : t("browse_page.share_distance.title", { defaultValue: "Share Distance" })}
 										className="group flex h-full shrink-0 items-center justify-center ps-3 pe-4 transition active:scale-90"
 									>
-										{distanceMode === "hidden"
-											? <EyeOffFilled
-													className={cn(
-														"h-4 w-4 transition-colors text-[var(--text-muted)]",
-														exploreLocation ? "group-hover:text-[var(--explore)]" : "group-hover:text-[var(--accent)]",
-													)}
-												/>
-											: <DistanceModeIcon className={`h-4 w-4 transition-colors ${exploreLocation ? "text-[var(--explore)]" : "text-[var(--accent)]"}`} />
-										}
+										<Settings2
+											className={cn(
+												"h-4 w-4 transition-colors",
+												exploreLocation ? "text-[var(--explore)]" : "text-[var(--accent)]",
+											)}
+										/>
 									</button>
 								</div>
 								<button
@@ -1933,6 +2001,18 @@ export function GridPage() {
 								className="pointer-events-none -mx-[var(--app-px)] -mb-15 overflow-x-auto pb-16 pt-2 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden rail:col-start-1 rail:row-start-2 rail:me-0"
 							>
 								<div className="pointer-events-auto flex min-w-max items-center gap-2 px-[var(--app-px)] ms-auto rail:pe-0">
+									{isMapFlagOn && (
+										// Leading, like Right Now's list/map toggle.
+										<IconTabs
+											activeTab={showGridMap ? "map" : "list"}
+											tabs={gridViewModeTabs}
+											onTabClick={changeGridViewMode}
+											color={exploreLocation ? "var(--explore)" : undefined}
+											contrastColor={exploreLocation ? "#fff" : undefined}
+										/>
+									)}
+									{/* Order only matters in the grid; the map shows everyone at once. */}
+									{!showGridMap && (
 									<button
 										type="button"
 										onClick={() => setIsSortSheetOpen(true)}
@@ -1953,6 +2033,7 @@ export function GridPage() {
 										</span>
 										{!isDefaultSort && (sortOptions.find((option) => option.value === sortBy)?.label ?? sortOptions[0].label)}
 									</button>
+									)}
 
 									<button
 										type="button"
@@ -2081,6 +2162,47 @@ export function GridPage() {
 					</div>
 				</header>
 
+				{showGridMap ? (
+					<div
+						// Full bleed like Right Now's map: up behind the header and, on
+						// desktop, on under the nav rail.
+						className="relative flex-1 min-h-0 rail:-ms-[var(--nav-rail-width)]"
+						style={{ marginTop: -headerBottom }}
+					>
+						<GridMap
+							cards={mapCards}
+							selectedProfileId={activeProfileId}
+							onSelectProfile={(profileId) => {
+								if (profileId) openProfileFromMap(profileId);
+							}}
+							explorePin={exploreLocation ? explorePin : null}
+							onPlacePin={exploreLocation ? handlePlaceExplorePin : undefined}
+							topInset={headerBottom}
+							leftInset={railWidth}
+							selfCard={selfCard}
+							spots={cruisingMap.spots}
+							selectedSpotId={cruisingMap.selectedSpotId}
+							checkedInSpotId={cruisingMap.checkIn?.spotId ?? null}
+							onSelectSpot={cruisingMap.setSelectedSpotId}
+							onCenterChange={cruisingMap.handleCenterChange}
+							selfMapPosition={selfMapPosition}
+							selfFuzzRadiusMeters={selfFuzzRadiusMeters}
+						/>
+						{/* Keeps the rail's tabs readable over the map. */}
+						<div
+							aria-hidden="true"
+							className="pointer-events-none absolute inset-y-0 start-0 z-10 hidden w-[calc(var(--nav-rail-width)+4rem)] rail:block"
+							style={{ background: "linear-gradient(to right, rgba(0,0,0,0.9) 0%, rgba(0,0,0,0.75) 55%, transparent 100%)" }}
+						/>
+						{mapCards.length === 0 && cruisingMap.spots.length === 0 ? (
+							<div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center px-8">
+								<p className="rounded-2xl border border-[var(--border)] bg-[var(--surface)]/90 px-4 py-3 text-center text-sm text-[var(--text-muted)] shadow-lg backdrop-blur">
+									{t("browse_page.map_empty", { defaultValue: "Nobody nearby shares their location on the map." })}
+								</p>
+							</div>
+						) : null}
+					</div>
+				) : (
 				<FeedScrollContainer ref={feedContainerRef}>
 					<div
 						className={cn(
@@ -2097,6 +2219,7 @@ export function GridPage() {
 							isIncognitoActive={isIncognitoActive}
 							onOpenLocation={() => setIsLocationOpen(true)}
 							onManagePrivacy={() => navigate("/settings/privacy")}
+							onRetry={() => void loadBrowseCards({ preferCache: false, showLoadingState: true })}
 							cards={sortedCards}
 							chatContactIndexByProfileId={
 								(SHOW_DEMO_DATA && showDebugInfo)
@@ -2128,6 +2251,7 @@ export function GridPage() {
 						/>
 					</div>
 				</FeedScrollContainer>
+				)}
 			</PullToRefreshContainer>
 
 			{/* First run: introduce the tile gestures once a location is set and
@@ -2141,6 +2265,8 @@ export function GridPage() {
 					}}
 				/>
 			)}
+
+			<CruisingMapOverlay state={cruisingMap} onOpenProfile={openProfileFromMap} onBeforeSuggest={() => setActiveProfileId(null)} />
 
 			{renderedTileMenu && (
 				<GridTileContextMenu
@@ -2166,7 +2292,12 @@ export function GridPage() {
 					}
 					onEditNickname={() => setNicknamePromptCard(renderedTileMenu.card)}
 					onHide={() => handleHideProfile(renderedTileMenu.card.profileId)}
-					onBlock={() => void handleBlockProfile(renderedTileMenu.card.profileId)}
+					onBlock={canBlockProfile(renderedTileMenu.card.isBlockable) ? () => void handleBlockProfile(renderedTileMenu.card.profileId) : undefined}
+					onShare={canShareProfiles ? () => requestProfileShare({
+						profileId: Number(renderedTileMenu.card.profileId),
+						name: getDisplayName(renderedTileMenu.card) || null,
+						mediaHash: renderedTileMenu.card.primaryImageUrl ? extractMediaHashFromUrl(renderedTileMenu.card.primaryImageUrl) : null,
+					}) : undefined}
 					onLocate={showLocate && renderedTileMenu.card.distanceMeters != null ? () => handleTriangleProfile(String(renderedTileMenu.card.profileId)) : undefined}
 					locateLabel={locateLabelFor(renderedTileMenu.card.profileId)}
 					// Your own tile: editing is the only thing to do with it.
@@ -2275,14 +2406,28 @@ export function GridPage() {
 
 			{isDistanceSheetOpen && (
 				<SelectSheet
-					title={t("browse_page.share_distance.title", { defaultValue: "Share Distance" })}
-					description={t("browse_page.share_distance.description", { defaultValue: "Choose how your distance appears to others." })}
-					value={myProfile ? distanceMode : null}
+					title={isMapFlagOn
+						? t("browse_page.location_preferences", { defaultValue: "Location Preferences" })
+						: t("browse_page.share_distance.title", { defaultValue: "Share Distance" })}
+					optionsLabel={isMapFlagOn ? t("browse_page.share_distance.title", { defaultValue: "Share Distance" }) : undefined}
+					description={isMapFlagOn ? undefined : t("browse_page.share_distance.description", { defaultValue: "Choose how your distance appears to others." })}
+					value={distanceMode}
 					options={distanceOptions}
-					onSelect={handleSelectDistanceMode}
+					onSelect={selectDistanceMode}
 					onClose={() => setIsDistanceSheetOpen(false)}
 					isDesktop={isDesktop}
 					disabled={!myProfile}
+					footer={isMapFlagOn ? (
+						// Second section, headed and aligned like the distance options above.
+						<div className="-mx-1 pb-2 pt-2">
+							<p className={SELECT_SHEET_SECTION_LABEL_CLASS}>
+								{t("privacy.map", { defaultValue: "Map" })}
+							</p>
+							<MapVisibilityControls variant="sheet" />
+							{/* Free Grind, flag cruising-spots: automatic check-in at spots. */}
+							<CruisingAutoCheckInSection />
+						</div>
+					) : undefined}
 					accentColor={exploreLocation ? "var(--explore)" : undefined}
 					accentContrast={exploreLocation ? "#fff" : undefined}
 				/>

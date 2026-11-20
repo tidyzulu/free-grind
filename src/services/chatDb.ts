@@ -19,6 +19,7 @@
  * for the same reason (no real BLOB write path from JS).
  */
 
+import { isGroupConversationId } from "../utils/groupChat";
 import Database from "@tauri-apps/plugin-sql";
 import { BaseDirectory, exists, rename } from "@tauri-apps/plugin-fs";
 import type { ConversationEntry, Message } from "../types/messages";
@@ -56,7 +57,7 @@ const LEGACY_CHAT_DB = `sqlite:${LEGACY_CHAT_DB_FILENAME}`;
 // on it. BUMP THIS whenever initChatDbSchema changes (new table, index,
 // column or data fix) — otherwise existing installs skip the setup and never
 // get the change; only fresh installs would.
-const CHAT_DB_SCHEMA_VERSION = 5;
+const CHAT_DB_SCHEMA_VERSION = 7;
 const SLOW_DB_OPEN_MS = 2_000;
 const SQLITE_LOCK_RETRY_DELAYS_MS = [30, 80, 180, 350] as const;
 
@@ -111,6 +112,7 @@ type ConversationRow = {
 	block_state: string | null;
 	last_seen_in_inbox_at: number | null;
 	messages_synced_activity_timestamp: number | null;
+	group_json: string | null;
 	created_at: number;
 	updated_at: number;
 };
@@ -128,6 +130,7 @@ type MessageRow = {
 	reply_to_message_id: string | null;
 	reply_preview_json: string | null;
 	reactions_json: string | null;
+	edited_at?: number | null;
 };
 
 type MediaFileRow = {
@@ -302,6 +305,13 @@ async function initChatDbSchema(db: Database): Promise<void> {
 		} catch {
 			// already migrated
 		}
+		// Added later: group chats (Free Grind server) — the inbox entry's
+		// `group` summary (groupId, memberCount, myRole); NULL for direct chats.
+		try {
+			await db.execute("ALTER TABLE conversations ADD COLUMN group_json TEXT");
+		} catch {
+			// already migrated
+		}
 		// One-time data fix: earlier builds didn't clear `pinned` when a
 		// conversation got archived (e.g. by a block), leaving pinned+archived
 		// rows stuck showing pinned with no toggle able to reach them (the
@@ -340,6 +350,14 @@ async function initChatDbSchema(db: Database): Promise<void> {
 		await db.execute(
 			"CREATE INDEX IF NOT EXISTS idx_messages_reply_to ON messages(reply_to_message_id)",
 		);
+		// Added later: when the sender last edited the message (Free Grind
+		// server, flag chat-message-edit); NULL if never. Not in backups: the
+		// next sync brings it back from the server.
+		try {
+			await db.execute("ALTER TABLE messages ADD COLUMN edited_at INTEGER");
+		} catch {
+			// already migrated
+		}
 
 		await db.execute(`
 			CREATE TABLE IF NOT EXISTS media_files (
@@ -833,6 +851,7 @@ function rowToStoredConversation(row: ConversationRow): StoredConversation {
 			muted: Boolean(row.muted),
 			pinned: Boolean(row.pinned),
 			favorite: Boolean(row.favorite),
+			group: row.group_json ? (JSON.parse(row.group_json) as ConversationEntry["data"]["group"]) : null,
 		},
 	};
 
@@ -854,8 +873,10 @@ function rowToStoredConversation(row: ConversationRow): StoredConversation {
 
 export async function upsertConversation(
 	entry: ConversationEntry,
-	otherProfileId: string | null,
+	otherProfileIdInput: string | null,
 ): Promise<void> {
+	// Groups have no single other profile (block/archive logic keys on it).
+	const otherProfileId = isGroupConversationId(entry.data.conversationId) ? null : otherProfileIdInput;
 	const db = await getDb();
 	const now = Date.now();
 
@@ -866,9 +887,10 @@ export async function upsertConversation(
 				conversation_id, other_profile_id, name, participants_json,
 				last_activity_timestamp, unread_count, pinned, muted, favorite,
 				preview_json, archived, archived_reason, archived_at,
-				last_seen_in_inbox_at, created_at, updated_at
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 0, NULL, NULL, NULL, $11, $11)
+				last_seen_in_inbox_at, group_json, created_at, updated_at
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 0, NULL, NULL, NULL, $12, $11, $11)
 			ON CONFLICT(conversation_id) DO UPDATE SET
+				group_json = excluded.group_json,
 				other_profile_id = excluded.other_profile_id,
 				name = excluded.name,
 				participants_json = excluded.participants_json,
@@ -892,9 +914,41 @@ export async function upsertConversation(
 				entry.data.favorite ? 1 : 0,
 				entry.data.preview ? JSON.stringify(entry.data.preview) : null,
 				now,
+				entry.data.group ? JSON.stringify(entry.data.group) : null,
 			],
 		);
 	});
+}
+
+/** Sets a conversation's inbox preview and last activity (e.g. a local system line). */
+export async function setConversationPreview(
+	conversationId: string,
+	preview: NonNullable<ConversationEntry["data"]["preview"]>,
+	activityTimestamp: number,
+): Promise<void> {
+	const db = await getDb();
+	await executeWithLockRetry(db, "set-conversation-preview", async () => {
+		await db.execute(
+			"UPDATE conversations SET preview_json = $1, last_activity_timestamp = MAX(COALESCE(last_activity_timestamp, 0), $2), updated_at = $3 WHERE conversation_id = $4",
+			[JSON.stringify(preview), activityTimestamp, Date.now(), conversationId],
+		);
+	});
+}
+
+/**
+ * An edited message (Free Grind server, flag chat-message-edit) that is the
+ * conversation's inbox preview: the stored preview takes its new text. Leaves
+ * activity and order alone — an edit isn't new activity.
+ */
+export async function updatePreviewTextForEditedMessage(
+	conversationId: string,
+	messageId: string,
+	text: string,
+): Promise<void> {
+	const stored = await getConversation(conversationId);
+	const preview = stored?.entry.data.preview;
+	if (!stored || !preview || preview.messageId !== messageId || preview.text === text) return;
+	await setConversationPreview(conversationId, { ...preview, text }, stored.entry.data.lastActivityTimestamp ?? 0);
 }
 
 /**
@@ -1695,6 +1749,7 @@ function rowToStoredMessage(row: MessageRow): StoredMessage {
 		replyToMessage: row.reply_to_message_id,
 		replyPreview: row.reply_preview_json ? JSON.parse(row.reply_preview_json) : null,
 		localHistory: Boolean(row.local_history),
+		editedAt: row.edited_at ?? null,
 	};
 }
 
@@ -1725,8 +1780,8 @@ export async function upsertMessages(
 				INSERT INTO messages (
 					message_id, conversation_id, sender_id, timestamp, type, chat1_type,
 					body_json, unsent, local_history, reply_to_message_id,
-					reply_preview_json, reactions_json, created_at, updated_at
-				) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 0, $9, $10, $11, $12, $12)
+					reply_preview_json, reactions_json, created_at, updated_at, edited_at
+				) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 0, $9, $10, $11, $12, $12, $13)
 				ON CONFLICT(message_id) DO UPDATE SET
 					sender_id = excluded.sender_id,
 					timestamp = excluded.timestamp,
@@ -1737,7 +1792,9 @@ export async function upsertMessages(
 					reply_to_message_id = excluded.reply_to_message_id,
 					reply_preview_json = excluded.reply_preview_json,
 					reactions_json = excluded.reactions_json,
-					updated_at = excluded.updated_at
+					updated_at = excluded.updated_at,
+					-- An edit never goes back; a copy without the field keeps it.
+					edited_at = COALESCE(excluded.edited_at, messages.edited_at)
 				`,
 				[
 					message.messageId,
@@ -1752,6 +1809,7 @@ export async function upsertMessages(
 					message.replyPreview != null ? JSON.stringify(message.replyPreview) : null,
 					JSON.stringify(message.reactions ?? []),
 					now,
+					message.editedAt ?? null,
 				],
 			);
 		}
@@ -1763,6 +1821,10 @@ export type SystemMessageType =
 	| "SystemUnblocked"
 	| "SystemBlockedBySelf"
 	| "SystemUnblockedBySelf"
+	// We were removed from a group chat, or it was deleted (groupChatStore).
+	| "SystemGroupRemoved"
+	// We left a group chat; it stays as an archive until deleted.
+	| "SystemGroupLeft"
 	// Inserted by the backup restore (backup.rs insert_restored_markers), never
 	// here: ends a conversation restored from another profile's backup.
 	| "SystemRestored";
@@ -2388,6 +2450,56 @@ export async function deleteStaleDrawerMediaFiles(currentMediaKeys: string[]): P
 }
 
 /**
+ * Expiration type of each album's share as its newest received album message
+ * last carried it ("ONCE", "TEN_MINUTES", … or the numeric form), for albums
+ * whose list entry has no such field. Albums without a stored message, or
+ * whose message has no expirationType, are left out.
+ */
+export async function getAlbumShareExpirationTypes(
+	albumIds: number[],
+	userId: number | null,
+): Promise<Map<number, string | number>> {
+	const result = new Map<number, string | number>();
+	if (albumIds.length === 0) return result;
+	const db = await getDb();
+	const placeholders = albumIds.map((_, i) => `$${i + 2}`).join(", ");
+	const rows = await db.select<{ album_id: number; expiration_type: string | number | null }[]>(
+		`
+		SELECT CAST(json_extract(body_json, '$.albumId') AS INTEGER) AS album_id,
+			json_extract(body_json, '$.expirationType') AS expiration_type
+		FROM messages
+		WHERE type IN ('Album', 'ExpiringAlbum', 'ExpiringAlbumV2')
+			AND unsent = 0
+			AND sender_id != $1
+			AND CAST(json_extract(body_json, '$.albumId') AS INTEGER) IN (${placeholders})
+		ORDER BY timestamp DESC
+		`,
+		[userId ?? -1, ...albumIds],
+	);
+	for (const row of rows) {
+		// Newest first: the first one seen per album wins.
+		if (row.expiration_type == null || result.has(Number(row.album_id))) continue;
+		result.set(Number(row.album_id), row.expiration_type);
+	}
+	return result;
+}
+
+/**
+ * SQL condition (on media_files `mf` LEFT/JOINed with messages `m`) that
+ * drops what only archive mode keeps: media of unsent messages and of
+ * view-limited photos/videos (by flag, and by message type for rows stored
+ * before the flag caught used-up views).
+ */
+const LIVE_MEDIA_ONLY_SQL = `
+	AND mf.view_once = 0
+	AND (m.message_id IS NULL OR (
+		m.unsent = 0
+		AND COALESCE(m.type, '') NOT IN ('ExpiringImage', 'PrivateVideo')
+		AND COALESCE(m.chat1_type, '') NOT IN ('expiring_image', 'expiring_video', 'private_video')
+		AND NOT (m.type = 'Video' AND COALESCE(json_extract(m.body_json, '$.maxViews'), json_extract(m.body_json, '$.viewsRemaining'), 999999) < 999999)
+	))`;
+
+/**
  * All successfully-cached image/video media for a conversation, newest
  * first — the local, always-available backing for the "received media"
  * panel (chatDb is the single source there, not the live API, since the
@@ -2400,6 +2512,7 @@ export async function deleteStaleDrawerMediaFiles(currentMediaKeys: string[]): P
  */
 export async function getMediaFilesForConversation(
 	conversationId: string,
+	options?: { liveOnly?: boolean },
 ): Promise<StoredMediaFileWithSender[]> {
 	const db = await getDb();
 	const rows = await db.select<(MediaFileRow & { sender_id: number | null })[]>(
@@ -2409,6 +2522,7 @@ export async function getMediaFilesForConversation(
 		WHERE mf.conversation_id = $1
 			AND mf.fetch_status = 'ok'
 			AND mf.kind IN ('image', 'video')
+			${options?.liveOnly ? LIVE_MEDIA_ONLY_SQL : ""}
 		ORDER BY COALESCE(m.timestamp, mf.fetched_at) DESC
 		`,
 		[conversationId],
@@ -2423,7 +2537,10 @@ export async function getMediaFilesForConversation(
  * reply-quote preview captures) is skipped, since its sender is unknown and
  * could just as well be the user's own.
  */
-export async function getAllReceivedChatVideos(userId: number | null): Promise<StoredChatVideo[]> {
+export async function getAllReceivedChatVideos(
+	userId: number | null,
+	options?: { liveOnly?: boolean },
+): Promise<StoredChatVideo[]> {
 	const db = await getDb();
 	const rows = await db.select<
 		{ media_key: string; conversation_id: string; mime_type: string | null; sender_id: number; timestamp: number }[]
@@ -2447,6 +2564,7 @@ export async function getAllReceivedChatVideos(userId: number | null): Promise<S
 				LIMIT 1
 			)
 			${userId != null ? "AND m.sender_id != $1" : ""}
+			${options?.liveOnly ? LIVE_MEDIA_ONLY_SQL : ""}
 		ORDER BY timestamp DESC
 		`,
 		userId != null ? [userId] : [],

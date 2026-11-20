@@ -18,7 +18,7 @@ export async function saveTextFile(fileName: string, content: string, mimeType: 
 	if (isAndroid()) {
 		// Open-stream + writer: a direct AndroidFs.writeFile(uri, bytes) on a
 		// freshly-created pending MediaStore entry was unreliable on-device.
-		const uri = await AndroidFs.createNewPublicFile(AndroidPublicGeneralPurposeDir.Download, `FreeGrind/${fileName}`, mimeType, {
+		const uri = await AndroidFs.createNewPublicFile(AndroidPublicGeneralPurposeDir.Download, `${__APP_FOLDER__}/${fileName}`, mimeType, {
 			isPending: true,
 		});
 		try {
@@ -41,6 +41,6 @@ export async function saveTextFile(fileName: string, content: string, mimeType: 
 	}
 
 	const baseDir = isIos() ? BaseDirectory.Document : BaseDirectory.Download;
-	await mkdir("FreeGrind", { baseDir, recursive: true });
-	await writeFile(`FreeGrind/${fileName}`, bytes, { baseDir });
+	await mkdir(__APP_FOLDER__, { baseDir, recursive: true });
+	await writeFile(`${__APP_FOLDER__}/${fileName}`, bytes, { baseDir });
 }

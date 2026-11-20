@@ -115,6 +115,31 @@ export function MessageSquareQuoteFilled(props: IconProps) {
 	);
 }
 
+/** Two people with a plus in front: "new group". The person in front is cut
+ * out of the one behind with a gap, like lucide's users icon, filled. */
+export function UsersPlusFilled(props: IconProps) {
+	const id = useMaskId();
+	const front = (
+		<>
+			<circle cx="13.5" cy="8.5" r="3.5" />
+			<path d="M19.5 21v-.5a4.5 4.5 0 0 0-4.5-4.5h-3a4.5 4.5 0 0 0-4.5 4.5v.5z" />
+		</>
+	);
+	return (
+		<FilledSvg {...props}>
+			<CutoutMask id={id}>
+				<g strokeWidth={4.5}>{front}</g>
+			</CutoutMask>
+			<g mask={`url(#${id})`}>
+				<circle cx="18.5" cy="6" r="3" />
+				<path d="M23 19.5v-.5a4.5 4.5 0 0 0-4.5-4.5h-2v5z" />
+			</g>
+			{front}
+			<path d="M4 6v5M1.5 8.5h5" fill="none" />
+		</FilledSvg>
+	);
+}
+
 export function UserFilled(props: IconProps) {
 	return (
 		<FilledSvg {...props}>

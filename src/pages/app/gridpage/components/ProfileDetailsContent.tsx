@@ -61,6 +61,7 @@ import { proxyMediaUrl } from "../../../../utils/mediaProxy";
 import { haptic } from "../../../../utils/haptics";
 import { PRIVACY_BLUR_CLASS, PRIVACY_BLUR_TRANSITION_CLASS, useProfilePhotoPrivacy } from "../../../../hooks/useProfilePhotoPrivacy";
 import { useBlurReveal } from "../../../../hooks/useBlurReveal";
+import { ProfileNetworkSection } from "../../profile-network/ProfileNetworkSection";
 
 type LabelMap = Record<number, string>;
 
@@ -140,7 +141,8 @@ type ProfileDetailsContentProps = {
 	onPhotoIndexChange?: (index: number) => void;
 	openPhotoViewer: (index: number) => void;
 	activeProfileName: string;
-	estimatedCreatedAt: string;
+	/** "Joined …" line (real or estimated date); null hides it. */
+	accountCreatedLabel: string | null;
 	travelPlans?: TravelPlan[];
 	profileStatusLabel: string;
 	profileStatusLevel: "online" | "ending_soon" | "recent" | "offline";
@@ -182,6 +184,8 @@ type ProfileDetailsContentProps = {
 	/** The content sits on a native card (the desktop modal) rather than the page. */
 	isOnCard?: boolean;
 	isChatLinkedProfile?: boolean;
+	/** Own profile: opens edit mode at the linked profiles section. */
+	onManageLinkedProfiles?: () => void;
 };
 
 export function ProfileDetailsContent({
@@ -194,7 +198,7 @@ export function ProfileDetailsContent({
 	onPhotoIndexChange,
 	openPhotoViewer,
 	activeProfileName,
-	estimatedCreatedAt,
+	accountCreatedLabel,
 	travelPlans,
 	profileStatusLabel,
 	profileStatusLevel,
@@ -234,6 +238,7 @@ export function ProfileDetailsContent({
 	isPreview = false,
 	isOnCard = false,
 	isChatLinkedProfile = false,
+	onManageLinkedProfiles,
 }: ProfileDetailsContentProps) {
 	const { t, i18n } = useTranslation();
 	// Only chat partners get their photos locally cached (see avatarStore.ts) —
@@ -914,6 +919,9 @@ export function ProfileDetailsContent({
 				</div>
 			)}
 
+			{/* Linked profiles + reputation index (Free Grind server, flag profile-reputation). */}
+			<ProfileNetworkSection profileId={String(activeProfile.profileId)} isPreview={isPreview} onManage={onManageLinkedProfiles} />
+
 			<div className="px-3">
 				<p className="mb-2 text-xs font-semibold uppercase tracking-[0.1em] text-[var(--text-muted)]">
 					{t("profile_details.account_info")}
@@ -935,10 +943,12 @@ export function ProfileDetailsContent({
 						<Hash className="h-4 w-4 shrink-0 text-[var(--text-muted)]" />
 						<p className="text-sm text-[var(--text-muted)] select-text">{activeProfile.profileId}</p>
 					</button>
-					<div className="flex items-center gap-2.5">
-						<Calendar className="h-4 w-4 shrink-0 text-[var(--text-muted)]" />
-						<p className="text-sm text-[var(--text-muted)]">{t("profile_details.estimated_joined", { date: estimatedCreatedAt })}</p>
-					</div>
+					{accountCreatedLabel && (
+						<div className="flex items-center gap-2.5">
+							<Calendar className="h-4 w-4 shrink-0 text-[var(--text-muted)]" />
+							<p className="text-sm text-[var(--text-muted)]">{accountCreatedLabel}</p>
+						</div>
+					)}
 					{typeof activeProfile.lastUpdatedTime === "number" && activeProfile.lastUpdatedTime > 0 && (
 						<div className="flex items-center gap-2.5">
 							<Pencil className="h-4 w-4 shrink-0 text-[var(--text-muted)]" />

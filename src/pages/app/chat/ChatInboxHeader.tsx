@@ -1,6 +1,6 @@
 import { Loader2, Search, X } from "lucide-react";
 import { SlidersHorizontal as PhosphorSlidersHorizontal } from "@phosphor-icons/react";
-import { ImagesFilled, PillFilled, VideosFilled } from "../../../components/icons/FilledIcons";
+import { ImagesFilled, PillFilled, UsersPlusFilled, VideosFilled } from "../../../components/icons/FilledIcons";
 import { type CSSProperties, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "react-router-dom";
@@ -40,6 +40,10 @@ export type ChatInboxHeaderProps = {
 	onSetFiltersDraft: (v: ChatFiltersDraft) => void;
 	onToggleQuickFilter: (key: InboxQuickFilterKey) => void;
 	onClearInboxFilters: () => void;
+	/** Group chats (flag group-chats): set only while they're available. */
+	onCreateGroup?: () => void;
+	/** Open group invites, shown as a badge on the group button. */
+	groupInviteCount?: number;
 };
 
 /** Small "Inbox · Syncing 42%" caption under the title — the mobile-only,
@@ -93,6 +97,8 @@ export function ChatInboxHeader({
 	onSetFiltersDraft,
 	onToggleQuickFilter,
 	onClearInboxFilters,
+	onCreateGroup,
+	groupInviteCount = 0,
 }: ChatInboxHeaderProps) {
 	const { t } = useTranslation();
 	const { inboxQuickFilters } = usePreferences();
@@ -130,6 +136,21 @@ export function ChatInboxHeader({
 						</div>
 
 						<div className="-my-2 flex shrink-0 items-center gap-0.5">
+							{!isSearchOpen && onCreateGroup && (
+								<button
+									type="button"
+									onClick={onCreateGroup}
+									className="header-icon-btn relative rounded-xl p-2 text-[var(--text-muted)] transition hover:text-[var(--text)]"
+									aria-label={t("group_chat.create_title", { defaultValue: "New group" })}
+								>
+									<UsersPlusFilled className="h-5 w-5" />
+									{groupInviteCount > 0 && (
+										<span className="absolute end-1 top-1 flex h-4 min-w-[16px] items-center justify-center rounded-full bg-[var(--accent)] px-1 text-[9px] font-bold text-[var(--accent-contrast)]">
+											{groupInviteCount}
+										</span>
+									)}
+								</button>
+							)}
 							{!isSearchOpen && showSexualHealth && (
 								<button
 									type="button"

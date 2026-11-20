@@ -8,6 +8,7 @@
  * the same), so sending one image to several chats uploads it only once.
  */
 
+import type { ChatSendTarget } from "../utils/groupChat";
 import type { UploadProgress } from "./stagedVideoUpload";
 import toast from "react-hot-toast";
 
@@ -19,7 +20,7 @@ import {
 	extractImageHashFromSignedUrl,
 	getMediaCaptureTarget,
 	getVideoDurationMs,
-	videoMessageViews,
+	videoMessageSend,
 } from "../pages/app/chat/chatUtils";
 import { MAX_CHAT_MEDIA_BYTES } from "./stagedVideoUpload";
 import { resolveVideoEdit } from "./videoEdit";
@@ -88,7 +89,7 @@ export async function uploadChatMediaFile(
 }
 
 /**
- * Sends already-uploaded media to `targetProfileId` and captures it into
+ * Sends already-uploaded media to `sendTo` and captures it into
  * chatDb right away — otherwise the send has no media_files row until the
  * next reload, so it's missing from the "Sent" media tab and the full-screen
  * carousel until then.
@@ -96,7 +97,8 @@ export async function uploadChatMediaFile(
 export async function sendUploadedChatMedia(
 	api: Pick<ApiFunctions, "sendMessage">,
 	uploaded: UploadedChatMedia,
-	targetProfileId: number | string,
+	/** A profile id (direct chat) or an explicit target (groups). */
+	sendTo: number | string | ChatSendTarget,
 	options: { maxViews: number; replyToMessageId?: string | null },
 ): Promise<Message> {
 	const { isVideo } = uploaded;
@@ -104,17 +106,17 @@ export async function sendUploadedChatMedia(
 	const imageUrl = uploaded.url;
 	const imageHash = imageUrl ? uploaded.mediaHash || extractImageHashFromSignedUrl(imageUrl) : uploaded.mediaHash;
 	const isOnceImage = isImage && options.maxViews === 1;
-	// Videos are always a regular Video, "unlimited" included (see videoMessageViews).
-	const videoViews = videoMessageViews(options.maxViews);
-	const messageType = isVideo ? "Video" : isOnceImage ? "ExpiringImage" : "Image";
+	// "Unlimited" is a NonExpiringVideo or a MAX_VIDEO_VIEWS Video (see videoMessageSend).
+	const video = videoMessageSend(options.maxViews);
+	const messageType = isVideo ? video.type : isOnceImage ? "ExpiringImage" : "Image";
 	const sentMessage = await api.sendMessage({
 		type: messageType,
-		target: { type: "Direct", targetId: Number(targetProfileId) },
+		target: typeof sendTo === "object" ? sendTo : { type: "Direct", targetId: Number(sendTo) },
 		body: {
 			mediaId: uploaded.mediaId,
 			width: null,
 			height: null,
-			...(isVideo ? { viewsRemaining: videoViews, maxViews: videoViews } : {}),
+			...(isVideo ? video.body : {}),
 			...(isOnceImage ? { viewsRemaining: 1, maxViews: 1, duration: 10 } : {}),
 			...(imageUrl ? { url: imageUrl } : {}),
 			...(isImage && imageHash ? { imageHash } : {}),
@@ -130,7 +132,8 @@ export async function sendUploadedChatMedia(
 			url: target.url,
 			conversationId: sentMessage.conversationId,
 			messageId: sentMessage.messageId,
-			viewOnce: target.viewOnce,
+			// Our own media: kept even with archive mode off (see chatArchiveMode).
+			viewOnce: false,
 		});
 	}
 	return sentMessage;

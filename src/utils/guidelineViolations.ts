@@ -459,8 +459,14 @@ const BAN_REASONS: Record<string, BanReasonEntry> = {
 
 export const BAN_APPEAL_URL = "https://web.grindr.com/ban-appeal";
 
+/** Grindr's appeal page. */
+export function banAppealUrl(): string {
+	return BAN_APPEAL_URL;
+}
+
 export function openBanAppeal() {
-	openUrl(BAN_APPEAL_URL).catch(() => window.open(BAN_APPEAL_URL, "_blank"));
+	const url = banAppealUrl();
+	openUrl(url).catch(() => window.open(url, "_blank"));
 }
 
 // Timed bans only offer an appeal for these sub-reasons, as in the official app.

@@ -258,7 +258,7 @@ export function SettingsDataPage() {
 				toast.error(t("data_backup.encounters_export_empty", { defaultValue: "No logged encounters to export." }));
 				return;
 			}
-			const fileName = `free-grind-encounters-${new Date().toISOString().slice(0, 10)}.ics`;
+			const fileName = `${__APP_SLUG__}-encounters-${new Date().toISOString().slice(0, 10)}.ics`;
 			await saveTextFile(fileName, encountersToIcs(encounters), "text/calendar");
 
 			toast.success(
@@ -266,9 +266,9 @@ export function SettingsDataPage() {
 					? t("data_backup.encounters_export_success", { defaultValue: "Encounters exported." })
 					: isIos()
 						? t("data_backup.encounters_export_success_ios", {
-								defaultValue: "Encounters exported. Find it in the Files app under On My iPhone/iPad → Free Grind.",
+								defaultValue: "Encounters exported. Find it in the Files app under On My iPhone/iPad → {{appName}}.",
 							})
-						: t("data_backup.encounters_export_success_desktop", { defaultValue: "Encounters exported to Downloads/FreeGrind." }),
+						: t("data_backup.encounters_export_success_desktop", { defaultValue: "Encounters exported to Downloads/{{appFolder}}." }),
 			);
 		} catch (error) {
 			toast.error(getErrorMessage(error, t("data_backup.encounters_export_failed", { defaultValue: "Failed to export encounters." })));
@@ -563,7 +563,7 @@ export function SettingsDataPage() {
 								{t("local_backups.sheet_title", { defaultValue: "Choose a backup" })}
 							</p>
 							<p className="mt-0.5 text-xs leading-snug text-[var(--text-muted)]">
-								{t("local_backups.sheet_desc", { defaultValue: "These backups were found in Downloads/FreeGrind on this device." })}
+								{t("local_backups.sheet_desc", { defaultValue: "These backups were found in Downloads/{{appFolder}} on this device." })}
 							</p>
 						</div>
 						<SheetCloseButton disabled={isImporting} />

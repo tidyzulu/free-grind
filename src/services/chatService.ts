@@ -50,7 +50,9 @@ import { ApiFunctionError, assertSuccess, mediaUploadErrorToApiFunctionError, pa
 import { sendViaRealtime } from "./chatRealtime";
 import { MAX_CHAT_MEDIA_BYTES, uploadStagedVideo } from "./stagedVideoUpload";
 import { assertUploadFits, stagedEdit, uploadProgressReporter } from "./videoReencode";
-import { isPaywallError, withEntitlementBypass } from "./entitlementBypass";
+import { isPaywallError } from "./paywall";
+import { retryPaidAction } from "../grindr-workarounds";
+import { expiringKindOfMessage, markExpiringAllowanceStale } from "./expiringAllowance";
 
 export { ApiFunctionError as ChatApiError };
 
@@ -355,6 +357,26 @@ export function createChatService(
 				.parse(await parseJsonSafe(response)).message;
 		},
 
+		/**
+		 * Refresh messages: current bodies of the given messages (oldest first;
+		 * ids that don't exist are left out). Used for dynamic (album) messages
+		 * after chat.v1.refresh_dynamic.
+		 */
+		async refreshMessages(params: {
+			conversationId: string;
+			messageIds: string[];
+		}): Promise<Message[]> {
+			if (!params.messageIds.length) return [];
+			const response = await fetchRest(
+				`/v4/chat/conversation/${params.conversationId}/message-by-id`,
+				{ method: "POST", body: { messageIds: params.messageIds } },
+			);
+			await assertSuccess(response, t("chat.errors.load_messages"));
+			return z
+				.object({ messages: z.array(messageSchema) })
+				.parse(await parseJsonSafe(response)).messages;
+		},
+
 		async sendMessage(payload: SendMessagePayload): Promise<Message> {
 			const safePayload = sendMessagePayloadSchema.parse(payload);
 			const send = async () => {
@@ -377,16 +399,14 @@ export function createChatService(
 					return messageSchema.parse(await parseJsonSafe(response));
 				}
 			};
-			const reason =
-				safePayload.type === "ExpiringImage"
-					? t("entitlement_bypass.reason_expiring_photo", {
-							defaultValue:
-								"Daily expiring photo limit reached. Sending more requires a Grindr subscription.",
-						})
-					: t("entitlement_bypass.reason_message", {
-							defaultValue: "Sending this message requires a Grindr subscription.",
-						});
-			return withEntitlementBypass(reason, send);
+			const expiringKind = expiringKindOfMessage(safePayload.type, safePayload.body);
+			const sent = retryPaidAction(
+				expiringKind === "pics" ? "expiring_photo" : expiringKind === "videos" ? "expiring_video" : "message",
+				send,
+			);
+			// Sent or refused, the counters shown next to the expiry toggles changed.
+			if (expiringKind) void sent.then(() => markExpiringAllowanceStale(expiringKind), () => markExpiringAllowanceStale(expiringKind));
+			return sent;
 		},
 
 		async sendText(payload: SendTextPayload): Promise<Message> {
@@ -453,6 +473,8 @@ export function createChatService(
 		},
 
 		async markRead(conversationId: string, messageId: string): Promise<void> {
+			// An open group invite's inbox row (messageId "invite:<groupId>") has nothing to read yet.
+			if (messageId.startsWith("invite:")) return;
  		// --- READ RECEIPTS CHECK ---
  		if (isReadReceiptsHidden(conversationId) || getIncognitoMode()) {
  			// Silently do nothing server-side. They will never know you read it!
@@ -471,18 +493,66 @@ export function createChatService(
 
 		async unsendMessage(payload: ChatMessageMutation) {
 			const safePayload = chatMessageMutationSchema.parse(payload);
-			await withEntitlementBypass(
-				t("entitlement_bypass.reason_unsend", {
-					defaultValue: "Unsending a message requires a Grindr subscription.",
-				}),
-				async () => {
-					const response = await fetchRest("/v4/chat/message/unsend", {
-						method: "POST",
-						body: safePayload,
-					});
-					await assertSuccess(response, t("chat.errors.unsend_failed"));
-				},
-			);
+			try {
+				await retryPaidAction(
+					"unsend",
+					async () => {
+						const response = await fetchRest("/v4/chat/message/unsend", {
+							method: "POST",
+							body: safePayload,
+						});
+						await assertSuccess(response, t("chat.errors.unsend_failed"));
+					},
+				);
+			} catch (error) {
+				// The upstream 402 bodies carry no message, so they'd surface as
+				// the generic "Failed to unsend". Name the actual reason instead:
+				// TieredFeatureProblemResponse (featureValue UnsentMessage) or
+				// EntitlementLimitProblemResponse (daily allowance used up).
+				if (error instanceof ApiFunctionError && isPaywallError(error)) {
+					const type = (error.payload as { type?: unknown }).type;
+					const key = type === "urn:gr:err:entitlement_limit" ? "chat.errors.unsend_daily_limit" : "chat.errors.unsend_not_available";
+					throw new ApiFunctionError(t(key), error.status, error.payload);
+				}
+				throw error;
+			}
+		},
+
+		/**
+		 * POST /v4/chat/message/edit (Free Grind server, flag chat-message-edit):
+		 * replaces the text of one of my Text messages. Answers the updated
+		 * message (with `editedAt`); the other side gets it as chat.v1.message_sent.
+		 */
+		async editMessage(payload: ChatMessageMutation & { text: string }): Promise<Message> {
+			const { text, ...mutation } = payload;
+			const safePayload = chatMessageMutationSchema.parse(mutation);
+			const response = await fetchRest("/v4/chat/message/edit", {
+				method: "POST",
+				body: { ...safePayload, body: { text } },
+			});
+			// Free Grind server: past chat.edit.maxAgeMinutes.
+			if (response.status === 403) throw new ApiFunctionError(t("chat.errors.edit_window_expired"), 403, await parseJsonSafe(response));
+			await assertSuccess(response, t("chat.errors.edit_failed"));
+			const parsed = z.object({ message: messageSchema }).safeParse(await parseJsonSafe(response));
+			if (!parsed.success) throw new ApiFunctionError(t("chat.errors.edit_failed"), response.status, null);
+			return parsed.data.message;
+		},
+
+		/**
+		 * POST /v5/chat/translate: the server translates one message. Paid on
+		 * Grindr's server (402); a Free Grind server answers 503 when it has no
+		 * translation set up.
+		 */
+		async translateChatMessage(payload: { conversationId: string; messageId: string; targetLanguageCode: string }): Promise<string> {
+			const safePayload = chatMessageMutationSchema.extend({ targetLanguageCode: z.string().min(2) }).parse(payload);
+			const response = await fetchRest("/v5/chat/translate", {
+				method: "POST",
+				body: safePayload,
+			});
+			await assertSuccess(response, t("auto_translate.error_server_failed"));
+			const parsed = z.object({ translatedText: z.string() }).safeParse(await parseJsonSafe(response));
+			if (!parsed.success) throw new ApiFunctionError(t("auto_translate.error_server_failed"), response.status, null);
+			return parsed.data.translatedText;
 		},
 
 		async deleteMessage(payload: ChatMessageMutation) {
@@ -715,31 +785,16 @@ export function createChatService(
 				);
 				await assertSuccess(response, t("chat.errors.album_share_failed"));
 			};
-			// Sharing an *expiring* album is paid-only and the Honduras handover
-			// doesn't unlock it, so don't offer the bypass for that — show a clear
-			// paid-only message instead. Non-expiring (INDEFINITE) shares can
-			// still be bypassed.
+			// An *expiring* share also uses up the expiring-album allowance.
 			const isExpiringShare = safePayload.profiles.some(
 				(profile) => profile.expirationType !== "INDEFINITE" && profile.expirationType !== 0,
 			);
 			if (isExpiringShare) {
-				await share().catch((error: unknown) => {
-					if (isPaywallError(error)) {
-						throw new Error(
-							t("entitlement_bypass.expiring_album_no_bypass", {
-								defaultValue:
-									"Expiring albums are a paid Grindr feature, and there's no bypass for them.",
-							}),
-						);
-					}
-					throw error;
-				});
+				await retryPaidAction("expiring_album_share", share).finally(() => markExpiringAllowanceStale("albums"));
 				return;
 			}
-			await withEntitlementBypass(
-				t("entitlement_bypass.reason_album_share", {
-					defaultValue: "Sharing this album requires a Grindr subscription.",
-				}),
+			await retryPaidAction(
+				"album_share",
 				share,
 			);
 		},

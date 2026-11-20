@@ -1,5 +1,5 @@
 import { MapPinFilled } from "../../../components/icons/FilledIcons";
-import { Album, Ban, CircleAlert, Copy, Download, Eye, History, Hourglass, ImagePlay, Images, Languages, Loader2, Lock, MessageCircleQuestion, MessageSquarePlus, Mic, MoreVertical, PhoneOff, Play, Repeat2, Reply, RotateCw, ShieldCheck, Trash2, Undo2, Video, VideoOff, ImageOff } from "lucide-react";
+import { Album, Ban, CircleAlert, Copy, Download, Eye, History, ImagePlay, Images, Languages, Loader2, Lock, MessageCircleQuestion, MessageSquarePlus, Mic, MoreVertical, Pencil, PhoneOff, Play, Repeat2, Reply, RotateCw, ShieldCheck, Trash2, Undo2, Link2, UserRound, UsersRound, Video, VideoOff, ImageOff } from "lucide-react";
 import { sentMediaEcho } from "./sentMediaEchoes";
 import { TakenOnGrindrBadge } from "./TakenOnGrindrBadge";
 import { createPortal } from "react-dom";
@@ -21,6 +21,7 @@ import type { ConversationEntry, Message } from "../../../types/messages";
 import type { AlbumMediaCount, LocalUploadProgress, UiMessage } from "../../../types/chat-page";
 import { useLocalMediaCache } from "../../../hooks/useLocalMediaCache";
 import { getCachedMediaUri, getMessageFallbackMediaKey } from "../../../services/mediaStore";
+import { useChatArchiveEnabled } from "../../../services/chatArchiveMode";
 import {
 	getMessagePosterKey,
 	getVideoPoster,
@@ -49,6 +50,7 @@ import {
 } from "../../../utils/blockConfirm";
 import { formatRelativeTime } from "../../../utils/relativeTime";
 import {
+	getParticipantAvatarUrl,
 	formatDateHeader,
 	formatDateTime24,
 	formatFullDateTime,
@@ -60,6 +62,7 @@ import {
 	getMediaCaptureTarget,
 	getReplyImageHashTarget,
 	getAlbumContentReplyTarget,
+	getProfileLink,
 	getMessageImageCreatedAt,
 	getGaymojiUrl,
 	getMessageImageUrl,
@@ -68,7 +71,10 @@ import {
 	getMessageText,
 	getMessageVideoUrl,
 	getVideoCallStatusLabel,
+	getViewsRemaining,
 	isLocalClientMessageId,
+	isOnceAlbumShareOpened,
+	isViewLimitedLocked,
 	MAX_VIDEO_VIEWS,
 	stripReplyQuotePrefix,
 } from "./chatUtils";
@@ -77,7 +83,16 @@ import { haptic } from "../../../utils/haptics";
 import { menuTransitionStyle, usePresence } from "../../../hooks/usePresence";
 import { proxyMediaUrl } from "../../../utils/mediaProxy";
 import { getHeroRectFromElement, type HeroRect } from "../../../components/PhotoViewer";
-import { RightNowRequestBubble } from "./RightNowRequestBubble";
+import { RIGHT_NOW_INCOMING_TYPE, RightNowIncomingRequestCard, RightNowRequestCard } from "./RightNowRequestCard";
+import { PROFILE_LINK_EVENT_TYPE, PROFILE_LINK_REQUEST_TYPE, ProfileLinkRequestCard } from "./ProfileLinkRequestCard";
+import { MediaBadge } from "./ChatCoverCard";
+import { useMyOwnProfile } from "../../../hooks/queries/useProfileQueries";
+import { getProfilePhotoHash } from "../profile-editor/profileEditorUtils";
+import { getGroupEventLabel } from "./groups/groupLabels";
+import { useGroupMemberNames } from "./groups/useGroupMemberNames";
+import { resolveAvatarSrc } from "../../../services/avatarStore";
+import { directConversationProfiles, isGroupConversationId } from "../../../utils/groupChat";
+import { AlbumExpirationCountdown, getAlbumShareDurationKey } from "./AlbumExpirationCountdown";
 
 type ChatThreadMessagesProps = {
 	isDesktop: boolean;
@@ -101,8 +116,14 @@ type ChatThreadMessagesProps = {
 	endMessageLongPress: () => void;
 	messageLongPressTriggeredRef: { current: boolean };
 	openFullScreenImage: (imageUrl: string, meta?: { takenOnGrindr: boolean; createdAt: number | null; createdAtLabel: string | null; timestamp: number }, mediaType?: "image" | "video", messageId?: string, senderId?: number, heroRect?: HeroRect | null) => void;
+	/** Archive mode off: fetches a received expiring photo/video (uses one view) and opens it. */
+	openViewLimitedMedia: (message: UiMessage, heroRect?: HeroRect | null) => void | Promise<void>;
 	openAlbumViewerById: (albumId: number, isOwnAlbum?: boolean, targetContentId?: number) => void | Promise<void>;
 	openProfilePhotos: (mediaHash: string, isPartnerProfile: boolean, heroRect?: HeroRect | null) => void;
+	/** Groups: tapping a sender's name opens their profile. */
+	onOpenSenderProfile?: (profileId: number) => void;
+	/** Opens the profile a ProfileLink message shares. */
+	onOpenSharedProfile?: (profileId: number) => void;
 	onJumpToMessage: (messageId: string) => void;
 	highlightedMessageId: string | null;
 	selectedThreadMessageMatches: Array<{ messageId: string }>;
@@ -117,13 +138,17 @@ type ChatThreadMessagesProps = {
 	handleRetry: (message: Message) => void;
 	handleReply: (message: Message) => void | Promise<void>;
 	canReply: boolean;
+	/** Whether a message can be edited here (flag chat-message-edit, my own text message). */
+	canEditMessage: (message: UiMessage) => boolean;
+	handleEdit: (message: UiMessage) => void;
 	handleStopAlbumShare: (albumId: number) => void | Promise<void>;
 	handleRemoveLocalAlbum: (albumId: number) => void | Promise<void>;
 	/** Image/video counts of the user's own albums (received ones come from albumStore). */
 	ownAlbumMediaCountMap?: Map<number, AlbumMediaCount>;
 	ownAlbumNameMap?: Map<number, string>;
 	threadBottomRef: { current: HTMLDivElement | null };
-	isPartnerTyping?: boolean;
+	/** Who is typing in this thread right now (others only), in the order they started. */
+	typingProfileIds?: readonly number[];
 	isArchived?: boolean;
 	localNickname?: string | null;
 	messageTranslations: MessageTranslations;
@@ -135,6 +160,9 @@ const KNOWN_REPLY_TYPES = new Set([
     "Image", "ExpiringImage", "Giphy", "Video", "PrivateVideo", "NonExpiringVideo",
     "Audio", "Location", "AlbumContentReply", "AlbumContentReaction",
     "Album", "ExpiringAlbum", "ExpiringAlbumV2", "ProfilePhotoReply", "Text", "Gaymoji",
+    "ProfileLink",
+    // Server-made request cards (Right Now; profile links, Free Grind server).
+    "RightNowRequest", "RightNowRequestIncoming", "ProfileLinkRequest", "ProfileLinkEvent",
 ]);
 
 // Same flags that drive the "from local history" badge — a message that
@@ -172,71 +200,10 @@ const MEDIA_TAP_MAX_MS = 500;
 const MEDIA_TAP_SLOP_PX = 10;
 const MISSING_CLICK_WAIT_MS = 120;
 
-function MediaBadge({ icon, label }: { icon: React.ReactNode; label: React.ReactNode }) {
-	return (
-		<div className="pointer-events-none absolute start-2 top-2 z-20 inline-flex items-center gap-1.5 rounded-full bg-black/50 py-1 ps-1.5 pe-2.5 text-[11px] font-semibold text-white shadow-[0_2px_8px_rgba(0,0,0,0.3)] backdrop-blur-md">
-			{icon}
-			{label}
-		</div>
-	);
-}
-
 /**
  * Centered upload ring over an optimistic image/video tile; with a `label`
  * (a video's phase, see UploadProgress) that and the percentage under it.
  */
-function AlbumExpirationCountdown({ expiresAt, isOnce, t, className = "mt-1" }: { expiresAt: number; isOnce?: boolean; t: any; className?: string }) {
-	const [timeLeft, setTimeLeft] = useState<number>(expiresAt - Date.now());
-
-	useEffect(() => {
-		if (isOnce) return;
-		const timer = setInterval(() => {
-			const next = expiresAt - Date.now();
-			setTimeLeft(next);
-			if (next <= 0) clearInterval(timer);
-		}, 1000);
-		return () => clearInterval(timer);
-	}, [expiresAt, isOnce]);
-
-	if (!isOnce && timeLeft <= 0) return null;
-
-	const seconds = Math.floor((timeLeft / 1000) % 60);
-	const minutes = Math.floor((timeLeft / (1000 * 60)) % 60);
-	const hours = Math.floor((timeLeft / (1000 * 60 * 60)) % 24);
-	const days = Math.floor(timeLeft / (1000 * 60 * 60 * 24));
-
-	const parts = [];
-	if (days > 0) parts.push(t("right_now.days_short", { count: days }));
-	if (hours > 0 || days > 0) parts.push(t("right_now.hours_short", { count: hours }));
-	if (minutes > 0 || hours > 0 || days > 0) parts.push(t("right_now.minutes_short", { count: minutes }));
-	if (days === 0 && hours === 0) parts.push(t("right_now.seconds_short", { count: seconds }));
-
-	return (
-		<>
-			<style>
-				{`
-					@keyframes hourglass-rotate {
-						0% { transform: rotate(0deg); }
-						40% { transform: rotate(180deg); }
-						60% { transform: rotate(180deg); }
-						100% { transform: rotate(360deg); }
-					}
-					.animate-hourglass-rotate {
-						animation: hourglass-rotate 2.5s infinite ease-in-out;
-					}
-				`}
-			</style>
-			<div className={`flex items-center ${className}`}>
-				<span className="inline-flex items-center gap-1.5 rounded-full bg-black/50 py-1 ps-1.5 pe-2.5 text-[11px] font-semibold tracking-wide text-[var(--accent)] shadow-[0_2px_8px_rgba(0,0,0,0.3)] backdrop-blur-md uppercase">
-					<Hourglass className="h-3 w-3 animate-hourglass-rotate" />
-					<span>
-						{isOnce ? t("chat.expiration.once") : `${parts.join(" ")} ${t("chat.expiration.remaining")}`}
-					</span>
-				</span>
-			</div>
-		</>
-	);
-}
 
 function renderTextWithLinks(
     text: string,
@@ -361,6 +328,35 @@ function MessageContextMenu({
  */
 const MEDIA_BUBBLE_SIZE = "aspect-[3/4] w-60 sm:w-64";
 
+/**
+ * A photo/video that can't be opened anymore (views used up, or its URL ran
+ * out), styled like an expired album share.
+ */
+function ExpiredMediaTile({ kind, className, timeLabel, t }: { kind: "image" | "video"; className: string; timeLabel: string | null; t: (key: string) => string }) {
+	return (
+		<div className={`relative isolate overflow-hidden bg-[var(--surface-2)] ${MEDIA_BUBBLE_SIZE} ${className}`}>
+			{/* Every layer carries the corners: a backdrop blur isn't clipped by overflow-hidden. */}
+			<div className="absolute inset-0 rounded-[inherit] bg-gradient-to-br from-[var(--accent)]/20 via-transparent to-black/40" />
+			<div className="absolute inset-0 flex flex-col items-center justify-center rounded-[inherit] bg-black/40 backdrop-blur-[15px]">
+				<Lock className="h-10 w-10 text-white/90 drop-shadow-lg" />
+				<span className="mt-2 text-[10px] font-bold uppercase tracking-widest text-white/90 drop-shadow">
+					{t("chat.expiration.expired")}
+				</span>
+			</div>
+			<MediaBadge
+				icon={kind === "video" ? <VideoOff className="h-3.5 w-3.5" /> : <ImageOff className="h-3.5 w-3.5" />}
+				label={kind === "video" ? t("chat.thread.video_expired") : t("chat.thread.image_expired")}
+			/>
+			{timeLabel ? (
+				<div className="absolute inset-x-0 bottom-0 flex items-center justify-end gap-2 rounded-b-[inherit] bg-gradient-to-t from-black/70 to-transparent px-3 pb-2 pt-8 text-[10px] text-white/85">
+					<span>{timeLabel}</span>
+				</div>
+			) : null}
+		</div>
+	);
+}
+
+
 export function ChatThreadMessages({
 	isDesktop,
 	bottomInset = 0,
@@ -381,8 +377,11 @@ export function ChatThreadMessages({
 	endMessageLongPress,
 	messageLongPressTriggeredRef,
 	openFullScreenImage,
+	openViewLimitedMedia,
 	openAlbumViewerById,
 	openProfilePhotos,
+	onOpenSenderProfile,
+	onOpenSharedProfile,
 	onJumpToMessage,
 	highlightedMessageId,
 	selectedThreadMessageMatches,
@@ -395,18 +394,37 @@ export function ChatThreadMessages({
 	handleRetry,
 	handleReply,
 	canReply,
+	canEditMessage,
+	handleEdit,
 	handleStopAlbumShare,
 	handleRemoveLocalAlbum,
 	ownAlbumMediaCountMap,
 	ownAlbumNameMap,
 	threadBottomRef,
-	isPartnerTyping = false,
+	typingProfileIds,
 	isArchived = false,
 	localNickname = null,
 	messageTranslations,
 	localUploadProgress = null,
 }: ChatThreadMessagesProps) {
 	const { t } = useTranslation();
+	// The other person of a direct chat (profile link requests act on them).
+	const directPartnerId = useMemo(() => {
+		const pair = directConversationProfiles(selectedConversation.data.conversationId);
+		return pair ? (pair.find((id) => id !== String(userId)) ?? null) : null;
+	}, [selectedConversation.data.conversationId, userId]);
+	// Current photos for link request cards whose message has no snapshot.
+	const hasLinkRequest = useMemo(() => threadMessages.some((m) => m.type === PROFILE_LINK_REQUEST_TYPE), [threadMessages]);
+	const directPartnerImageHash = useMemo(
+		() => selectedConversation.data.participants.find((p) => String(p.profileId) === directPartnerId)?.primaryMediaHash ?? null,
+		[selectedConversation.data.participants, directPartnerId],
+	);
+	const { data: ownProfile } = useMyOwnProfile(hasLinkRequest);
+	const ownImageHash = getProfilePhotoHash(ownProfile);
+	const isGroupThread = isGroupConversationId(selectedConversation.data.conversationId);
+	const groupMembers = useGroupMemberNames(isGroupThread ? selectedConversation : null, threadMessages, userId);
+	const isVisibleGroupMember = groupMembers.isActiveMember;
+	const groupNameOf = groupMembers.nameOf;
 	useLocalMediaCache();
 	useAlbumCache();
 	useAvatarCache();
@@ -415,6 +433,17 @@ export function ChatThreadMessages({
 		() => new Set(),
 	);
 	const [hoveredMediaMessageId, setHoveredMediaMessageId] = useState<string | null>(null);
+	const isArchiveModeEnabled = useChatArchiveEnabled();
+	// Expiring photos whose URL didn't load (ran out, view used up): shown as expired.
+	const [failedExpiringImageIds, setFailedExpiringImageIds] = useState<ReadonlySet<string>>(() => new Set());
+	const markExpiringImageFailed = useCallback((messageId: string) => {
+		setFailedExpiringImageIds((previous) => {
+			if (previous.has(messageId)) return previous;
+			const next = new Set(previous);
+			next.add(messageId);
+			return next;
+		});
+	}, []);
 	const [contextMenuState, setContextMenuState] = useState<{ messageId: string; x: number; y: number } | null>(null);
 	const [banWordPrompt, setBanWordPrompt] = useState<{ text: string } | null>(null);
 	const [pendingLinkUrl, setPendingLinkUrl] = useState<string | null>(null);
@@ -901,6 +930,16 @@ export function ChatThreadMessages({
 			});
 		}
 
+		if (canEditMessage(message)) {
+			actions.push({
+				key: "edit",
+				label: t("chat.actions.edit"),
+				icon: <Pencil className="h-4 w-4" />,
+				onClick: () => handleEdit(message),
+				disabled: isMutating,
+			});
+		}
+
 		if (hasText || location) {
 			actions.push({
 				key: "copy",
@@ -931,7 +970,7 @@ export function ChatThreadMessages({
 			});
 		}
 
-		if (imageUrl || videoUrl || audioUrl) {
+		if (isArchiveModeEnabled && (imageUrl || videoUrl || audioUrl)) {
 			actions.push({
 				key: "download",
 				label: t("chat.actions.download", { defaultValue: "Download" }),
@@ -1033,9 +1072,12 @@ export function ChatThreadMessages({
 		messageTranslations,
 		isMutatingMessageId,
 		isArchived,
+		isArchiveModeEnabled,
 		t,
 		handleReply,
 		canReply,
+		canEditMessage,
+		handleEdit,
 		handleCopy,
 		handleAddToSavedPhrases,
 		handleUnsend,
@@ -1239,7 +1281,33 @@ export function ChatThreadMessages({
                     <div key={`${group.header}-${groupIndex}`} className="relative">
                         {renderDateSeparator(group.header)}
                         <div className="flex flex-col gap-2">
-                        {group.messages.map((message) => {
+                        {group.messages.map((message, messageIndex) => {
+
+                    if (message.type === PROFILE_LINK_EVENT_TYPE) {
+                        return (
+                            <Fragment key={message.messageId}>
+                                {renderEventPill(
+                                    <Link2 className="h-3.5 w-3.5 shrink-0" />,
+                                    String(message.senderId) === String(userId)
+                                        ? t("profile_network.chat.event_accepted_mine")
+                                        : t("profile_network.chat.event_accepted_theirs"),
+                                    message.timestamp,
+                                )}
+                            </Fragment>
+                        );
+                    }
+
+                    if (message.type === "GroupEvent") {
+                        return (
+                            <Fragment key={message.messageId}>
+                                {renderEventPill(
+                                    <UsersRound className="h-3.5 w-3.5 shrink-0" />,
+                                    getGroupEventLabel(message, t, groupNameOf),
+                                    message.timestamp,
+                                )}
+                            </Fragment>
+                        );
+                    }
 
                     if (
                         message.type === "SystemBlocked" ||
@@ -1270,6 +1338,20 @@ export function ChatThreadMessages({
                                         <ShieldCheck className="h-3.5 w-3.5 shrink-0" />
                                     ),
                                     label,
+                                    message.timestamp,
+                                )}
+                            </Fragment>
+                        );
+                    }
+
+                    if (message.type === "SystemGroupRemoved" || message.type === "SystemGroupLeft") {
+                        return (
+                            <Fragment key={message.messageId}>
+                                {renderEventPill(
+                                    <UsersRound className="h-3.5 w-3.5 shrink-0" />,
+                                    message.type === "SystemGroupLeft"
+                                        ? t("group_chat.system_left", { defaultValue: "You left the group" })
+                                        : t("group_chat.system_removed", { defaultValue: "You're no longer in this group" }),
                                     message.timestamp,
                                 )}
                             </Fragment>
@@ -1310,6 +1392,14 @@ export function ChatThreadMessages({
 
                     const mine =
                         userId != null && Number(message.senderId) === Number(userId);
+                    // Groups: the sender's name under the last of their consecutive messages.
+                    const nextMessage = group.messages[messageIndex + 1];
+                    const showGroupSender =
+                        isGroupThread &&
+                        !mine &&
+                        (nextMessage == null ||
+                            Number(nextMessage.senderId) !== Number(message.senderId) ||
+                            nextMessage.type === "GroupEvent");
                     const failed = message.clientState === "failed";
                     const pending = message.clientState === "pending";
                     const uploadProgress = localUploadProgress?.messageId === message.messageId ? localUploadProgress.progress : null;
@@ -1338,6 +1428,9 @@ export function ChatThreadMessages({
                             : null;
                     let videoUrl = getMessageVideoUrl(message);
                     let audioUrl = getMessageAudioUrl(message);
+                    // Archive mode off: received expiring media has no URL here and
+                    // must not fall back to a stored copy either (see openViewLimitedMedia).
+                    const isViewLimitedLockedMessage = isViewLimitedLocked(message);
                     // Prefer the locally-cached copy (survives signed-URL expiry /
                     // view-once limits) over the remote URL once it's available.
                     if (imageUrl || videoUrl || audioUrl) {
@@ -1354,7 +1447,7 @@ export function ChatThreadMessages({
                             else if (videoUrl) videoUrl = cachedUri;
                             else if (audioUrl) audioUrl = cachedUri;
                         }
-                    } else {
+                    } else if (!isViewLimitedLockedMessage) {
                         // The live message no longer carries a URL at all (expired
                         // and never refreshed, conversation archived, etc.) — fall
                         // back to whatever's cached for it by message id, so media
@@ -1378,7 +1471,11 @@ export function ChatThreadMessages({
                         // immediately instead of only after its next refresh.
                         ensureAlbumCacheChecked(albumId);
                     }
-                    const isAlbumCachedForMessage = albumId != null && isAlbumCachedLocally(albumId);
+                    // With archive mode, our own album is always available to us (it's
+                    // ours, not a received share) — once we stop sharing it, its message
+                    // shows as local history like an unsent message, not locked. Without
+                    // it, the message follows the share and shows as expired too.
+                    const isAlbumCachedForMessage = albumId != null && ((mine && isArchiveModeEnabled) || isAlbumCachedLocally(albumId));
                     // Prefer the cached cover over the live body's
                     // coverUrl/previewUrl, not just as a fallback for when it's
                     // missing — that field can be a stale signed URL that's
@@ -1407,15 +1504,24 @@ export function ChatThreadMessages({
                         url?: string | null; imageHash?: string | null;
                         previewMessageId?: string; senderId?: number; duration?: number;
                     } | null | undefined;
-                    const replyText = typeof replyPreviewRaw?.text === "string" && replyPreviewRaw.text.trim().length > 0
-                        ? replyPreviewRaw.text.trim()
-                        : null;
                     const replyToMsgRef = message.replyToMessage as { messageId?: string; senderId?: number; type?: string } | null | undefined;
                     const hasReply = !!(replyToMsgRef?.messageId);
                     const replyToMsgId = replyPreviewRaw?.previewMessageId ?? replyToMsgRef?.messageId;
                     const replyToMsg = replyToMsgId
                         ? threadMessages.find(m => m.messageId === replyToMsgId) ?? null
                         : null;
+                    // Without a preview text, a reply to a text message quotes the
+                    // referenced message's own text (loaded or embedded) instead of
+                    // falling through to the media labels below.
+                    const replyText = (() => {
+                        if (typeof replyPreviewRaw?.text === "string" && replyPreviewRaw.text.trim().length > 0) {
+                            return replyPreviewRaw.text.trim();
+                        }
+                        const src = (replyToMsg ?? message.replyToMessage) as { type?: string; body?: unknown } | null | undefined;
+                        if (src?.type !== "Text") return null;
+                        const text = (src.body as Record<string, unknown> | null | undefined)?.text;
+                        return typeof text === "string" && text.trim().length > 0 ? text.trim() : null;
+                    })();
                     const albumOwnerProfileId = message.type === "AlbumContentReply"
                         ? ((message.body as Record<string, unknown> | null | undefined)?.ownerProfileId as number | null | undefined) ?? null
                         : null;
@@ -1528,7 +1634,8 @@ export function ChatThreadMessages({
                             ?? (message.replyToMessage ? getGaymojiUrl(message.replyToMessage as unknown as UiMessage) : null)
                             ?? (replyImageHash ? getGaymojiUrl({ type: "Gaymoji", body: { imageHash: replyImageHash } } as unknown as UiMessage) : null)
                         : null;
-                    const replyThumbUrl = repliesToPhotoReply ? null : replyIsGaymoji ? replyGaymojiUrl : replyAlbumCoverUrl
+                    const replyProfileLink = getProfileLink(replyToMsg ?? (message.replyToMessage as { type?: string; body?: unknown } | null | undefined));
+                    const replyThumbUrl = repliesToPhotoReply ? null : replyIsGaymoji ? replyGaymojiUrl : replyProfileLink ? (replyProfileLink.imageHash ? getThumbImageUrl(replyProfileLink.imageHash, "320x320") : null) : replyAlbumCoverUrl
                         ?? replyImageUrl
                         ?? cachedReplyHashUri
                         ?? (replyImageHash ? getThumbImageUrl(replyImageHash, "320x320") : null)
@@ -1569,6 +1676,14 @@ export function ChatThreadMessages({
                             ? t("chat.thread.album_image")
                             : replyTargetType === "AlbumContentReaction"
                                 ? t("chat.thread.reacted_to_image")
+                                : replyTargetType === "ProfileLink"
+                                    ? replyProfileLink?.name ?? t("chat.preview.shared_profile")
+                                : replyTargetType === "RightNowRequest" || replyTargetType === RIGHT_NOW_INCOMING_TYPE
+                                    ? t("chat.preview.right_now_request", { defaultValue: "Right Now request" })
+                                : replyTargetType === PROFILE_LINK_REQUEST_TYPE
+                                    ? t("profile_network.chat.preview_request")
+                                : replyTargetType === PROFILE_LINK_EVENT_TYPE
+                                    ? t("profile_network.chat.preview_accepted")
                                 : replyIsAlbum
                                     ? t("chat.preview.shared_album")
                                 : replyIsAudio
@@ -1599,14 +1714,24 @@ export function ChatThreadMessages({
                     const translatedText = mine ? null : messageTranslations.translations.get(message.messageId) ?? null;
                     const isTranslating = !mine && !translatedText && messageTranslations.translatingMessageIds.has(message.messageId);
                     const isExpiringImage = message.type === "ExpiringImage";
+                    // Unsent with nothing kept: only the "unsent" line, no album card.
+                    const isUnsentWithoutContent =
+                        message.unsent === true && messageText === t("chat.thread.unsent");
                     const isAlbumMessage =
+                        !isUnsentWithoutContent && (
                         message.type === "Album" ||
                         message.type === "ExpiringAlbum" ||
-                        message.type === "ExpiringAlbumV2";
+                        message.type === "ExpiringAlbumV2");
                     const isAlbumReactionBubble = message.type === "AlbumContentReaction";
+                    const profileLink = isUnsentWithoutContent ? null : getProfileLink(message);
+                    const isProfileLinkBubble = profileLink != null;
+                    // Request cards (Right Now, profile links): cover cards like the shared profile.
+                    const isRequestCardBubble = !message.unsent && (message.type === "RightNowRequest" || message.type === RIGHT_NOW_INCOMING_TYPE || message.type === PROFILE_LINK_REQUEST_TYPE);
                     const msgBody = message.body as any;
                     const isExpiredVideo = !videoUrl && msgBody?._videoExpired === true;
-                    const isExpiredImage = !imageUrl && msgBody?._imageExpired === true;
+                    const isExpiredImage =
+                        (!imageUrl && msgBody?._imageExpired === true) ||
+                        (isExpiringImage && Boolean(imageUrl) && failedExpiringImageIds.has(message.messageId));
                     const isUnsupportedMessage =
                         messageText === t("chat.thread.unsupported_placeholder") ||
                         messageText === `[${message.type}]`;
@@ -1615,8 +1740,7 @@ export function ChatThreadMessages({
                     // placeholder when body is empty; if a local copy existed,
                     // mergeMessagePreservingUnsendWipe would have restored the
                     // real content and messageText/localHistory would reflect that).
-                    const isTrulyUnsentMessage =
-                        message.unsent === true && messageText === t("chat.thread.unsent");
+                    const isTrulyUnsentMessage = isUnsentWithoutContent;
                     const isImageOnlyBubble =
                         (Boolean(imageUrl) || isExpiredImage) && (messageText === t("chat.thread.shared_image") || messageText === t("chat.thread.shared_gif"));
                     const isVideoOnlyBubble =
@@ -1627,8 +1751,15 @@ export function ChatThreadMessages({
                         Boolean(location) && messageText === t("chat.preview.sent_location");
                 const isAudioOnlyBubble =
                         Boolean(audioUrl) && messageText === t("chat.thread.shared_audio");
+                    const isViewLimitedLockedVideo =
+                        isViewLimitedLockedMessage &&
+                        (message.type === "Video" || message.type === "PrivateVideo" || message.type === "NonExpiringVideo" ||
+                            /video/i.test(message.chat1Type ?? ""));
+                    const viewLimitedViewsLeft = isViewLimitedLockedMessage ? getViewsRemaining(message) : null;
+                    const isViewLimitedUsedUp = viewLimitedViewsLeft === 0;
                     const isMediaOnlyBubble =
-                        isImageOnlyBubble || isVideoOnlyBubble || isAlbumOnlyBubble || isLocationOnlyBubble || isAlbumReactionBubble;
+                        isViewLimitedLockedMessage ||
+                        isImageOnlyBubble || isVideoOnlyBubble || isAlbumOnlyBubble || isLocationOnlyBubble || isAlbumReactionBubble || isProfileLinkBubble || isRequestCardBubble;
                     const tailCorner = mine ? "rounded-ee-[3px]" : "rounded-es-[3px]";
                     const shouldBlurIncomingMedia =
                         blurIncomingMedia &&
@@ -1676,22 +1807,40 @@ export function ChatThreadMessages({
                     const isLastMessage = message.messageId === lastMessageId;
                     const isLatestShare = albumId ? latestMessageIdByAlbum.get(albumId) === message.messageId : true;
 
+                    // ExpiringAlbumV2 is the message type of every timed share (10 minutes,
+                    // 1 hour, ...), so only fall back on it when the body has no expirationType.
+                    const hasExpirationType = expirationType != null && expirationType !== "";
                     const isOnce = !isIndefinite && (
-                        expirationType === "ONCE" ||
-                        expirationType === 1 ||
-                        message.type === "ExpiringAlbumV2" ||
-                        (totalLifetimeSec > 1700 && totalLifetimeSec < 1900)
+                        hasExpirationType
+                            ? expirationType === "ONCE" || expirationType === 1
+                            : message.type === "ExpiringAlbumV2" || (totalLifetimeSec > 1700 && totalLifetimeSec < 1900)
                     );
+                    // A timed share's clock only starts when it's first opened.
+                    const pendingDurationKey = expiresAt > 0 || isOnce ? null : getAlbumShareDurationKey(expirationType);
+                    const pendingDurationLabel = pendingDurationKey ? t(pendingDurationKey) : null;
 
-                    const isExpiringMedia = isAlbumMessage && !isIndefinite && isLatestShare && (expiresAt > 0 || isOnce);
+                    const isExpiringMedia = isAlbumMessage && !isIndefinite && isLatestShare && (expiresAt > 0 || isOnce || pendingDurationLabel != null);
+                    // Nothing once the share ran out — also for an album kept by archive
+                    // mode, which stays open-able but isn't shared anymore.
+                    const hasAlbumShareRunOut = expiresAt > 0 && expiresAt <= Date.now();
+                    const showAlbumExpiry =
+                        isExpiringMedia && !hasAlbumShareRunOut && (expiresAt > 0 || isOnce || pendingDurationLabel != null);
 
                     // A cached album stays open-able regardless of what the live
                     // message body currently says about viewability/expiry —
                     // that's the whole point of capturing it durably.
+                    // Archive mode off: a view-once share is used up as soon as the
+                    // recipient opened it — its viewing window (viewableUntil) only starts
+                    // then — for them and for us as the sender alike. The server keeps the
+                    // share until that window ends; a new share starts over.
+                    const isOnceShareOpened = !isArchiveModeEnabled && isAlbumMessage && isOnceAlbumShareOpened(message);
+                    // Ran out: locked right away, not only once the server's sweep
+                    // (up to a minute later) has updated the message.
+                    const isAlbumShareTimedOut = isAlbumMessage && !isIndefinite && expiresAt > 0 && expiresAt <= nowTimestamp;
                     const isLocked =
                         isAlbumMessage &&
                         !isAlbumCachedForMessage &&
-                        (!isLatestShare || !msgBody?.isViewable);
+                        (!isLatestShare || !msgBody?.isViewable || isOnceShareOpened || isAlbumShareTimedOut);
                     // Same expiry signal as isLocked, but for the case where it's
                     // only avoided because we have a durable local copy — flag
                     // that so it's clear the live share is actually gone. Suppressed
@@ -1869,7 +2018,58 @@ export function ChatThreadMessages({
                                         </div>
                                     ) : null}
 
-                                    {imageUrl ? (
+                                    {isViewLimitedLockedMessage ? (
+                                        <div
+                                            role="button"
+                                            tabIndex={0}
+                                            aria-disabled={isViewLimitedUsedUp}
+                                            {...mediaTapProps((tile) => {
+                                                if (isViewLimitedUsedUp) return;
+                                                const open = () => void openViewLimitedMedia(message, getHeroRectFromElement(tile));
+                                                if (isDesktop) { open(); return; }
+                                                if (messageLongPressTriggeredRef.current) {
+                                                    messageLongPressTriggeredRef.current = false;
+                                                    return;
+                                                }
+                                                scheduleMobileTap(message, open);
+                                            })}
+                                            onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") e.currentTarget.click(); }}
+                                            className={`group/media block overflow-hidden ${hasReply ? "" : `rounded-2xl ${tailCorner}`} ${isViewLimitedUsedUp ? "cursor-default" : "cursor-pointer"}`}
+                                        >
+                                            <div className={`relative isolate ${MEDIA_BUBBLE_SIZE} overflow-hidden rounded-[inherit] bg-[var(--surface-2)]`}>
+                                                {/* Every layer carries the corners: a backdrop blur isn't clipped by overflow-hidden. */}
+                                                <div className="absolute inset-0 rounded-[inherit] bg-gradient-to-br from-[var(--accent)]/25 via-transparent to-black/40" />
+                                                {isViewLimitedUsedUp ? (
+                                                    <div className="absolute inset-0 z-10 flex flex-col items-center justify-center rounded-[inherit] bg-black/40 backdrop-blur-[15px]">
+                                                        <Lock className="h-10 w-10 text-white/90 drop-shadow-lg" />
+                                                        <span className="mt-2 text-[10px] font-bold uppercase tracking-widest text-white/90 drop-shadow">
+                                                            {t("chat.expiration.expired")}
+                                                        </span>
+                                                    </div>
+                                                ) : (
+                                                    <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-2">
+                                                        <div className="flex h-12 w-12 items-center justify-center rounded-full bg-white/15 text-white ring-1 ring-white/30 backdrop-blur-md transition group-hover/media:scale-105 group-hover/media:bg-white/25">
+                                                            {isViewLimitedLockedVideo ? <Play className="h-5 w-5 fill-white drop-shadow" /> : <Eye className="h-5 w-5 drop-shadow" />}
+                                                        </div>
+                                                        <span className="text-[11px] font-semibold uppercase tracking-widest text-white/90 drop-shadow">
+                                                            {t("chat.thread.tap_to_view", { defaultValue: "Tap to view" })}
+                                                        </span>
+                                                    </div>
+                                                )}
+                                                <MediaBadge
+                                                    icon={isViewLimitedLockedVideo ? <Video className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+                                                    label={viewLimitedViewsLeft != null && viewLimitedViewsLeft > 1
+                                                        ? t("chat.thread.views_left", { count: viewLimitedViewsLeft, defaultValue: "{{count}} views left" })
+                                                        : t("chat.attachments.view_once")}
+                                                />
+                                                <div className="absolute inset-x-0 bottom-0 z-20 flex items-center justify-end gap-2 rounded-b-[inherit] bg-gradient-to-t from-black/80 via-black/40 to-transparent px-3 pb-2 pt-8 text-[10px] text-white/85">
+                                                    <span>{formatMessageTime(message.timestamp, nowTimestamp, t)}</span>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    ) : null}
+
+                                    {imageUrl && !isExpiredImage ? (
                                         <div
                                             role="button"
                                             tabIndex={0}
@@ -1912,6 +2112,7 @@ export function ChatThreadMessages({
                                             <div className="relative">
                                             <img
                                                 src={proxyMediaUrl(imageUrl)}
+                                                onError={isExpiringImage ? () => markExpiringImageFailed(message.messageId) : undefined}
                                                 alt={t("chat.thread.shared_alt")}
                                                 className={`${message.type === "Giphy" ? (hasReply ? "max-h-96 w-full object-cover" : isImageOnlyBubble ? "max-h-80 w-full object-cover" : "max-h-64 w-full object-cover") : `${MEDIA_BUBBLE_SIZE} bg-[var(--surface-2)] object-cover`} ${PRIVACY_BLUR_TRANSITION_CLASS} ${mediaBlurClassName}`}
                                             />
@@ -2006,13 +2207,16 @@ export function ChatThreadMessages({
                                                 });
                                             }}
                                             onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") e.currentTarget.click(); }}
+                                            // Not open-able: no pointer (see index.css's [role="button"] rule).
+                                            aria-disabled={isLocked}
                                             className={`group/media block w-full overflow-hidden rounded-2xl ${tailCorner}`}
                                             onMouseEnter={() => handleMediaMouseEnter(message.messageId)}
                                             onMouseLeave={() => handleMediaMouseLeave(message.messageId)}
                                         >
-                                            <div className={`relative h-56 w-64 max-w-full overflow-hidden rounded-2xl ${tailCorner} bg-[var(--surface-2)] sm:w-72`}>
+                                            {/* The mask makes the corners clip the scaled cover and blurred layers too, which overflow-hidden alone lets bleed. */}
+                                            <div className={`relative isolate h-56 w-64 max-w-full overflow-hidden rounded-2xl ${tailCorner} bg-[var(--surface-2)] [mask-image:radial-gradient(white,black)] sm:w-72`}>
                                                 <div className="absolute inset-0 flex items-center justify-center text-[var(--text-muted)]">
-                                                    <Album className="h-8 w-8 opacity-60" />
+                                                    <Images className="h-8 w-8 opacity-60" />
                                                 </div>
                                                 {albumCover ? (
                                                     <img
@@ -2032,25 +2236,30 @@ export function ChatThreadMessages({
                                                     </div>
                                                 )}
 
-                                                <MediaBadge icon={<Album className="h-3.5 w-3.5" />} label={t("chat.thread.album_label")} />
+                                                <MediaBadge
+                                                    icon={<Images className="h-3.5 w-3.5" />}
+                                                    label={
+                                                        <>
+                                                            {t("chat.thread.album_label")}
+                                                            {!isLocked && showAlbumExpiry ? (
+                                                                <>
+                                                                    <span className="h-3 w-px bg-white/25" aria-hidden="true" />
+                                                                    <AlbumExpirationCountdown expiresAt={expiresAt} isOnce={isOnce} durationLabel={pendingDurationLabel} t={t} className="" inline />
+                                                                </>
+                                                            ) : null}
+                                                        </>
+                                                    }
+                                                />
 
                                                 {!isLocked && (
                                                     <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
                                                         <div className="flex h-12 w-12 items-center justify-center rounded-full bg-white/15 text-white ring-1 ring-white/30 backdrop-blur-md transition group-hover/media:scale-105 group-hover/media:bg-white/25">
-                                                            <Images className="h-5 w-5 drop-shadow" />
+                                                            <Eye className="h-5 w-5 drop-shadow" />
                                                         </div>
                                                     </div>
                                                 )}
 
                                                 <div className="absolute inset-x-0 bottom-0 z-20 flex flex-col gap-1 bg-gradient-to-t from-black/85 via-black/50 to-transparent px-3 pb-2 pt-10 text-white">
-                                                    {!isLocked && isExpiringMedia && (expiresAt > Date.now() || isOnce) && (
-                                                        <AlbumExpirationCountdown
-                                                            expiresAt={expiresAt}
-                                                            isOnce={isOnce}
-                                                            t={t}
-                                                            className="mb-0.5"
-                                                        />
-                                                    )}
                                                     {albumName ? (
                                                         <p className="truncate text-sm font-semibold leading-tight drop-shadow">
                                                             {albumName}
@@ -2099,6 +2308,117 @@ export function ChatThreadMessages({
                                         </div>
                                     ) : null}
 
+                                    {isProfileLinkBubble && profileLink ? (() => {
+                                        const openSharedProfile = () => onOpenSharedProfile?.(profileLink.profileId);
+                                        const sharedName = profileLink.name ?? t("common.unknown_display_name");
+                                        return (
+                                            <div
+                                                role="button"
+                                                tabIndex={0}
+                                                aria-label={t("chat.view_profile")}
+                                                onClick={(event) => {
+                                                    event.stopPropagation();
+                                                    if (isDesktop) {
+                                                        openSharedProfile();
+                                                        return;
+                                                    }
+                                                    if (messageLongPressTriggeredRef.current) {
+                                                        messageLongPressTriggeredRef.current = false;
+                                                        return;
+                                                    }
+                                                    scheduleMobileTap(message, openSharedProfile);
+                                                }}
+                                                onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") e.currentTarget.click(); }}
+                                                className={`group/media block w-full overflow-hidden rounded-2xl ${tailCorner}`}
+                                            >
+                                                {/* Laid out like the album card: the profile photo as cover, the name where the album name goes. */}
+                                                <div className={`relative isolate h-56 w-64 max-w-full overflow-hidden rounded-2xl ${tailCorner} bg-[var(--surface-2)] [mask-image:radial-gradient(white,black)] sm:w-72`}>
+                                                    <div className="absolute inset-0 transition-transform duration-500 ease-out group-hover/media:scale-[1.06]">
+                                                        <ProfileImage
+                                                            src={profileLink.imageHash ? getProfileImageUrl(profileLink.imageHash) : null}
+                                                            alt={sharedName}
+                                                            placeholder="silhouette"
+                                                            className="object-top"
+                                                        />
+                                                    </div>
+
+                                                    <MediaBadge
+                                                        icon={<UserRound className="h-3.5 w-3.5" />}
+                                                        label={t("chat.profile")}
+                                                    />
+
+                                                    <div className="absolute inset-x-0 bottom-0 z-20 flex flex-col gap-1.5 bg-gradient-to-t from-black/85 via-black/50 to-transparent px-3 pb-2 pt-10 text-white">
+                                                        <div className="min-w-0">
+                                                            <p className="truncate text-sm font-semibold leading-tight drop-shadow">{sharedName}</p>
+                                                            {profileLink.text ? (
+                                                                <p className="mt-0.5 line-clamp-2 break-words text-xs text-white/85">{profileLink.text}</p>
+                                                            ) : null}
+                                                        </div>
+                                                        <div className="flex items-center justify-between gap-2 text-[11px]">
+                                                            <span className="inline-flex h-7 items-center gap-1.5 rounded-full bg-white/20 px-3 text-xs font-semibold text-white ring-1 ring-white/30 backdrop-blur-md transition group-hover/media:bg-white/30">
+                                                                <UserRound className="h-3.5 w-3.5" />
+                                                                {t("chat.view_profile")}
+                                                            </span>
+                                                            <div className="flex shrink-0 items-center gap-2 text-[10px] text-white/80">
+                                                                {pending ? <span>{t("chat.sending")}</span> : null}
+                                                                {failed ? <span>{t("chat.thread.failed")}</span> : null}
+                                                                {localOnly ? (
+                                                                    <span title={t("chat.thread.from_local_history")}><History className="h-3 w-3 opacity-80" /></span>
+                                                                ) : null}
+                                                                <span>{formatMessageTime(message.timestamp, nowTimestamp, t)}</span>
+                                                                {isDesktop && !pending && !isLocalClientMessageId(message.messageId) ? (
+                                                                    <button
+                                                                        type="button"
+                                                                        onClick={(event) => {
+                                                                            event.stopPropagation();
+                                                                            setContextMenuState({ messageId: message.messageId, x: event.clientX, y: event.clientY });
+                                                                        }}
+                                                                        className="rounded-md p-1 hover:bg-white/10"
+                                                                    >
+                                                                        <MoreVertical className="h-3.5 w-3.5" />
+                                                                    </button>
+                                                                ) : null}
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        );
+                                    })() : null}
+
+                                    {isRequestCardBubble ? (() => {
+                                        // Same time / menu row as the shared-profile card (color from the card).
+                                        const cardMeta = (
+                                            <div className="flex shrink-0 items-center gap-2">
+                                                {pending ? <span>{t("chat.sending")}</span> : null}
+                                                {failed ? <span>{t("chat.thread.failed")}</span> : null}
+                                                {localOnly ? (
+                                                    <span title={t("chat.thread.from_local_history")}><History className="h-3 w-3 opacity-80" /></span>
+                                                ) : null}
+                                                <span>{formatMessageTime(message.timestamp, nowTimestamp, t)}</span>
+                                                {isDesktop && !pending && !isLocalClientMessageId(message.messageId) ? (
+                                                    <button
+                                                        type="button"
+                                                        onClick={(event) => {
+                                                            event.stopPropagation();
+                                                            setContextMenuState({ messageId: message.messageId, x: event.clientX, y: event.clientY });
+                                                        }}
+                                                        className="rounded-md p-1 hover:bg-[color-mix(in_srgb,currentColor_15%,transparent)]"
+                                                    >
+                                                        <MoreVertical className="h-3.5 w-3.5" />
+                                                    </button>
+                                                ) : null}
+                                            </div>
+                                        );
+                                        return message.type === "RightNowRequest" ? (
+                                            <RightNowRequestCard body={message.body} mine={mine} tailCorner={tailCorner} meta={cardMeta} />
+                                        ) : message.type === RIGHT_NOW_INCOMING_TYPE ? (
+                                            <RightNowIncomingRequestCard body={message.body} tailCorner={tailCorner} meta={cardMeta} />
+                                        ) : (
+                                            <ProfileLinkRequestCard body={message.body} mine={mine} partnerProfileId={directPartnerId} partnerImageHash={directPartnerImageHash} ownImageHash={ownImageHash} tailCorner={tailCorner} meta={cardMeta} />
+                                        );
+                                    })() : null}
+
                                         {gaymojiUrl ? (
                                             <img
                                                 src={proxyMediaUrl(gaymojiUrl)}
@@ -2108,31 +2428,21 @@ export function ChatThreadMessages({
                                         ) : null}
 
                                         {isExpiredImage ? (
-                                            <div className={`relative flex items-center justify-center overflow-hidden bg-[var(--surface-2)] ${MEDIA_BUBBLE_SIZE} ${isImageOnlyBubble ? (hasReply ? "" : `rounded-2xl ${tailCorner}`) : "mb-2 rounded-xl border border-black/10"}`}>
-                                                <div className="flex flex-col items-center gap-1.5 text-[var(--text-muted)]">
-                                                    <ImageOff className="h-6 w-6" />
-                                                    <span className="text-xs font-medium">{t("chat.thread.image_expired")}</span>
-                                                </div>
-                                                {isImageOnlyBubble && (
-                                                    <div className="absolute inset-x-0 bottom-0 flex items-center justify-end gap-2 px-3 py-2 text-[10px] text-[var(--text-muted)]">
-                                                        <span>{formatMessageTime(message.timestamp, nowTimestamp, t)}</span>
-                                                    </div>
-                                                )}
-                                            </div>
+                                            <ExpiredMediaTile
+                                                kind="image"
+                                                t={t}
+                                                className={isImageOnlyBubble ? (hasReply ? "" : `rounded-2xl ${tailCorner}`) : "mb-2 rounded-xl border border-black/10"}
+                                                timeLabel={isImageOnlyBubble ? formatMessageTime(message.timestamp, nowTimestamp, t) : null}
+                                            />
                                         ) : null}
 
                                         {isExpiredVideo ? (
-                                            <div className={`relative flex items-center justify-center overflow-hidden bg-[var(--surface-2)] ${MEDIA_BUBBLE_SIZE} ${isVideoOnlyBubble ? (hasReply ? "" : `rounded-2xl ${tailCorner}`) : "mb-2 rounded-xl border border-black/10"}`}>
-                                                <div className="flex flex-col items-center gap-1.5 text-[var(--text-muted)]">
-                                                    <VideoOff className="h-6 w-6" />
-                                                    <span className="text-xs font-medium">{t("chat.thread.video_expired")}</span>
-                                                </div>
-                                                {isVideoOnlyBubble && (
-                                                    <div className="absolute inset-x-0 bottom-0 flex items-center justify-end gap-2 px-3 py-2 text-[10px] text-[var(--text-muted)]">
-                                                        <span>{formatMessageTime(message.timestamp, nowTimestamp, t)}</span>
-                                                    </div>
-                                                )}
-                                            </div>
+                                            <ExpiredMediaTile
+                                                kind="video"
+                                                t={t}
+                                                className={isVideoOnlyBubble ? (hasReply ? "" : `rounded-2xl ${tailCorner}`) : "mb-2 rounded-xl border border-black/10"}
+                                                timeLabel={isVideoOnlyBubble ? formatMessageTime(message.timestamp, nowTimestamp, t) : null}
+                                            />
                                         ) : null}
                                         
                                         {videoUrl ? (() => {
@@ -2347,7 +2657,7 @@ export function ChatThreadMessages({
                                                     <div className="absolute inset-x-0 bottom-0 flex flex-col bg-gradient-to-t from-black/80 via-black/40 to-transparent px-3 py-2 text-white">
                                                         <div className="flex items-center justify-between gap-2 text-[10px]">
                                                             <div className="flex items-center opacity-90">
-                                                                <Album className="h-3 w-3 shrink-0" />
+                                                                <Images className="h-3 w-3 shrink-0" />
                                                             </div>
                                                             <div className="flex items-center gap-2">
                                                                 {localOnly ? (
@@ -2458,10 +2768,11 @@ export function ChatThreadMessages({
                                                     {t("chat.open")}
                                                 </button>
                                             </div>
-                                            {!isLocked && isExpiringMedia && (expiresAt > Date.now() || isOnce) && (
+                                            {!isLocked && showAlbumExpiry && (
                                                 <AlbumExpirationCountdown
                                                     expiresAt={expiresAt}
                                                     isOnce={isOnce}
+                                                    durationLabel={pendingDurationLabel}
                                                     t={t}
                                                 />
                                             )}
@@ -2518,9 +2829,7 @@ export function ChatThreadMessages({
                                     {!isMediaOnlyBubble && !isAudioOnlyBubble && !gaymojiUrl
                                     && !(imageUrl && (messageText === t("chat.thread.shared_image") || messageText === t("chat.thread.shared_gif")))
                                     && !((videoUrl || isExpiredVideo) && messageText === t("chat.thread.shared_video")) ? (
-                                        message.type === "RightNowRequest" ? (
-                                            <RightNowRequestBubble body={message.body} mine={mine} />
-                                        ) : isUnsupportedMessage ? (
+                                        isUnsupportedMessage ? (
                                             <div className={`relative mt-1 flex items-center gap-2.5 overflow-hidden rounded-[6px] p-[13px] text-xs ${mine ? "bg-black/20" : "bg-black/[0.08]"}`}>
                                                 <MessageCircleQuestion className="h-4 w-4 shrink-0 opacity-70" />
                                                 <div className="min-w-0 flex-1">
@@ -2605,6 +2914,9 @@ export function ChatThreadMessages({
                                             {localOnly ? (
                                                 <span title={t("chat.thread.from_local_history")}><History className="h-3 w-3 opacity-70" /></span>
                                             ) : null}
+                                            {message.editedAt != null && !message.unsent ? (
+                                                <span title={new Date(message.editedAt).toLocaleString()}>{t("chat.thread.edited")}</span>
+                                            ) : null}
                                             <span>
                                                 {formatMessageTime(message.timestamp, nowTimestamp, t)}
                                             </span>
@@ -2662,6 +2974,33 @@ export function ChatThreadMessages({
                                         </span>
                                     </div>
                                 )}
+                                {showGroupSender && (() => {
+                                    const senderId = Number(message.senderId);
+                                    const name = groupNameOf(senderId);
+                                    const avatarHash = groupMembers.avatarOf(senderId);
+                                    // Quiet attribution under the bubble: mini photo + muted name.
+                                    const content = (
+                                        <>
+                                            <span className="h-4 w-4 shrink-0 overflow-hidden rounded-full bg-[var(--surface-2)]">
+                                                <ProfileImage src={resolveAvatarSrc(avatarHash, getParticipantAvatarUrl(avatarHash))} alt="" iconClassName="h-2.5 w-2.5" />
+                                            </span>
+                                            <span className="truncate">{name}</span>
+                                        </>
+                                    );
+                                    const className = "mt-1 flex max-w-full items-center gap-1.5 text-[11px] font-medium text-[var(--text-muted)]";
+                                    // Members still in the group (and not blocked) open their profile.
+                                    return onOpenSenderProfile && isVisibleGroupMember(senderId) ? (
+                                        <button
+                                            type="button"
+                                            onClick={() => onOpenSenderProfile(senderId)}
+                                            className={`${className} transition hover:text-[var(--text)] active:opacity-70`}
+                                        >
+                                            {content}
+                                        </button>
+                                    ) : (
+                                        <span className={className}>{content}</span>
+                                    );
+                                })()}
                             </div>
                         </div>
                         </Fragment>
@@ -2671,16 +3010,50 @@ export function ChatThreadMessages({
                     </div>
                 ));
             })()}
-            </div>
-            {isPartnerTyping && (
-                <div className="flex items-end gap-2 px-4 py-1">
-                    <div className="flex items-center gap-1 rounded-2xl rounded-es-sm bg-[var(--surface-2)] px-3 py-2.5">
-                        <span className="h-2 w-2 animate-bounce rounded-full bg-[var(--text-muted)]" style={{ animationDelay: "0ms" }} />
-                        <span className="h-2 w-2 animate-bounce rounded-full bg-[var(--text-muted)]" style={{ animationDelay: "160ms" }} />
-                        <span className="h-2 w-2 animate-bounce rounded-full bg-[var(--text-muted)]" style={{ animationDelay: "320ms" }} />
+            {typingProfileIds && typingProfileIds.length > 0 && (() => {
+                // Styled like an incoming text bubble; groups also show who is typing.
+                const typers = typingProfileIds;
+                const names = typers.map((id) => groupNameOf(id));
+                const label = !isGroupThread
+                    ? null
+                    : names.length === 1
+                        ? t("chat.typing_single", { name: names[0] })
+                        : names.length === 2
+                            ? t("chat.typing_pair", { first: names[0], second: names[1] })
+                            : t("chat.typing_group", { first: names[0], second: names[1], count: names.length - 2 });
+                const shownAvatars = typers.slice(0, 3);
+                return (
+                    <div className="flex w-full animate-typing-in flex-col items-start" role="status" aria-live="polite">
+                        <div className="flex items-center gap-1 rounded-2xl rounded-es-[3px] bg-[var(--surface-2)] px-3.5 py-3" aria-hidden="true">
+                            {[0, 1, 2].map((i) => (
+                                <span
+                                    key={i}
+                                    className="h-2 w-2 animate-typing-dot rounded-full bg-[var(--accent)]"
+                                    style={{ animationDelay: `${i * 0.15}s` }}
+                                />
+                            ))}
+                        </div>
+                        {label ? (
+                            <div className="mt-1 flex max-w-full items-center gap-1.5 text-[11px] font-medium text-[var(--text-muted)]">
+                                <span className="flex shrink-0 gap-0.5">
+                                    {shownAvatars.map((id) => {
+                                        const avatarHash = groupMembers.avatarOf(id);
+                                        return (
+                                            <span key={id} className="h-4 w-4 overflow-hidden rounded-full bg-[var(--surface-2)]">
+                                                <ProfileImage src={resolveAvatarSrc(avatarHash, getParticipantAvatarUrl(avatarHash))} alt="" iconClassName="h-2.5 w-2.5" />
+                                            </span>
+                                        );
+                                    })}
+                                </span>
+                                <span className="truncate">{label}</span>
+                            </div>
+                        ) : (
+                            <span className="sr-only">{t("chat.typing")}</span>
+                        )}
                     </div>
-                </div>
-            )}
+                );
+            })()}
+            </div>
             <div ref={threadBottomRef} className="h-3 shrink-0" />
 			{reactionParticles && reactionParticles.items.map((p, i) => p.emoji ? (
 				<span

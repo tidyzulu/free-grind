@@ -22,8 +22,6 @@
             <action android:name="android.intent.action.VIEW" />
             <data android:scheme="geo" />
         </intent>
-        <!-- Must be installed to mint reCAPTCHA tokens, see RecaptchaMintActivity.kt -->
-        <package android:name="com.grindrapp.android" />
     </queries>
 
     <!-- AndroidTV support -->
@@ -164,17 +162,6 @@
             android:name=".FacebookOAuthActivity"
             android:exported="false"
             android:excludeFromRecents="true" />
-
-        <!-- Mints reCAPTCHA tokens in its own process, where
-             FreeGrindApplication poses as Grindr; not reachable from outside
-             the app. See RecaptchaMintActivity.kt. -->
-        <activity
-            android:name=".RecaptchaMintActivity"
-            android:process=":recaptcha"
-            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboardHidden|uiMode|density|fontScale|locale|layoutDirection"
-            android:exported="false"
-            android:excludeFromRecents="true"
-            android:theme="@style/Theme.free_grind.RecaptchaMint" />
 
         <!-- "Sign in with Google" in GeckoView, in its own process so Gecko
              never shares one with the app's WebView; not reachable from

@@ -58,10 +58,11 @@ import {
 	type LucideIcon,
 } from "lucide-react";
 import { useDesktopBreakpoint } from "../hooks/useDesktopBreakpoint";
-import { GITHUB_ISSUES_URL, GITHUB_NEW_ISSUE_URL } from "../utils/githubIssues";
+import { ISSUES_URL, NEW_ISSUE_URL } from "../config/links-config";
 import { useMemo } from "react";
 import { RightNowIcon } from "../components/icons/RightNowIcon";
 import { isSexualHealthEnabled } from "../utils/optionalFeatures";
+import { LOCATE_PROFILE_AVAILABLE } from "../grindr-workarounds";
 import { isAndroid, isIos } from "../services/saveMedia";
 import { useCanSendExpiringAlbums } from "../services/assignmentsStore";
 import { useTranslation } from "react-i18next";
@@ -327,18 +328,22 @@ export function useSettingsSearchIndex(): SettingsSearchEntry[] {
 			icon: HeartPulse,
 			iconClass: "bg-rose-500/15 text-rose-400",
 		},
-		{
-			id: "cust-show-locate",
-			route: "/settings/optional-features",
-			anchor: "cust-show-locate",
-			label: t("customizability.show_locate", { defaultValue: "Locate" }),
-			description: t("customizability.show_locate_desc", {
-				defaultValue: "Show \"Locate\" in the profile menu to estimate a profile's position by triangulation.",
-			}),
-			section: t("settings.search_sections.optional_features"),
-			icon: LocateFixed,
-			iconClass: "bg-emerald-500/15 text-emerald-400",
-		},
+		...(LOCATE_PROFILE_AVAILABLE
+			? [
+					{
+						id: "cust-show-locate",
+						route: "/settings/optional-features",
+						anchor: "cust-show-locate",
+						label: t("grindr:customizability.show_locate", { defaultValue: "Locate" }),
+						description: t("grindr:customizability.show_locate_desc", {
+							defaultValue: "Show \"Locate\" in the profile menu to estimate a profile's position by triangulation.",
+						}),
+						section: t("settings.search_sections.optional_features"),
+						icon: LocateFixed,
+						iconClass: "bg-emerald-500/15 text-emerald-400",
+					},
+				]
+			: []),
 
 		{
 			id: "nav-regional",
@@ -716,6 +721,16 @@ export function useSettingsSearchIndex(): SettingsSearchEntry[] {
 			iconClass: "bg-sky-500/15 text-sky-400",
 		},
 		{
+			id: "privacy-share-distance",
+			route: "/settings/privacy",
+			anchor: "privacy-share-distance",
+			label: t("browse_page.share_distance.title", { defaultValue: "Share Distance" }),
+			description: t("browse_page.share_distance.description", { defaultValue: "Choose how your distance appears to others." }),
+			section: t("settings.search_sections.privacy"),
+			icon: LocateFixed,
+			iconClass: "accent-tint-15 text-[var(--accent)]",
+		},
+		{
 			id: "privacy-show-on-map",
 			route: "/settings/privacy",
 			anchor: "privacy-show-on-map",
@@ -940,7 +955,7 @@ export function useSettingsSearchIndex(): SettingsSearchEntry[] {
 		{
 			id: "nav-issues",
 			route: "/settings",
-			externalUrl: GITHUB_ISSUES_URL,
+			externalUrl: ISSUES_URL,
 			label: t("settings.issue_board"),
 			description: t("settings.issue_board_desc"),
 			section: t("settings.search_sections.about"),
@@ -950,7 +965,7 @@ export function useSettingsSearchIndex(): SettingsSearchEntry[] {
 		{
 			id: "nav-report-issue",
 			route: "/settings",
-			externalUrl: GITHUB_NEW_ISSUE_URL,
+			externalUrl: NEW_ISSUE_URL,
 			label: t("settings.report_issue"),
 			description: t("settings.report_issue_desc"),
 			section: t("settings.search_sections.about"),

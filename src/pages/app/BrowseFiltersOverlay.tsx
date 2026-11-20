@@ -7,6 +7,7 @@ import { EditQuickFiltersButton } from "../../components/quick-filters/EditQuick
 import { BottomSheet, useBottomSheetClose, SheetCloseButton, SHEET_FOOTER_CLASS, sheetButtonClass } from "../../components/ui/bottom-sheet";
 import { SheetChip, SheetMoreButton, SheetSearchInput, SheetSection } from "../../components/ui/sheet-section";
 import { usePreferences } from "../../contexts/PreferencesContext";
+import { CruisingLayerToggle } from "./gridpage/cruising/CruisingLayerToggle";
 import { useManagedGenders, useManagedTagCategories } from "../../hooks/queries/useProfileQueries";
 import { cn } from "../../utils/cn";
 import { buildTagLabelMap } from "../../utils/tags";
@@ -157,8 +158,15 @@ function BrowseFiltersSheetContent({
 		{ key: "isVisiting", label: t("browse_filters.local_filters.is_visiting") },
 	], [t]);
 
-	const genderFilterOptions = useMemo(() => buildGenderOptions(managedGenders), [managedGenders]);
-	const primaryGenderIds = useMemo(() => getPrimaryGenderIds(managedGenders), [managedGenders]);
+	// -1 = "not specified": matches profiles without any gender set.
+	const genderFilterOptions = useMemo<ManagedOption[]>(
+		() => {
+			const options = buildGenderOptions(managedGenders);
+			return options.length > 0 ? [{ value: -1, label: t("browse_filters.not_specified") }, ...options] : options;
+		},
+		[managedGenders, t],
+	);
+	const primaryGenderIds = useMemo(() => [-1, ...getPrimaryGenderIds(managedGenders)], [managedGenders]);
 	// Primary genders inline, plus any selected non-primary ones so they stay visible/removable.
 	const inlineGenderOptions = useMemo(() => {
 		const inlineIds = [...primaryGenderIds, ...genders.filter((id) => !primaryGenderIds.includes(id))];
@@ -323,6 +331,7 @@ function BrowseFiltersSheetContent({
 
 			<div className="-mx-4 min-h-0 flex-1 overflow-y-auto px-4" data-lenis-prevent>
 				<div className="space-y-5 pb-2">
+					<CruisingLayerToggle />
 					{renderToggleSection(t("browse_filters.quick_filters"), browseFilterOptions)}
 
 					<SheetSection

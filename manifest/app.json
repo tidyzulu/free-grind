@@ -1,0 +1,24 @@
+{
+	"$comment": "App identity: name, IDs, update endpoints and links. Read by scripts/manifest.mjs, src-tauri/build.rs and build.gradle.kts. Changing identifier or android.applicationId turns the app into a different one (no in-place update, separate data).",
+	"appName": "Free Grind",
+	"appSlug": "free-grind",
+	"folderName": "FreeGrind",
+	"identifier": "dev.estopia.free-grind",
+	"userAgent": "FreeGrind/1.0.0 (+https://freegrind.imaoreo.dev/; contact: support@imaoreo.dev)",
+	"repository": "https://github.com/tidyzulu/free-grind",
+	"websiteUrl": "https://tidyzulu.github.io/free-grind/",
+	"ota": {
+		"endpoint": "https://freegrind-ota-{{channel}}.surge.sh/latest.json",
+		"pubkey": "RWQfowNcYziP1BnTEyNrdZk2MymsuGVoCeqqtGE3OfpYfLqnvAvCS9JX"
+	},
+	"android": {
+		"applicationId": "dev.estopia.free_grind"
+	},
+	"ios": {
+		"bundleId": "dev.estopia.free-grind"
+	},
+	"windows": {
+		"$comment": "Tauri derives the default from productName; pinned so a rename doesn't break MSI upgrades (`bunx tauri inspect wix-upgrade-code`).",
+		"wixUpgradeCode": "df3b8f26-c7a0-52d8-9927-ff5599ce35d7"
+	}
+}

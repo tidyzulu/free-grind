@@ -15,7 +15,7 @@ use crate::rest::InnerClient;
 
 #[cfg(not(test))]
 fn ws_url() -> String {
-	crate::server::server_config().ws_url()
+	crate::server::OFFICIAL_WS_URL.to_owned()
 }
 
 #[cfg(test)]

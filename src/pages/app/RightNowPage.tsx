@@ -1,14 +1,18 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { RightNowLimitError, RightNowPostGoneError, RightNowRequestAlreadySentError } from "../../services/api/feedMethods";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import toast from "react-hot-toast";
 import { useLocation, useNavigate } from "react-router-dom";
 import { getIncognitoMode } from "../../utils/privacy";
 import { Button } from "../../components/ui/button";
+import { FeedEmptyState, FeedErrorState } from "../../components/ui/states";
+import { RightNowIcon } from "../../components/icons/RightNowIcon";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 import {
 	ArrowUpDown,
 	Crosshair,
+	Flag,
 	MessageSquare,
 	Ghost,
 	Hourglass,
@@ -66,12 +70,17 @@ import {
 import { PageHeaderBackground } from "../../components/ui/PageHeaderBackground";
 import { FeedScrollContainer } from "../../components/ui/FeedScrollContainer";
 import { RightNowMap, getRightNowAvatarUrl, getRightNowItemKey, getRightNowProfileImageUrl, hasMapPosition } from "./rightnow/RightNowMap";
+import { CruisingMapOverlay, useCruisingMapState, useOwnMapCard, useOwnMapPresence } from "./gridpage/cruising/CruisingMapOverlay";
 import { proxyMediaUrl } from "../../utils/mediaProxy";
 import { getProfileImageUrl, validateMediaHash } from "../../utils/media";
 import { SHEET_ICON_BUTTON_CLASS, sheetButtonClass } from "../../components/ui/bottom-sheet";
 import { PRIVACY_BLUR_CLASS, PRIVACY_BLUR_TRANSITION_CLASS, PRIVACY_HOVER_REVEAL_CLASS, useMediaBlur } from "../../hooks/useProfilePhotoPrivacy";
 import { useBlurReveal } from "../../hooks/useBlurReveal";
 import { IconTabs, type IconTabConfig } from "../../components/ui/icon-tabs";
+import { ReportProfileDialog } from "../../components/ReportProfileDialog";
+import { useAuth } from "../../contexts/useAuth";
+import { useBlockedProfileIds, useMySettings } from "../../hooks/queries/useProfileQueries";
+import { useHiddenProfileIds } from "../../hooks/useHiddenProfileIds";
 
 type SortOption = RightNowSortOption;
 
@@ -119,6 +128,34 @@ function parseFiltersFromLocationState(
 /** Lucide's list in the weight of the filled icons it sits next to. */
 function ListIcon({ className }: { className?: string }) {
 	return <List className={className} strokeWidth={2.5} />;
+}
+
+/** The post a report is about; discreet posts have no known author. */
+type RightNowReportTarget = { profileId: string | null; postId: number };
+/** Omitted for our own post and for posts without an id. */
+type ReportHandler = (() => void) | undefined;
+
+const REPORT_OVERLAY_BUTTON_CLASS =
+	"inline-flex h-8 w-8 items-center justify-center rounded-full bg-black/45 text-white backdrop-blur-md transition hover:bg-black/60 active:scale-90";
+const REPORT_PLAIN_BUTTON_CLASS =
+	"flex h-7 w-7 items-center justify-center rounded-full text-[var(--text-muted)] transition hover:text-[var(--text)] active:scale-90";
+
+function ReportPostButton({ onReport, className }: { onReport: () => void; className: string }) {
+	const { t } = useTranslation();
+	return (
+		<button
+			type="button"
+			onClick={(e) => {
+				e.stopPropagation();
+				onReport();
+			}}
+			className={className}
+			title={t("right_now.report_post")}
+			aria-label={t("right_now.report_post")}
+		>
+			<Flag className="h-3.5 w-3.5" />
+		</button>
+	);
 }
 
 function getItemName(item: RightNowFeedItem, t: TFunction): string {
@@ -270,12 +307,14 @@ function RightNowRow({
 	onMessage,
 	onSelect,
 	onOpenPhoto,
+	onReport,
 	className,
 }: {
 	item: RightNowFeedItem;
 	onMessage: (profileId: string) => void;
 	onSelect: (profileId: string) => void;
 	onOpenPhoto: (photos: string[], index: number, profileId: string | null) => void;
+	onReport: ReportHandler;
 	className?: string;
 }) {
 	const { t } = useTranslation();
@@ -283,8 +322,9 @@ function RightNowRow({
 	const { ref, revealClass } = useRevealOnScroll();
 	const name = getItemName(item, t);
 	const isHosting = item.hosting;
-	const imageUrl = getItemDisplayImageUrl(item);
-	const avatarClassName = useAvatarPostMediaClass(item, imageUrl);
+	// The post's photos show in the media grid beside the avatar, so the avatar
+	// keeps the profile photo instead of repeating the first post photo.
+	const imageUrl = getRightNowProfileImageUrl(item);
 
 	const timeAgo = formatRelativeTime(item.postedAt);
 	const distance =
@@ -315,7 +355,7 @@ function RightNowRow({
 				onClick={() => onSelect(item.profileId)}
 			>
 				<div className="h-15 w-15 rounded-full overflow-hidden drop-shadow-sm bg-[var(--surface-2)]">
-					<ProfileImage src={imageUrl} alt={name || ""} className={avatarClassName} />
+					<ProfileImage src={imageUrl} alt={name || ""} />
 				</div>
 				{isOnline ? (
 					<span className={`absolute circle-badge-br h-3 w-3 rounded-full border-[1.5px] border-[var(--bg)] shadow-sm z-10 ${isEndingSoon ? "bg-amber-500" : "bg-green-500"}`} />
@@ -379,18 +419,21 @@ function RightNowRow({
 				/>
 			</div>
 
-			<button
-				type="button"
-				onClick={() => onMessage(item.profileId)}
-				className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-[var(--right-now)]/35 text-[var(--right-now)] transition-all active:scale-95 hover:border-[var(--right-now)]/45"
-				style={{
-					backgroundColor: "color-mix(in srgb, var(--right-now), transparent 92%)",
-					boxShadow: "0 2px 8px color-mix(in srgb, var(--right-now), transparent 94%)"
-				}}
-				aria-label={t("right_now.message_aria", { name: name || "" })}
-			>
-				<MessageSquare className="h-4 w-4" />
-			</button>
+			<div className="flex shrink-0 flex-col items-center gap-1">
+				<button
+					type="button"
+					onClick={() => onMessage(item.profileId)}
+					className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-[var(--right-now)]/35 text-[var(--right-now)] transition-all active:scale-95 hover:border-[var(--right-now)]/45"
+					style={{
+						backgroundColor: "color-mix(in srgb, var(--right-now), transparent 92%)",
+						boxShadow: "0 2px 8px color-mix(in srgb, var(--right-now), transparent 94%)"
+					}}
+					aria-label={t("right_now.message_aria", { name: name || "" })}
+				>
+					<MessageSquare className="h-4 w-4" />
+				</button>
+				{onReport ? <ReportPostButton onReport={onReport} className={REPORT_PLAIN_BUTTON_CLASS} /> : null}
+			</div>
 		</div>
 	);
 }
@@ -405,11 +448,13 @@ function RightNowTile({
 	onMessage,
 	onSelect,
 	onOpenPhoto,
+	onReport,
 }: {
 	item: RightNowFeedItem;
 	onMessage: (profileId: string) => void;
 	onSelect: (profileId: string) => void;
 	onOpenPhoto: (photos: string[], index: number, profileId: string | null) => void;
+	onReport: ReportHandler;
 }) {
 	const { t } = useTranslation();
 	const { unitsPreset } = usePreferences();
@@ -523,6 +568,11 @@ function RightNowTile({
 					<span className="pointer-events-none absolute bottom-12 end-3 z-10 rounded-full bg-black/55 px-2 py-0.5 text-[11px] font-semibold text-white backdrop-blur-md">
 						+{photos.length - 1}
 					</span>
+				) : null}
+				{onReport ? (
+					<div className="absolute end-3 top-3 z-10">
+						<ReportPostButton onReport={onReport} className={REPORT_OVERLAY_BUTTON_CLASS} />
+					</div>
 				) : null}
 			</div>
 
@@ -712,10 +762,12 @@ function DiscreetRequestButton({
 function RightNowDiscreetRow({
 	item,
 	onOpenPhoto,
+	onReport,
 	...requestProps
 }: DiscreetRequestProps & {
 	item: RightNowDiscreetFeedItem;
 	onOpenPhoto: (photos: string[], index: number, profileId: string | null) => void;
+	onReport: ReportHandler;
 }) {
 	const { t } = useTranslation();
 	const { unitsPreset } = usePreferences();
@@ -772,11 +824,14 @@ function RightNowDiscreetRow({
 				<PostMediaGrid media={item.media} onOpenPhoto={(index) => onOpenPhoto(photos, index, null)} />
 			</div>
 
-			<DiscreetRequestButton
-				postId={item.id}
-				{...requestProps}
-				className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-[var(--right-now)]/35 bg-[color-mix(in_srgb,var(--right-now),transparent_92%)] text-[var(--right-now)] transition-all active:scale-95 hover:border-[var(--right-now)]/45"
-			/>
+			<div className="flex shrink-0 flex-col items-center gap-1">
+				<DiscreetRequestButton
+					postId={item.id}
+					{...requestProps}
+					className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-[var(--right-now)]/35 bg-[color-mix(in_srgb,var(--right-now),transparent_92%)] text-[var(--right-now)] transition-all active:scale-95 hover:border-[var(--right-now)]/45"
+				/>
+				{onReport ? <ReportPostButton onReport={onReport} className={REPORT_PLAIN_BUTTON_CLASS} /> : null}
+			</div>
 		</div>
 	);
 }
@@ -785,10 +840,12 @@ function RightNowDiscreetRow({
 function RightNowDiscreetTile({
 	item,
 	onOpenPhoto,
+	onReport,
 	...requestProps
 }: DiscreetRequestProps & {
 	item: RightNowDiscreetFeedItem;
 	onOpenPhoto: (photos: string[], index: number, profileId: string | null) => void;
+	onReport: ReportHandler;
 }) {
 	const { t } = useTranslation();
 	const { unitsPreset } = usePreferences();
@@ -849,6 +906,11 @@ function RightNowDiscreetTile({
 						+{photos.length - 1}
 					</span>
 				) : null}
+				{onReport ? (
+					<div className="absolute end-3 top-3 z-10">
+						<ReportPostButton onReport={onReport} className={REPORT_OVERLAY_BUTTON_CLASS} />
+					</div>
+				) : null}
 			</div>
 
 			<div className="relative -mt-7 flex flex-1 flex-col px-4 pb-4">
@@ -901,12 +963,14 @@ function RightNowMapCard({
 	onMessage,
 	onSelect,
 	onOpenPhoto,
+	onReport,
 	onClose,
 }: {
 	item: RightNowFeedItem;
 	onMessage: (profileId: string) => void;
 	onSelect: (profileId: string) => void;
 	onOpenPhoto: (photos: string[], index: number, profileId: string | null) => void;
+	onReport: ReportHandler;
 	onClose: () => void;
 }) {
 	const { t } = useTranslation();
@@ -941,7 +1005,10 @@ function RightNowMapCard({
 			{/* Close, pinned to the card's corner (over the photo when there is one).
 			    Positioned by a wrapper: SHEET_ICON_BUTTON_CLASS's ink-tint sets
 			    position: relative, which would override an absolute on the button. */}
-			<div className="absolute end-3 top-3 z-10">
+			<div className="absolute end-3 top-3 z-10 flex items-center gap-2">
+				{onReport ? (
+					<ReportPostButton onReport={onReport} className={heroSrc ? REPORT_OVERLAY_BUTTON_CLASS : SHEET_ICON_BUTTON_CLASS} />
+				) : null}
 				<button
 					type="button"
 					onClick={onClose}
@@ -1014,7 +1081,7 @@ function RightNowMapCard({
 						) : null}
 					</button>
 
-					<button type="button" onClick={() => onSelect(item.profileId)} className={cn("min-w-0 flex-1 pb-0.5 text-start", !heroSrc && "pe-8")}>
+					<button type="button" onClick={() => onSelect(item.profileId)} className={cn("min-w-0 flex-1 pb-0.5 text-start", !heroSrc && (onReport ? "pe-18" : "pe-8"))}>
 						<div className="flex min-w-0 items-center gap-1.5">
 							<p className="truncate text-base font-bold text-[var(--text)]">{name}</p>
 							{item.isFavorite && <Star className="h-3.5 w-3.5 shrink-0 fill-current text-[var(--accent)]" />}
@@ -1156,12 +1223,33 @@ export function RightNowPage() {
 		}
 		return { lat: 52.52, lon: 13.405 };
 	}, [geohash]);
+	// Authors we blocked or hid don't show, like on the grid (and like Open
+	// Grind): the feed itself doesn't leave them out. Discreet posts have no
+	// known author to match.
+	const { data: blockedProfileIdsData } = useBlockedProfileIds(!isIncognito);
+	const hiddenProfileIds = useHiddenProfileIds();
+	const { userId } = useAuth();
+	// Explicit photos (server `isNsfw`) are left out entirely unless the account
+	// setting "Explicit Images in Right Now" (viewRightNowNsfw) is on — also
+	// while the setting is still loading. Own posts always keep their photos.
+	const { data: mySettings } = useMySettings(!isIncognito);
+	const showNsfw = mySettings?.viewRightNowNsfw === true;
 	const items = useMemo(() => {
 		const source = rightNowTestMode ? simulateRightNowMapFeed(feedItems, testModeCenter, hostingOnly) : feedItems;
-		// Favorites is filtered here — the feed API has no parameter for it.
-		// Discreet posts have no known author to be a favorite.
-		return favoritesOnly ? source.filter((item) => item.kind === "post" && item.isFavorite) : source;
-	}, [rightNowTestMode, feedItems, testModeCenter, hostingOnly, favoritesOnly]);
+		const blocked = new Set(blockedProfileIdsData ?? []);
+		return source
+			.filter((item) => {
+				if (item.kind === "discreet") return !favoritesOnly;
+				if (blocked.has(item.profileId) || hiddenProfileIds.has(item.profileId)) return false;
+				// Favorites is filtered here — the feed API has no parameter for it.
+				return !favoritesOnly || item.isFavorite;
+			})
+			.map((item) => {
+				if (showNsfw || (item.kind === "post" && userId != null && item.profileId === String(userId))) return item;
+				if (!item.media?.some((m) => m.data?.isNsfw === true)) return item;
+				return { ...item, media: item.media.filter((m) => m.data?.isNsfw !== true) };
+			});
+	}, [rightNowTestMode, feedItems, testModeCenter, hostingOnly, favoritesOnly, blockedProfileIdsData, hiddenProfileIds, showNsfw, userId]);
 	const queryClient = useQueryClient();
 	const api = useApiFunctions();
 
@@ -1183,6 +1271,21 @@ export function RightNowPage() {
 			void queryClient.invalidateQueries({ queryKey: ["rightnow", "requests", "outbox"] });
 		},
 		onError: (requestError) => {
+			if (requestError instanceof RightNowRequestAlreadySentError) {
+				// Nothing went wrong: it's already waiting for an answer.
+				toast(t("right_now.request_already_sent", { defaultValue: "You already sent a request for this post" }));
+				void queryClient.invalidateQueries({ queryKey: ["rightnow", "requests", "outbox"] });
+				return;
+			}
+			if (requestError instanceof RightNowPostGoneError) {
+				toast.error(t("right_now.request_post_gone", { defaultValue: "This post is no longer available" }));
+				void queryClient.invalidateQueries({ queryKey: ["rightnow"] });
+				return;
+			}
+			if (requestError instanceof RightNowLimitError) {
+				toast.error(t("right_now.request_limit", { defaultValue: "You've reached your limit for requests. Try again later." }));
+				return;
+			}
 			toast.error(requestError instanceof Error ? requestError.message : t("right_now.request_error", { defaultValue: "Could not send the request" }));
 		},
 	});
@@ -1366,6 +1469,11 @@ export function RightNowPage() {
 		? parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--nav-rail-width")) || 0
 		: 0;
 	const isMapCardOpen = isMapView && selectedMapItem !== null;
+	// As on the grid map: the own profile (with the anchor at the real position)
+	// and, on the Free Grind server, the cruising spots.
+	const ownMapCard = useOwnMapCard();
+	const { selfMapPosition, selfFuzzRadiusMeters } = useOwnMapPresence(isMapView);
+	const cruisingMap = useCruisingMapState(isMapView && !isIncognito);
 	const { fullWidth: navFullWidth } = useNavStyle();
 	// Set by RightNowMap; the header's Center pill frames all markers through it.
 	const mapRecenterRef = useRef<(() => void) | null>(null);
@@ -1499,6 +1607,27 @@ export function RightNowPage() {
 		},
 		[navigate],
 	);
+
+	// Reports: not our own post, and only posts the server gave an id.
+	const [reportTarget, setReportTarget] = useState<RightNowReportTarget | null>(null);
+	const [isReportOpen, setIsReportOpen] = useState(false);
+	const reportHandlerFor = (item: RightNowFeedEntry): ReportHandler => {
+		if (item.id == null || rightNowTestMode) return undefined;
+		if (item.kind === "discreet") {
+			if (item.id === activeRightNowId) return undefined;
+			const postId = item.id;
+			return () => {
+				setReportTarget({ profileId: null, postId });
+				setIsReportOpen(true);
+			};
+		}
+		if (userId != null && item.profileId === String(userId)) return undefined;
+		const target = { profileId: item.profileId, postId: item.id };
+		return () => {
+			setReportTarget(target);
+			setIsReportOpen(true);
+		};
+	};
 
 	const handleSelect = useCallback(
 		(profileId: string) => {
@@ -1709,7 +1838,8 @@ export function RightNowPage() {
 				</div>
 			</header>
 
-			{isMapView && !error && !isIncognito ? (
+			{/* A failed load keeps the map up; it then just shows nobody nearby. */}
+			{isMapView && !isIncognito ? (
 				<div
 					// Full bleed, running up behind the header and, on desktop, on under
 					// the (unfilled) nav rail instead of being cut off at its edge.
@@ -1724,6 +1854,18 @@ export function RightNowPage() {
 						topInset={headerBottom}
 						leftInset={railWidth}
 						recenterRef={mapRecenterRef}
+						selfCard={ownMapCard}
+						selfMapPosition={selfMapPosition}
+						selfFuzzRadiusMeters={selfFuzzRadiusMeters}
+						onSelectSelf={ownMapCard ? () => handleSelect(String(ownMapCard.profileId)) : undefined}
+						spots={cruisingMap.spots}
+						selectedSpotId={cruisingMap.selectedSpotId}
+						checkedInSpotId={cruisingMap.checkIn?.spotId ?? null}
+						onSelectSpot={(spotId) => {
+							setSelectedMapKey(null);
+							cruisingMap.setSelectedSpotId(spotId);
+						}}
+						onCenterChange={cruisingMap.handleCenterChange}
 					/>
 
 					{/* Keeps the rail's tabs readable over the map, like the mobile nav bar's fade. */}
@@ -1743,7 +1885,7 @@ export function RightNowPage() {
 					{!isLoading && mapItems.length === 0 && (
 						<div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center px-8">
 							<p className="rounded-2xl border border-[var(--border)] bg-[var(--surface)]/90 px-4 py-3 text-center text-sm text-[var(--text-muted)] shadow-lg backdrop-blur">
-								{items.length === 0
+								{items.length === 0 || error
 									? t("right_now.empty")
 									: t("right_now.map_no_positions", {
 										defaultValue: "Nobody nearby is sharing their location on the map right now.",
@@ -1769,6 +1911,7 @@ export function RightNowPage() {
 								onMessage={handleMessage}
 								onSelect={handleSelect}
 								onOpenPhoto={openPhotoViewer}
+								onReport={reportHandlerFor(selectedMapItem)}
 								onClose={() => setSelectedMapKey(null)}
 							/>
 						</div>
@@ -1808,21 +1951,21 @@ export function RightNowPage() {
 						))}
 					</div>
 				) : error ? (
-					<div className="px-[var(--app-px)] py-8 text-center">
-						<p className="mb-3 text-sm text-[var(--text-muted)]">{error instanceof Error ? error.message : String(error)}</p>
-						<button
-							type="button"
-							onClick={() => void refetch()}
-							className="rounded-full border border-[var(--right-now)]/30 px-4 py-2 text-sm font-bold text-[var(--right-now)]/70 transition-all hover:border-[var(--right-now)]/50 hover:text-[var(--right-now)] active:scale-95"
-							style={{ backgroundColor: "color-mix(in srgb, var(--right-now), transparent 95%)" }}
-						>
-							{t("right_now.try_again")}
-						</button>
-					</div>
+					<FeedErrorState
+						title={t("right_now.error_load")}
+						description={error instanceof Error ? error.message : String(error)}
+						onRetry={() => void refetch()}
+						retryLabel={t("right_now.try_again")}
+						color="var(--right-now)"
+					/>
 				) : items.length === 0 ? (
-					<div className="px-[var(--app-px)] py-16 text-center">
-						<p className="text-sm text-[var(--text-muted)]">{t("right_now.empty")}</p>
-					</div>
+					<FeedEmptyState
+						icon={<RightNowIcon />}
+						title={t("right_now.empty")}
+						description={t("right_now.empty_desc", { defaultValue: "People who post Right Now near you will show up here." })}
+						color="var(--right-now)"
+						contrastColor="white"
+					/>
 				) : isDesktop ? (
 					<div className="grid grid-cols-[repeat(auto-fill,minmax(max(300px,calc((100%-4*0.75rem)/5)),1fr))] gap-3 px-[var(--app-px)] pb-[calc(var(--safe-area-bottom)+120px)] rail:pb-[calc(var(--page-bottom)+4rem)]">
 						{items.map((item) =>
@@ -1831,6 +1974,7 @@ export function RightNowPage() {
 									key={getRightNowEntryKey(item)}
 									item={item}
 									onOpenPhoto={openPhotoViewer}
+									onReport={reportHandlerFor(item)}
 									request={sentRequests?.get(item.id)}
 									isSending={sendRequest.isPending && sendRequest.variables === item.id}
 									onRequest={(postId) => sendRequest.mutate(postId)}
@@ -1843,6 +1987,7 @@ export function RightNowPage() {
 									onMessage={handleMessage}
 									onSelect={handleSelect}
 									onOpenPhoto={openPhotoViewer}
+									onReport={reportHandlerFor(item)}
 								/>
 							),
 						)}
@@ -1855,6 +2000,7 @@ export function RightNowPage() {
 									<RightNowDiscreetRow
 										item={item}
 										onOpenPhoto={openPhotoViewer}
+										onReport={reportHandlerFor(item)}
 										request={sentRequests?.get(item.id)}
 										isSending={sendRequest.isPending && sendRequest.variables === item.id}
 										onRequest={(postId) => sendRequest.mutate(postId)}
@@ -1866,6 +2012,7 @@ export function RightNowPage() {
 										onMessage={handleMessage}
 										onSelect={handleSelect}
 										onOpenPhoto={openPhotoViewer}
+										onReport={reportHandlerFor(item)}
 									/>
 								)}
 							</div>
@@ -1884,6 +2031,18 @@ export function RightNowPage() {
 			className={cn("pointer-events-none fixed bottom-0 start-[var(--nav-rail-width,0px)] end-0 z-[55] hidden h-36", !isMapView && "rail:block")}
 			style={{ background: BOTTOM_SCRIM_GRADIENT }}
 		/>
+		{/* Cruising spots on the map: at page level (not inside the full-bleed map
+		    wrapper), so the bar centers like the post pill below. */}
+		{isMapView && !isIncognito ? (
+			<CruisingMapOverlay
+				state={cruisingMap}
+				onOpenProfile={handleSelect}
+				onBeforeSuggest={() => setSelectedMapKey(null)}
+				// One row above Right Now's own post button.
+				barClassName="bottom-[calc(var(--nav-height,var(--safe-area-bottom))+5.25rem)] rail:bottom-[calc(var(--page-bottom)+4.5rem)]"
+				hideBar={isMapCardOpen || isPosting || isFiltersOpen || isRequestsOpen}
+			/>
+		) : null}
 		<div className="fixed start-[var(--nav-rail-width,0px)] end-0 bottom-[calc(var(--nav-height,var(--safe-area-bottom))+0.75rem)] rail:bottom-[var(--page-bottom)] z-[60] pointer-events-none">
 			<div className="relative mx-auto h-full w-full max-w-4xl rail:max-w-none px-4 md:px-10">
 				{developerMode && showDebugInfo && (
@@ -1958,6 +2117,14 @@ export function RightNowPage() {
 				initialDraft={{ ageMin, ageMax, positionFilter, hostingOnly, favoritesOnly }}
 				onClose={handleCloseFilters}
 				onApply={handleApplyFilters}
+			/>
+		)}
+		{reportTarget && (
+			<ReportProfileDialog
+				isOpen={isReportOpen}
+				profileId={reportTarget.profileId}
+				rightNowPostId={reportTarget.postId}
+				onClose={() => setIsReportOpen(false)}
 			/>
 		)}
 		{isViewerOpen && (

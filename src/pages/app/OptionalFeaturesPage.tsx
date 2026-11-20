@@ -14,6 +14,7 @@ import {
 	isVideoGalleryEnabled,
 	setOptionalFeatureEnabled,
 } from "../../utils/optionalFeatures";
+import { LOCATE_PROFILE_AVAILABLE } from "../../grindr-workarounds";
 
 export function OptionalFeaturesPage() {
 	const { t } = useTranslation();
@@ -64,21 +65,23 @@ export function OptionalFeaturesPage() {
 							setOptionalFeatureEnabled(SHOW_SEXUAL_HEALTH_KEY, checked);
 						}}
 					/>
-					<ToggleRow
-						id="cust-show-locate"
-						highlighted={highlightId === "cust-show-locate"}
-						icon={<LocateFixedFilled className="h-5 w-5" />}
-						iconClass="bg-emerald-500/15 text-emerald-400"
-						label={t("customizability.show_locate", { defaultValue: "Locate" })}
-						description={t("customizability.show_locate_desc", {
-							defaultValue: "Show \"Locate\" in the profile menu to estimate a profile's position by triangulation.",
-						})}
-						checked={showLocate}
-						onChange={(checked) => {
-							setShowLocate(checked);
-							setOptionalFeatureEnabled(SHOW_LOCATE_KEY, checked);
-						}}
-					/>
+					{LOCATE_PROFILE_AVAILABLE ? (
+						<ToggleRow
+							id="cust-show-locate"
+							highlighted={highlightId === "cust-show-locate"}
+							icon={<LocateFixedFilled className="h-5 w-5" />}
+							iconClass="bg-emerald-500/15 text-emerald-400"
+							label={t("grindr:customizability.show_locate", { defaultValue: "Locate" })}
+							description={t("grindr:customizability.show_locate_desc", {
+								defaultValue: "Show \"Locate\" in the profile menu to estimate a profile's position by triangulation.",
+							})}
+							checked={showLocate}
+							onChange={(checked) => {
+								setShowLocate(checked);
+								setOptionalFeatureEnabled(SHOW_LOCATE_KEY, checked);
+							}}
+						/>
+					) : null}
 				</div>
 			</div>
 		</section>

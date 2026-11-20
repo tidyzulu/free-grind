@@ -26,11 +26,6 @@ if [ "$xcode" != "Xcode 26.6" ]; then
 	echo "Release builds use Xcode 26.6, this is $xcode; select it with xcode-select -s" >&2
 	exit 1
 fi
-if [ ! -f "$repo/src-tauri/vendor/freegrind-google-oauth-webextension/geckoview/manifest.json" ]; then
-	echo "The git submodule is missing; run: git submodule update --init" >&2
-	exit 1
-fi
-
 export TZ=UTC LC_ALL=C LANG=C
 export FG_REPRODUCIBLE_BUILD=1 VITE_HOTSWAP_CHANNEL="$FG_CHANNEL"
 # Xcode 26's bundled MetalToolchain shadows the Swift back-deployment
@@ -74,7 +69,15 @@ fi
 # cargo would otherwise quietly re-resolve an outdated Cargo.lock.
 cargo metadata --locked --format-version 1 --manifest-path src-tauri/Cargo.toml >/dev/null
 bun install --frozen-lockfile
+# App identity (manifest/app.json) and the
+# build variables its manifest brings: FG_APP_NAME, FG_APP_SLUG, FG_APP_BINARY,
+# FG_APP_REPO_URL, … (scripts/manifest-env.mjs). Artifacts are named <slug>-v….
+eval "$(bun --no-env-file scripts/manifest-env.mjs)"
 bun run build
+
+# App identity patch (scripts/tauri-config.mjs).
+TAURI_CONFIG="$(bun --no-env-file scripts/tauri-config.mjs ios)"
+export TAURI_CONFIG
 
 # `tauri ios init` regenerates gen/apple from Tauri's templates, which drops
 # our committed customizations (project.yml with the app-disguise alternate
@@ -88,6 +91,22 @@ sed -i '' \
 	-e "s/CFBundleShortVersionString: .*/CFBundleShortVersionString: \"$short_version\"/" \
 	-e "s/CFBundleVersion: .*/CFBundleVersion: \"$build_number\"/" \
 	src-tauri/gen/apple/project.yml
+# App identity (manifest/app.json, scripts/manifest.mjs): bundle ID, the
+# name under the icon, and the icon when the manifest brings its own
+# (manifest/ios/AppIcon.appiconset; otherwise the committed one stays).
+manifest_json="$(bun -e 'import { manifestDir, loadManifest } from "./scripts/manifest.mjs"; console.log(JSON.stringify({ ...loadManifest(), dir: manifestDir() }))')"
+bundle_id="$(jq -r '.ios.bundleId' <<<"$manifest_json")"
+app_name="$(jq -r '.appName | gsub("[\\\\/&\"]"; "")' <<<"$manifest_json")"
+sed -i '' \
+	-e "s/^  bundleIdPrefix: .*/  bundleIdPrefix: $bundle_id/" \
+	-e "s/PRODUCT_NAME: .*/PRODUCT_NAME: \"$app_name\"/" \
+	-e "s/PRODUCT_BUNDLE_IDENTIFIER: .*/PRODUCT_BUNDLE_IDENTIFIER: $bundle_id/" \
+	src-tauri/gen/apple/project.yml
+manifest_icon="$(jq -r '.dir' <<<"$manifest_json")/ios/AppIcon.appiconset"
+if [ -d "$manifest_icon" ]; then
+	rm -rf src-tauri/gen/apple/Assets.xcassets/AppIcon.appiconset
+	cp -R "$manifest_icon" src-tauri/gen/apple/Assets.xcassets/AppIcon.appiconset
+fi
 # xcodegen fails on source paths that don't exist yet; Externals is filled
 # with the prebuilt Rust library below.
 mkdir -p src-tauri/gen/apple/Externals/arm64/release \
@@ -181,7 +200,7 @@ app_plist="$tools/Payload/$(basename "$app")/Info.plist"
 plutil -convert binary1 "$app_plist"
 find "$tools/Payload" -exec touch -h -t "$(date -r "$SOURCE_DATE_EPOCH" +%Y%m%d%H%M.%S)" {} +
 mkdir -p "$repo/out/ios"
-ipa="$repo/out/ios/free-grind-v$version-unsigned.ipa"
+ipa="$repo/out/ios/$FG_APP_SLUG-v$version-unsigned.ipa"
 rm -f "$ipa"
 (cd "$tools" && find Payload | LC_ALL=C sort | /usr/bin/zip -qXy "$ipa" -@)
 

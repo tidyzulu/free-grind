@@ -13,6 +13,7 @@ const EXTENSION_LIBRARIES: [&str; 4] = [
 
 fn main() {
     embed_commit_hash();
+    embed_manifest();
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") {
         build_webkit_extension();
     }
@@ -34,6 +35,22 @@ fn embed_commit_hash() {
         .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
         .unwrap_or_default();
     println!("cargo:rustc-env=FG_COMMIT_HASH={hash}");
+}
+
+/// The app's identity (src/app_identity.rs) from its manifest
+/// (manifest/app.json): FG_APP_NAME and FG_APP_SLUG.
+fn embed_manifest() {
+    let manifest = "../manifest/app.json";
+    println!("cargo:rerun-if-changed={manifest}");
+    let text = std::fs::read_to_string(manifest).unwrap_or_else(|e| panic!("can't read {manifest}: {e}"));
+    let json: serde_json::Value = serde_json::from_str(&text).unwrap_or_else(|e| panic!("{manifest}: {e}"));
+    for (key, env) in [("appName", "FG_APP_NAME"), ("appSlug", "FG_APP_SLUG")] {
+        let value = json[key]
+            .as_str()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| panic!("{manifest}: missing {key}"));
+        println!("cargo:rustc-env={env}={value}");
+    }
 }
 
 /// Without the GStreamer headers the build still goes through: it leaves an

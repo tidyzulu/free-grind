@@ -7,7 +7,6 @@ cd /work
 
 # The mount belongs to the host user; git refuses to read it as root otherwise.
 git config --global --add safe.directory /work
-git config --global --add safe.directory /work/src-tauri/vendor/freegrind-google-oauth-webextension
 
 # Artifact scripts add their own cleanup by setting cleanup_hook to a function.
 cleanup_hook=true
@@ -42,6 +41,10 @@ export VITE_HOTSWAP_CHANNEL="${FG_CHANNEL:?FG_CHANNEL must be set}"
 export NODE_OPTIONS="--max-old-space-size=4096"
 
 version="$(node -p 'require("./package.json").version')"
+# App identity (manifest/app.json) and the
+# build variables its manifest brings: FG_APP_NAME, FG_APP_SLUG, FG_APP_BINARY,
+# FG_APP_REPO_URL, … (scripts/manifest-env.mjs). Artifacts are named <slug>-v….
+eval "$(bun --no-env-file scripts/manifest-env.mjs)"
 out="/work/out"
 
 # bun's hardlinking install fails across the container's overlay and the
@@ -49,14 +52,9 @@ out="/work/out"
 export BUN_INSTALL_CACHE_DIR=/work/.bun-cache
 bun install --frozen-lockfile --backend copyfile
 
-echo "Building Free Grind $version (channel $FG_CHANNEL, SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH)"
+echo "Building $FG_APP_NAME $version (channel $FG_CHANNEL, SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH)"
 echo "  node $(node --version), bun $(bun --version)"
 if command -v cargo >/dev/null 2>&1; then
-	# The app builds compile the submodule in; the frontend bundle doesn't need it.
-	if [ ! -f src-tauri/vendor/freegrind-google-oauth-webextension/geckoview/manifest.json ]; then
-		echo "The git submodule is missing; run: git submodule update --init" >&2
-		exit 1
-	fi
 	echo "  $(rustc --version)"
 	# cargo would otherwise quietly re-resolve an outdated Cargo.lock.
 	cargo metadata --locked --format-version 1 --manifest-path src-tauri/Cargo.toml >/dev/null

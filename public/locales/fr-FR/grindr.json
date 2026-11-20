@@ -1,0 +1,66 @@
+{
+    "profile_details": {
+        "location_finder_running": "Recherche de la position en cours...",
+        "location_finder": "Radar de localisation",
+        "location_finder_confirm_title": "Localisateur",
+        "location_finder_confirm_message": "{{appName}} peut trianguler la position de ce profil en modifiant à plusieurs reprises votre position sur le serveur. Cela prend quelques minutes ; votre position est ensuite restaurée.",
+        "location_finder_confirm_warning": "Cela enfreint les conditions d'utilisation de Grindr et peut entraîner le bannissement de votre compte. À vos risques et périls.",
+        "location_finder_confirm_start": "Localiser quand même",
+        "location_finder_error_distance": "Impossible d'obtenir la distance de la cible.",
+        "location_finder_start": "Distance de la cible : {{distance}}m. Début des {{rounds}} cycles de triangulation.",
+        "location_finder_round_complete": "Cycle {{round}} terminé. {{lat}},{{lon}}. Distance estimée : ~{{distance}}m.",
+        "location_finder_error_estimate": "Cycle {{round}} terminé. Marge d'erreur : ~{{error}}m",
+        "location_finder_final_location": "L'utilisateur se trouve approximativement aux coordonnées lat : {{lat}}, lon : {{lon}}. Erreur estimée : ~{{error}} mètres par rapport à la position finale estimée.",
+        "location_finder_error_general": "Une erreur est survenue lors de la triangulation",
+        "location_finder_error_age_verification_region": "Arrêté : ce profil se trouve dans ou près d'une région où Grindr exige une vérification d'âge. Y déplacer votre position bloquerait votre compte.",
+        "location_finder_location_copied": "Emplacement copié dans le presse-papiers",
+        "location_finder_result_title": "Position trouvée",
+        "location_finder_result_error": "Marge d'erreur estimée : ~{{error}} m",
+        "location_finder_open_maps": "Ouvrir dans Plans",
+        "location_finder_copy": "Copier les coordonnées",
+        "location_finder_status_measuring": "Mesure de la distance initiale…",
+        "location_finder_status_round": "Tour {{round}}/{{rounds}} · mesure du point {{point}}/3",
+        "location_finder_status_cancelled": "Arrêté",
+        "location_finder_initial_distance": "Distance initiale : {{distance}} m",
+        "location_finder_restoring": "Restauration de votre position…",
+        "location_finder_label_initial_distance": "Distance initiale",
+        "location_finder_label_accuracy": "Précision",
+        "location_finder_region_limited": "Précision limitée : ce profil se trouve dans ou près d'une région où Grindr exige une vérification d'âge, et vous rapprocher bloquerait votre compte.",
+        "location_finder_stop": "Arrêter",
+        "location_finder_busy": "La localisation est déjà en cours pour un autre profil.",
+        "locating": "Localisation…",
+        "run_location_finder": "Lancer le radar de localisation"
+    },
+    "interest_page": {
+        "onboarding": {
+            "title": "Visiteurs du profil",
+            "limitation_title": "Comment ça marche",
+            "limitation_desc": "En temps normal, Grindr n'affiche de façon visible que le tout dernier visiteur. Les autres sont généralement masqués derrière un accès payant ou présentés sous forme d'aperçus anonymes.",
+            "recovery_title": "Récupération intelligente",
+            "recovery_desc": "{{appName}} associe automatiquement les visiteurs anonymes à votre historique local. Si une correspondance est trouvée, le profil vous sera révélé.",
+            "button": "J'ai compris"
+        }
+    },
+    "entitlement_bypass": {
+        "prompt_title": "Fonctionnalité payante",
+        "prompt_message": "{{appName}} peut tenter de contourner cela en simulant brièvement votre position au Honduras.",
+        "prompt_warning": "Cela enfreint les conditions d'utilisation de Grindr et peut entraîner le bannissement de votre compte. À vos risques et périls.",
+        "prompt_confirm": "Contourner quand même",
+        "prompt_cancel": "Annuler",
+        "reason_expiring_photo": "Limite quotidienne de photos éphémères atteinte. En envoyer davantage nécessite un abonnement Grindr.",
+        "reason_message": "L'envoi de ce message nécessite un abonnement Grindr.",
+        "reason_unsend": "Annuler l'envoi d'un message nécessite un abonnement Grindr.",
+        "reason_album_share": "Le partage de cet album nécessite un abonnement Grindr.",
+        "still_refused": "Grindr refuse toujours cette fonctionnalité payante",
+        "no_location": "Définissez votre position avant d'utiliser ce contournement",
+        "failed": "Échec du contournement de cette fonctionnalité payante",
+        "expiring_album_no_bypass": "Les albums éphémères sont une fonctionnalité payante de Grindr, et il n'existe aucun contournement."
+    },
+    "behavior": {
+        "default_expiring_photos_free_warning": "Avec l'offre gratuite, tu ne peux envoyer qu'un nombre limité de photos éphémères par jour. Au-delà, le contournement de localisation (Honduras) est nécessaire, ce qui enfreint les conditions d'utilisation de Grindr et peut entraîner le bannissement de ton compte."
+    },
+    "customizability": {
+        "show_locate": "Localiser",
+        "show_locate_desc": "Affiche « Localiser » dans le menu du profil pour estimer la position d'un profil par triangulation."
+    }
+}

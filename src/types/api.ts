@@ -136,11 +136,25 @@ export const methodSchemas = {
 			restriction: restrictionSchema.nullish(),
 		}),
 	},
+	/** Forces a session refresh, e.g. so new claims (verified e-mail) take effect. */
+	refresh_token: {
+		request: z.undefined(),
+		response: z.object({
+			profileId: z.coerce.number().int().nonnegative(),
+			restriction: restrictionSchema.nullish(),
+		}),
+	},
 	websocket_token: {
 		request: z.undefined(),
 		response: z.string().min(1).nullable(),
 	},
 	sync_push_token: {
+		request: z.object({
+			token: z.string().min(1),
+		}),
+		response: z.undefined(),
+	},
+	revoke_push_token: {
 		request: z.object({
 			token: z.string().min(1),
 		}),

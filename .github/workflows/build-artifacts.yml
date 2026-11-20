@@ -34,9 +34,6 @@ jobs:
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          # src-tauri/vendor/freegrind-google-oauth-webextension (desktop Google sign-in)
-          submodules: true
 
       - name: Install Linux dependencies
         if: matrix.platform == 'ubuntu-24.04'
@@ -80,6 +77,11 @@ jobs:
       - name: Install frontend dependencies
         run: bun install --frozen-lockfile
 
+      - name: App identity config
+        # App identity from the app manifest (manifest/app.json).
+        # Read by the Tauri CLI from TAURI_CONFIG.
+        run: echo "TAURI_CONFIG=$(bun --no-env-file scripts/tauri-config.mjs)" >> "$GITHUB_ENV"
+
       - name: Build desktop artifacts
         uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0.6.2
         with:
@@ -99,10 +101,6 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          # src-tauri/vendor/freegrind-google-oauth-webextension (Google sign-in,
-          # bundled into the APK for GoogleOAuthActivity)
-          submodules: true
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
@@ -151,6 +149,11 @@ jobs:
 
       - name: Install frontend dependencies
         run: bun install --frozen-lockfile
+
+      - name: App identity config
+        # App identity from the app manifest (manifest/app.json).
+        # Read by the Tauri CLI from TAURI_CONFIG.
+        run: echo "TAURI_CONFIG=$(bun --no-env-file scripts/tauri-config.mjs android)" >> "$GITHUB_ENV"
 
       - name: Initialize Android project
         run: bunx tauri android init --ci --skip-targets-install
@@ -227,3 +230,4 @@ jobs:
 
   build-ios:
     uses: ./.github/workflows/build-ios.yml
+    secrets: inherit

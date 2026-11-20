@@ -64,7 +64,7 @@ export function UnsupportedVersionPromptView({
 			title={t("unsupported_version.title", { defaultValue: "Update Required" })}
 			description={t("unsupported_version.description", {
 				defaultValue:
-					"Grindr no longer accepts the app version Free Grind identifies as. Update Free Grind to keep using it — until then, sign-in and most features won't work.",
+					"Grindr no longer accepts the app version {{appName}} identifies as. Update {{appName}} to keep using it — until then, sign-in and most features won't work.",
 			})}
 			footer={
 				<>

@@ -7,7 +7,8 @@ import type { Message } from "../types/messages";
  * carries our own reaction (we just reacted to their message).
  */
 export function looksLikeMessageUpdate(m: Message, userId: string | number | null | undefined): boolean {
-	if (m.unsent) return true;
+	// Edited (Free Grind server): the same message again with new text.
+	if (m.unsent || m.editedAt != null) return true;
 	if (userId == null) return false;
 	return m.reactions.some((r) => Number(r.profileId) === Number(userId));
 }

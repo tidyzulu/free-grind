@@ -2,8 +2,6 @@ package dev.estopia.free_grind
 
 import android.content.Context
 import android.util.Log
-import com.google.firebase.FirebaseApp
-import com.google.firebase.FirebaseOptions
 import com.google.firebase.messaging.FirebaseMessaging
 
 /**
@@ -21,18 +19,9 @@ object PushFirebase {
     fun initialize(context: Context) {
         if (initialized) return
         try {
-            val spoofed = SpoofedContext(context.applicationContext)
-            val options = FirebaseOptions.Builder()
-                .setApplicationId(context.getString(R.string.fcm_google_app_id))
-                .setProjectId(context.getString(R.string.fcm_project_id))
-                .setApiKey(context.getString(R.string.fcm_google_api_key))
-                .setGcmSenderId(context.getString(R.string.fcm_gcm_defaultSenderId))
-                .build()
-            if (FirebaseApp.getApps(spoofed).isEmpty()) {
-                FirebaseApp.initializeApp(spoofed, options)
-            }
-            initialized = true
-            Log.d(TAG, "Firebase initialized with spoofed context")
+            // The default FirebaseApp: Grindr's project (GrindrNative).
+            initialized = GrindrNative.initializeDefaultFirebase(context)
+            Log.d(TAG, if (initialized) "Default Firebase app initialized" else "No default Firebase app")
         } catch (t: Throwable) {
             Log.e(TAG, "Firebase initialization failed; continuing without push", t)
         }

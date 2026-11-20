@@ -373,3 +373,4 @@ export const VERSION_ANNOUNCEMENTS: VersionAnnouncement[] = [
 		],
 	},
 ];
+

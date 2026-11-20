@@ -50,6 +50,7 @@ mod client;
 mod device;
 mod error;
 mod headers;
+mod identity;
 mod media;
 mod request;
 mod rest;
@@ -80,7 +81,6 @@ pub use media::{
 };
 pub use request::RequestBuilder;
 pub use rest::RawResponse;
-pub use server::{server_config, set_server_config, ServerConfig};
 pub use signing::DeviceSigningKey;
 pub use stream::BodySource;
 pub use ws::{WsCommand, WsConnectionState, WsEvent};

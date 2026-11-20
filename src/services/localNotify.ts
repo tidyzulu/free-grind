@@ -26,7 +26,7 @@ import { appLog } from "../utils/logger";
 // installed /usr/share/applications/Free Grind.desktop. Passing this as the
 // notification icon lets the icon theme resolve it once the app is properly
 // installed with icons bundled (see tauri.conf.json `bundle.icon`).
-const APP_ICON_NAME = "free-grind";
+const APP_ICON_NAME = __APP_BINARY__;
 
 let permissionPromise: Promise<boolean> | null = null;
 let cachedIsSupported: boolean | null = null;

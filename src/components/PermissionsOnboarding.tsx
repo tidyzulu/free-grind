@@ -16,7 +16,8 @@ import { getCurrentLocation } from "../services/currentLocation";
 import { appLog } from "../utils/logger";
 import { markOnboardingComplete } from "../utils/onboardingStorage";
 import { useHorizontalSwipe } from "../hooks/useHorizontalSwipe";
-import { GITHUB_OTA_SIGNING_URL, openExternalUrl } from "../utils/githubIssues";
+import { openExternalUrl } from "../utils/externalUrl";
+import { OTA_SIGNING_URL } from "../config/links-config";
 import { isHotswapAvailable, setHotswapAutoUpdateEnabled } from "../services/hotswap";
 import { usePreferences, ACCENT_PRESETS } from "../contexts/PreferencesContext";
 import type { ColorScheme } from "../contexts/PreferencesContext";
@@ -603,7 +604,7 @@ export function PermissionsOnboarding({ onComplete }: { onComplete: () => void }
 							</p>
 							<button
 								type="button"
-								onClick={() => void openExternalUrl(GITHUB_OTA_SIGNING_URL)}
+								onClick={() => void openExternalUrl(OTA_SIGNING_URL)}
 								className="mt-2 inline-flex items-center gap-1 text-xs font-medium text-[var(--accent)] hover:underline"
 							>
 								{t("onboarding.updates_more")}

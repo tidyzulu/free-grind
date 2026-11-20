@@ -218,6 +218,8 @@ const preferencesSchema = z.object({
 	// What the grid double tap does while enabled: send the tap above or open the chat.
 	doubleTapAction: z.enum(["tap", "chat"]).default("tap"),
 	showGridTapStatus: z.boolean().default(true),
+	// Cruising spots (Free Grind server) on the grid and Right Now maps.
+	showCruisingSpots: z.boolean().default(true),
 	// Grid tiles of profiles hiding their distance show the estimated distance next to the icon; off: icon only.
 	showEstimatedDistance: z.boolean().default(true),
 	// Profile and chat status lines read "Online (12m left)"; off: just "Online".
@@ -289,6 +291,7 @@ type PreferencesAction =
 	| { type: "SET_DOUBLE_TAP_TAP_TYPE"; payload: number | null }
 	| { type: "SET_DOUBLE_TAP_ACTION"; payload: DoubleTapAction }
 	| { type: "SET_SHOW_GRID_TAP_STATUS"; payload: boolean }
+	| { type: "SET_SHOW_CRUISING_SPOTS"; payload: boolean }
 	| { type: "SET_SHOW_ESTIMATED_DISTANCE"; payload: boolean }
 	| { type: "SET_SHOW_ONLINE_TIME_LEFT"; payload: boolean }
 	| { type: "SET_SHOW_LAST_ONLINE"; payload: boolean }
@@ -394,6 +397,8 @@ function preferencesReducer(
 			return { ...state, doubleTapAction: action.payload };
 		case "SET_SHOW_GRID_TAP_STATUS":
 			return { ...state, showGridTapStatus: action.payload };
+		case "SET_SHOW_CRUISING_SPOTS":
+			return { ...state, showCruisingSpots: action.payload };
 		case "SET_SHOW_ESTIMATED_DISTANCE":
 			return { ...state, showEstimatedDistance: action.payload };
 		case "SET_SHOW_ONLINE_TIME_LEFT":
@@ -586,6 +591,7 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
 		doubleTapTapType: 1,
 		doubleTapAction: "tap",
 		showGridTapStatus: true,
+		showCruisingSpots: true,
 		showEstimatedDistance: true,
 		showOnlineTimeLeft: true,
 		showLastOnline: true,
@@ -664,6 +670,7 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
 					dispatch({ type: "SET_DOUBLE_TAP_TAP_TYPE", payload: parsed.doubleTapTapType });
 					dispatch({ type: "SET_DOUBLE_TAP_ACTION", payload: parsed.doubleTapAction });
 					dispatch({ type: "SET_SHOW_GRID_TAP_STATUS", payload: parsed.showGridTapStatus });
+					dispatch({ type: "SET_SHOW_CRUISING_SPOTS", payload: parsed.showCruisingSpots });
 					dispatch({ type: "SET_SHOW_ESTIMATED_DISTANCE", payload: parsed.showEstimatedDistance });
 					dispatch({ type: "SET_SHOW_ONLINE_TIME_LEFT", payload: parsed.showOnlineTimeLeft });
 					dispatch({ type: "SET_SHOW_LAST_ONLINE", payload: parsed.showLastOnline });
@@ -808,6 +815,7 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
 				doubleTapTapType: currentState.doubleTapTapType,
 				doubleTapAction: currentState.doubleTapAction,
 				showGridTapStatus: currentState.showGridTapStatus,
+				showCruisingSpots: currentState.showCruisingSpots,
 				showEstimatedDistance: currentState.showEstimatedDistance,
 				showOnlineTimeLeft: currentState.showOnlineTimeLeft,
 				showLastOnline: currentState.showLastOnline,
@@ -949,6 +957,9 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
 			if (newValues.showGridTapStatus !== undefined) {
 				dispatch({ type: "SET_SHOW_GRID_TAP_STATUS", payload: newValues.showGridTapStatus });
 			}
+			if (newValues.showCruisingSpots !== undefined) {
+				dispatch({ type: "SET_SHOW_CRUISING_SPOTS", payload: newValues.showCruisingSpots });
+			}
 			if (newValues.showEstimatedDistance !== undefined) {
 				dispatch({ type: "SET_SHOW_ESTIMATED_DISTANCE", payload: newValues.showEstimatedDistance });
 			}
@@ -1081,6 +1092,7 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
 					doubleTapTapType: preferences.doubleTapTapType,
 					doubleTapAction: preferences.doubleTapAction,
 					showGridTapStatus: preferences.showGridTapStatus,
+					showCruisingSpots: preferences.showCruisingSpots,
 					showEstimatedDistance: preferences.showEstimatedDistance,
 					showOnlineTimeLeft: preferences.showOnlineTimeLeft,
 					showLastOnline: preferences.showLastOnline,
@@ -1140,6 +1152,7 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
 		doubleTapTapType: state.doubleTapTapType,
 		doubleTapAction: state.doubleTapAction,
 		showGridTapStatus: state.showGridTapStatus,
+		showCruisingSpots: state.showCruisingSpots,
 		showEstimatedDistance: state.showEstimatedDistance,
 		showOnlineTimeLeft: state.showOnlineTimeLeft,
 		showLastOnline: state.showLastOnline,

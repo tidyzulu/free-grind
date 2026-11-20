@@ -9,6 +9,9 @@ import { MAP_STYLE_DARK, applyRightNowMapTheme, relaxRoadZoomThresholds } from "
 import { formatDistance } from "../gridpage/utils";
 import { proxyMediaUrl } from "../../../utils/mediaProxy";
 import { setCrashContext } from "../../../utils/crashContext";
+import type { BrowseCard } from "../../../types/grid";
+import type { CruisingSpot } from "../../../services/api/cruisingMethods";
+import { useMapSelfAndSpots } from "../gridpage/cruising/useMapSelfAndSpots";
 
 export type RightNowMapItem = RightNowFeedItem & { lat: number; lon: number };
 
@@ -36,6 +39,18 @@ type Props = {
 	leftInset?: number;
 	/** Receives "frame all markers" so the page header can offer it as a pill. */
 	recenterRef?: MutableRefObject<(() => void) | null>;
+	/** The own profile (Free Grind: at the point others see it, with the anchor at the real position). */
+	selfCard?: BrowseCard | null;
+	selfMapPosition?: { lat: number; lon: number } | null;
+	selfFuzzRadiusMeters?: number | null;
+	onSelectSelf?: () => void;
+	/** Cruising spots (Free Grind server), as on the grid map. */
+	spots?: CruisingSpot[];
+	selectedSpotId?: string | null;
+	checkedInSpotId?: string | null;
+	onSelectSpot?: (spotId: string) => void;
+	/** The visual map center after every move (and once loaded). */
+	onCenterChange?: (center: { lat: number; lon: number }) => void;
 };
 
 // Space kept free around the markers when framing, besides the header on top:
@@ -106,7 +121,8 @@ const FRESH_MS = 5 * 60_000;
 /** Below this share of the session left, the ring blinks. */
 const LOW_FRACTION = 0.15;
 /** Zoom level from which every marker shows its name plate. */
-const NAMEPLATE_ZOOM = 13;
+/** Name plates for everyone from street level on (same as the grid map). */
+const NAMEPLATE_ZOOM = 16;
 /** Stagger between markers popping in, capped so large feeds don't drag. */
 const POP_STAGGER_MS = 45;
 const POP_STAGGER_MAX_MS = 600;
@@ -301,18 +317,6 @@ function hotspotData(items: RightNowMapItem[]) {
 	};
 }
 
-// The viewer's own position: a dot with pulsing radar rings and a "You" tag.
-function buildRadarElement(label: string): HTMLDivElement {
-	const el = document.createElement("div");
-	el.className = "rn-radar";
-	el.innerHTML = `<div class="rn-radar-ring"></div><div class="rn-radar-ring"></div><div class="rn-radar-ring"></div><div class="rn-radar-dot"></div>`;
-	const tag = document.createElement("div");
-	tag.className = "rn-radar-label";
-	tag.textContent = label;
-	el.appendChild(tag);
-	return el;
-}
-
 // Rebuilding a marker is only needed when something it renders changed (the
 // ring is updated in place, see updateMarkerRing).
 function markerSignature(item: RightNowMapItem, label: string, photoFilter: MarkerPhotoFilter): string {
@@ -320,7 +324,26 @@ function markerSignature(item: RightNowMapItem, label: string, photoFilter: Mark
 	return [item.lat, item.lon, photo?.url ?? "", photo?.blur ?? false, item.hosting, isOnline(item), label].join("|");
 }
 
-export function RightNowMap({ items, selectedKey, onSelectKey, fitKey, topInset, leftInset = 0, recenterRef }: Props) {
+const NO_SPOTS: CruisingSpot[] = [];
+
+export function RightNowMap({
+	items,
+	selectedKey,
+	onSelectKey,
+	fitKey,
+	topInset,
+	leftInset = 0,
+	recenterRef,
+	selfCard = null,
+	selfMapPosition = null,
+	selfFuzzRadiusMeters = null,
+	onSelectSelf,
+	spots = NO_SPOTS,
+	selectedSpotId = null,
+	checkedInSpotId = null,
+	onSelectSpot,
+	onCenterChange,
+}: Props) {
 	const { t } = useTranslation();
 	const { geohash, unitsPreset } = usePreferences();
 	const { rightNow: blurRightNowMedia } = useMediaBlur();
@@ -336,7 +359,6 @@ export function RightNowMap({ items, selectedKey, onSelectKey, fitKey, topInset,
 		const distance = item.distanceMeters != null ? formatDistance(item.distanceMeters, t, unitsPreset) : null;
 		return distance ? `${name} · ${distance}` : name;
 	};
-	const radarRef = useRef<any>(null);
 	// Cluster markers currently on the map, keyed by their sorted member keys
 	// so an unchanged group keeps its marker (and doesn't pop in again).
 	const clustersRef = useRef(new Map<string, any>());
@@ -354,6 +376,14 @@ export function RightNowMap({ items, selectedKey, onSelectKey, fitKey, topInset,
 	leftInsetRef.current = leftInset;
 	const onSelectKeyRef = useRef(onSelectKey);
 	onSelectKeyRef.current = onSelectKey;
+	const onCenterChangeRef = useRef(onCenterChange);
+	onCenterChangeRef.current = onCenterChange;
+	// The own profile (with its anchor) and the cruising spots, shared with the grid map.
+	const extras = useMapSelfAndSpots(mapRef, maplibreRef, { selfCard, selfMapPosition, selfFuzzRadiusMeters, onSelectSelf, spots, checkedInSpotId, onSelectSpot });
+	const extrasRef = useRef(extras);
+	extrasRef.current = extras;
+	const selectedSpotIdRef = useRef(selectedSpotId);
+	selectedSpotIdRef.current = selectedSpotId;
 	// fitKey the map was last framed for; null until the first markers arrive.
 	const fittedForRef = useRef<string | null>(null);
 
@@ -441,7 +471,7 @@ export function RightNowMap({ items, selectedKey, onSelectKey, fitKey, topInset,
 	}, []);
 
 	const applySelection = useCallback((key: string | null) => {
-		let hasSelection = false;
+		let hasSelection = extrasRef.current.markSelection(selectedSpotIdRef.current, false);
 		for (const [markerKey, entry] of markersRef.current) {
 			const element: HTMLElement = entry.marker.getElement();
 			const isSelected = markerKey === key;
@@ -591,26 +621,6 @@ export function RightNowMap({ items, selectedKey, onSelectKey, fitKey, topInset,
 		return () => clearInterval(timer);
 	}, []);
 
-	// The viewer's own position, radar style.
-	const syncRadar = useCallback(() => {
-		const map = mapRef.current;
-		const maplibregl = maplibreRef.current;
-		const center = fallbackCenterRef.current;
-		if (!map || !maplibregl) return;
-		if (!center) {
-			radarRef.current?.remove();
-			radarRef.current = null;
-			return;
-		}
-		if (radarRef.current) {
-			radarRef.current.setLngLat(center);
-			return;
-		}
-		const element = buildRadarElement(t("right_now.map_you", { defaultValue: "You" }));
-		element.style.zIndex = "0";
-		radarRef.current = new maplibregl.Marker({ element, anchor: "center" }).setLngLat(center).addTo(map);
-	}, [t]);
-
 	useEffect(() => {
 		let mounted = true;
 		const container = containerRef.current;
@@ -643,8 +653,9 @@ export function RightNowMap({ items, selectedKey, onSelectKey, fitKey, topInset,
 					relaxRoadZoomThresholds(map);
 					const [r, g, b] = rightNowRgb();
 					applyRightNowMapTheme(map, `#${[r, g, b].map((v) => v.toString(16).padStart(2, "0")).join("")}`);
-					// setStyle drops custom sources/layers, so re-add the hotspots.
+					// setStyle drops custom sources/layers, so re-add the hotspots and the leash.
 					syncHotspots();
+					extrasRef.current.syncAnchor();
 				});
 				// Regroup while the map moves, not only when it stops — otherwise
 				// tapping a group shows nothing until the whole zoom animation has
@@ -658,6 +669,13 @@ export function RightNowMap({ items, selectedKey, onSelectKey, fitKey, topInset,
 					recluster();
 				});
 				map.on("moveend", recluster);
+				const reportCenter = () => {
+					const center = map.getCenter();
+					onCenterChangeRef.current?.({ lat: center.lat, lon: center.lng });
+				};
+				map.on("moveend", reportCenter);
+				map.once("load", reportCenter);
+				map.on("load", () => extrasRef.current.syncAnchor());
 				map.on("click", () => onSelectKeyRef.current(null));
 				// Name plates for everyone once zoomed in close enough.
 				const updateZoomClass = () =>
@@ -667,8 +685,8 @@ export function RightNowMap({ items, selectedKey, onSelectKey, fitKey, topInset,
 				mapRef.current = map;
 				setCrashContext("rightNowMap", `open, pixelRatio ${map.getPixelRatio()}`);
 
-				// Radar first, so the post markers stack above it.
-				syncRadar();
+				// Own profile and spots first, so the post markers stack above them.
+				extrasRef.current.sync();
 				syncMarkers();
 				recluster();
 				if (itemsRef.current.length > 0) {
@@ -694,8 +712,7 @@ export function RightNowMap({ items, selectedKey, onSelectKey, fitKey, topInset,
 			resizeObserver?.disconnect();
 			for (const entry of markers.values()) entry.marker.remove();
 			markers.clear();
-			radarRef.current?.remove();
-			radarRef.current = null;
+			extrasRef.current.teardown();
 			for (const marker of clustersRef.current.values()) marker.remove();
 			clustersRef.current.clear();
 			mapRef.current?.remove();
@@ -711,13 +728,12 @@ export function RightNowMap({ items, selectedKey, onSelectKey, fitKey, topInset,
 	// sit on the old area while the new feed loads (or if it comes back empty).
 	const lastCenterRef = useRef(fallbackCenter);
 	useEffect(() => {
-		syncRadar();
 		const previous = lastCenterRef.current;
 		lastCenterRef.current = fallbackCenter;
 		if (!fallbackCenter || !previous) return;
 		if (previous[0] === fallbackCenter[0] && previous[1] === fallbackCenter[1]) return;
 		mapRef.current?.jumpTo({ center: fallbackCenter, zoom: 12 });
-	}, [fallbackCenter, syncRadar]);
+	}, [fallbackCenter]);
 
 	useEffect(() => {
 		syncMarkers();
@@ -733,11 +749,12 @@ export function RightNowMap({ items, selectedKey, onSelectKey, fitKey, topInset,
 		}
 		// filterKey isn't read here: it reruns the syncs so marker photos follow the NSFW settings.
 		// eslint-disable-next-line react-hooks/exhaustive-deps
-	}, [items, fitKey, selectedKey, syncMarkers, applySelection, recluster, syncHotspots, fitToItems, filterKey]);
+	}, [items, fitKey, selectedKey, selectedSpotId, extras.spotHosts, syncMarkers, applySelection, recluster, syncHotspots, fitToItems, filterKey]);
 
 	return (
 		<div className="relative h-full w-full">
 			<div ref={containerRef} className="absolute inset-0" style={{ isolation: "isolate" }} />
+			{extras.portals}
 		</div>
 	);
 }

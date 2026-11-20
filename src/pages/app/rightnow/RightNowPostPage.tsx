@@ -17,7 +17,9 @@ import { sanitizeUploadFile } from "../../../services/uploadSanitize";
 import { useApiFunctions } from "../../../hooks/useApiFunctions";
 import {
 	NoFreeRightNowPostsError,
+	RightNowDiscreetNotAllowedError,
 	RightNowDiscreetSetupError,
+	RightNowLocationMissingError,
 	RightNowPostAlreadyRunningError,
 	RightNowSessionEndedError,
 	type RightNowCreatePostRequest,
@@ -34,10 +36,12 @@ import type { SelectSheetOption } from "../../../components/ui/select-sheet";
 import { ManagedOptionsPickerDialog } from "../profile-editor/ManagedOptionsPickerDialog";
 import { useFeatureFlag } from "../../../services/assignmentsStore";
 import { formatDistance } from "../gridpage/utils";
+import { RIGHT_NOW_ACTIVE_POST_KEY } from "../../../hooks/queries/useRightNowQueries";
 import {
 	RIGHT_NOW_LOCATION_RADIUS_MAX,
 	RIGHT_NOW_SHARED_FIELDS,
 	approximateRightNowRadiusMeters,
+	runningRightNowSession,
 	type RightNowShareLocation,
 	type RightNowSharedField,
 } from "../../../types/right-now";
@@ -139,6 +143,12 @@ function RightNowPostSheetContent({ onPost }: Pick<RightNowPostPageProps, "onPos
 				} else {
 					const response = await apiFunctions.getActiveRightNowPost();
 					post = response.post;
+				}
+				// Ended or expired meanwhile (e.g. on another device): nothing to edit.
+				if (!post || (!rightNowTestMode && !runningRightNowSession(post))) {
+					await setPreferences({ activeRightNowId: null, activeRightNowExpiresAt: null, activeRightNowHidden: false });
+					void queryClient.invalidateQueries({ queryKey: RIGHT_NOW_ACTIVE_POST_KEY });
+					return;
 				}
 
 				setText(post.activeText || "");
@@ -359,6 +369,7 @@ function RightNowPostSheetContent({ onPost }: Pick<RightNowPostPageProps, "onPos
 					sharedFields: isDiscreet ? sharedFields : loaded?.sharedFields ?? [],
 				};
 				await setPreferences({ activeRightNowHidden: isHidden });
+				void queryClient.invalidateQueries({ queryKey: RIGHT_NOW_ACTIVE_POST_KEY });
 			} else {
 				const createPayload: RightNowCreatePostRequest = {
 					text: text.trim(),
@@ -398,6 +409,7 @@ function RightNowPostSheetContent({ onPost }: Pick<RightNowPostPageProps, "onPos
 					});
 					// The count depends on the area and refills over time: ask the server again.
 					void queryClient.invalidateQueries({ queryKey: ["entitlements"] });
+					void queryClient.invalidateQueries({ queryKey: RIGHT_NOW_ACTIVE_POST_KEY });
 				}
 			}
 
@@ -423,16 +435,28 @@ function RightNowPostSheetContent({ onPost }: Pick<RightNowPostPageProps, "onPos
 					rightNowRemaining: isUnlimited ? rightNowRemaining : Math.max(0, rightNowRemaining - 1),
 				});
 				void queryClient.invalidateQueries({ queryKey: ["entitlements"] });
-				toast.error(t("right_now.error_discreet_setup", {
-					defaultValue: "Your post was created but kept hidden, because it couldn't be made discreet. Edit it to try again.",
-				}));
+				toast.error(
+					error.reason instanceof RightNowDiscreetNotAllowedError
+						? t("right_now.error_discreet_not_allowed_created", {
+								defaultValue: "Your post was created but kept hidden: discreet posts aren't available for your account. Edit it to post it normally.",
+							})
+						: t("right_now.error_discreet_setup", {
+								defaultValue: "Your post was created but kept hidden, because it couldn't be made discreet. Edit it to try again.",
+							}),
+				);
 				handleClose();
+			} else if (error instanceof RightNowDiscreetNotAllowedError) {
+				toast.error(t("right_now.discreet_not_allowed", { defaultValue: "Discreet posts aren't available for your account" }));
+			} else if (error instanceof RightNowLocationMissingError) {
+				toast.error(t("right_now.error_location_missing", { defaultValue: "Right Now needs your location. Allow location access and try again." }));
 			} else if (error instanceof NoFreeRightNowPostsError) {
 				await setPreferences({ rightNowRemaining: 0 });
 				toast.error(t("right_now.limit_reached_desc"));
 			} else if (error instanceof RightNowPostAlreadyRunningError) {
 				toast.error(t("right_now.error_already_running", { defaultValue: "You already have a Right Now session running." }));
 				void queryClient.invalidateQueries({ queryKey: ["rightnow", "feed"] });
+				// Probably started on another device: pick it up as our session.
+				void queryClient.invalidateQueries({ queryKey: RIGHT_NOW_ACTIVE_POST_KEY });
 			} else if (error instanceof RightNowSessionEndedError) {
 				await setPreferences({ activeRightNowId: null, activeRightNowExpiresAt: null, activeRightNowHidden: false });
 				toast.error(t("right_now.session_expired"), { id: "right-now-expired" });

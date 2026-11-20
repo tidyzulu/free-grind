@@ -24,4 +24,6 @@ export interface ChatRealtimeManagerOptions {
 	/** The Rust bridge fell behind and discarded events. */
 	onEventsDropped?: () => void;
 	onParseError?: (raw: unknown, error: unknown) => void;
+	/** Own profile id: tells a group send's message_sent echo from other members' messages. */
+	getOwnProfileId?: () => number | string | null;
 }

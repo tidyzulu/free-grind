@@ -5,7 +5,8 @@ node_modules
 /.svelte-kit
 /package
 .env
-.env.*
+.env.prod
+.env.local
 !.env.example
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
@@ -30,3 +31,6 @@ yarn.lock
 # Release builds (ci/build/run.sh)
 /out
 /.bun-cache
+
+# Former local checkout of the server (now its own repository); never track it here
+/server

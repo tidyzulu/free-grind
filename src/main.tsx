@@ -1,4 +1,3 @@
-import { loadServerConfig } from "./services/serverConfig";
 import React from "react";
 import ReactDOM from "react-dom/client";
 import { BrowserRouter } from "react-router-dom";
@@ -23,6 +22,7 @@ import { installAppLocaleSync } from "./services/appLocaleBridge";
 import { applySystemLanguage } from "./services/systemLanguage";
 import { installApiLocaleSync } from "./services/apiLocale";
 import { installDocumentDirectionSync } from "./services/documentDirection";
+import { installScreenCaptureProtection } from "./services/screenCaptureProtection";
 import "./index.css";
 
 installGlobalCrashHandlers();
@@ -61,11 +61,8 @@ void (async () => {
 		}
 
 		if (isTauri()) {
-			// Media URLs and the paywall bypass depend on the backend (official
-			// or self-hosted): know it before the first render.
-			await loadServerConfig().catch((err) => {
-				appLog.warn("[server] failed to load server config:", err);
-			});
+			// Before the first render, so no frame reaches a capture unprotected.
+			installScreenCaptureProtection();
 			void initChatContactIndex().catch((err) => {
 				appLog.warn("[chat-index] failed to initialize:", err);
 			});

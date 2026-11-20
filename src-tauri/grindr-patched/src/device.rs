@@ -499,9 +499,14 @@ pub struct DeviceInfo {
 }
 
 impl DeviceInfo {
+	/// A random, believable Android device (see [`Self::imitated`]).
+	pub fn generate() -> Self {
+		Self::imitated()
+	}
+
 	/// Builds a random device: a real hardware profile, an Android version that
 	/// fits it, and a safe timezone.
-	pub fn generate() -> Self {
+	fn imitated() -> Self {
 		let profile =
 			&DEVICE_PROFILES[rand::random_range(0..DEVICE_PROFILES.len())];
 		let timezone =

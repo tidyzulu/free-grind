@@ -5,15 +5,11 @@ import android.os.Build
 import java.io.File
 
 class FreeGrindApplication : Application() {
-    // The reCAPTCHA SDK keys its tokens to the app's package name, so the
-    // ":recaptcha" process (RecaptchaMintActivity) poses as Grindr, as the
-    // former standalone helper app did. Every other process keeps ours.
-    private val isRecaptchaProcess by lazy {
-        currentProcessName()?.endsWith(RecaptchaMintActivity.PROCESS_SUFFIX) == true
-    }
+    // The ":recaptcha" process reports Grindr's package name (see
+    // GrindrNative); every other process keeps ours.
+    private val packageNameOverride by lazy { GrindrNative.packageNameFor(currentProcessName()) }
 
-    override fun getPackageName(): String =
-        if (isRecaptchaProcess) RecaptchaMintActivity.GRINDR_PACKAGE else super.getPackageName()
+    override fun getPackageName(): String = packageNameOverride ?: super.getPackageName()
 
     override fun onCreate() {
         super.onCreate()

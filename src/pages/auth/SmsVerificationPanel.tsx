@@ -107,7 +107,7 @@ export function SmsVerificationPanel({
 			const report = await callMethod("sms_debug_report");
 			await navigator.clipboard.writeText(
 				[
-					"Free Grind SMS verification report",
+					`${__APP_NAME__} SMS verification report`,
 					`App: ${import.meta.env.VITE_APP_VERSION} (${currentPlatform()})`,
 					"",
 					"== Refused sign-in ==",

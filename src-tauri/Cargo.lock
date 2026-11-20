@@ -1688,7 +1688,7 @@ dependencies = [
 
 [[package]]
 name = "free-grind"
-version = "1.0.0-beta.48"
+version = "1.0.0"
 dependencies = [
  "android-native-keyring-store",
  "apple-native-keyring-store",
@@ -2122,7 +2122,7 @@ dependencies = [
 
 [[package]]
 name = "grindr"
-version = "0.32.1+26.22.0.192710"
+version = "0.34.0+26.24.0.195444"
 dependencies = [
  "base64 0.22.1",
  "bytes",
